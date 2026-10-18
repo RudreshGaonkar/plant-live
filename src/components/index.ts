@@ -4,4 +4,7 @@ export * from './StatusChip';
 export * from './LocationCard';
 export * from './Plant3D';
 export * from './Plant3DPlaceholder';
+export * from './DeviceQRScanner';
+export * from './CalibrationWizard';
+
 
