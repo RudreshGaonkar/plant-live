@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -12,14 +12,14 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice } from '@/store/useLiveDevice';
 import { usePlantState } from '@/hooks/usePlantState';
-import { MetricTile, BottleGauge, Plant3DHero } from '@/components';
+import { MetricTile, BottleGauge, Plant3DHero, WaterNowSheet } from '@/components';
 
 export default function HomeScreen() {
   const { colors, radii, spacing } = useAppTheme();
   const { device, health, isWatering, secondsLeft } = usePlantState();
-  const triggerWaterNow = useLiveDevice((s) => s.triggerWaterNow);
   const toggleMode = useLiveDevice((s) => s.toggleMode);
   const refillBottle = useLiveDevice((s) => s.refillBottle);
+  const [isWaterSheetOpen, setIsWaterSheetOpen] = useState(false);
 
   if (!device) {
     return (
@@ -132,7 +132,7 @@ export default function HomeScreen() {
         <View style={styles.quickActionsRow}>
           <TouchableOpacity
             activeOpacity={0.8}
-            onPress={() => triggerWaterNow(config.thresholds.pumpDurationSec)}
+            onPress={() => setIsWaterSheetOpen(true)}
             disabled={isWatering}
             style={[
               styles.primaryActionBtn,
@@ -251,6 +251,12 @@ export default function HomeScreen() {
           />
         </View>
       </ScrollView>
+
+      {/* Manual Water Now Sheet */}
+      <WaterNowSheet
+        visible={isWaterSheetOpen}
+        onClose={() => setIsWaterSheetOpen(false)}
+      />
     </SafeAreaView>
   );
 }

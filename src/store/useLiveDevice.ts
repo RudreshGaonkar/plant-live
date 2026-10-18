@@ -51,6 +51,8 @@ export interface DeviceStatus {
   firmware: string;
 }
 
+export type DeviceCommandAckStatus = 'received' | 'running' | 'done' | 'rejected';
+
 export interface DeviceCommand {
   id: string;
   type: 'waterNow' | 'calibrateDry' | 'calibrateWet' | 'refilled';
@@ -58,7 +60,7 @@ export interface DeviceCommand {
   requestedAt: number;
   ack?: {
     id: string;
-    status: 'received' | 'running' | 'done' | 'rejected';
+    status: DeviceCommandAckStatus;
     reason?: string;
     ts: number;
   };
