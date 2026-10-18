@@ -9,22 +9,30 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { router } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice } from '@/store/useLiveDevice';
+import { useSession } from '@/store/useSession';
+import { simulatedDevice } from '@/services/simulator';
 import { LocationCard } from '@/components/LocationCard';
 
 export default function SettingsScreen() {
   const { colors, radii, spacing } = useAppTheme();
+  const { user, isDemoMode, signOut } = useSession();
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
   const updateLocation = useLiveDevice((s) => s.updateLocation);
   const updateSensors = useLiveDevice((s) => s.updateSensors);
-  const setOnlineStatus = useLiveDevice((s) => s.setOnlineStatus);
   const refillBottle = useLiveDevice((s) => s.refillBottle);
 
   // Hidden developer panel unlock (5 taps on version label - spec section 7.8)
   const [tapCount, setTapCount] = useState<number>(0);
   const [devPanelOpen, setDevPanelOpen] = useState<boolean>(false);
+
+  // Developer panel override states
+  const [offlineTrigger, setOfflineTrigger] = useState(false);
+  const [bottleEmptyTrigger, setBottleEmptyTrigger] = useState(false);
+  const [heatWaveTrigger, setHeatWaveTrigger] = useState(false);
 
   if (!device) return null;
 
@@ -35,11 +43,25 @@ export default function SettingsScreen() {
     const nextCount = tapCount + 1;
     if (nextCount >= 5) {
       setDevPanelOpen(true);
-      Alert.alert('Developer Mode Active', 'Simulator force overrides are now visible.');
+      Alert.alert('Developer Mode Active', 'Simulator force overrides are now accessible.');
       setTapCount(0);
     } else {
       setTapCount(nextCount);
     }
+  };
+
+  const handleSignOut = async () => {
+    Alert.alert('Sign Out', 'Are you sure you want to exit your session?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Sign Out',
+        style: 'destructive',
+        onPress: async () => {
+          await signOut();
+          router.replace('/(auth)/login');
+        },
+      },
+    ]);
   };
 
   return (
@@ -53,10 +75,67 @@ export default function SettingsScreen() {
           Device hardware, threshold calibration & simulator controls.
         </Text>
 
+        {/* User Account Bar */}
+        <View
+          style={[
+            styles.card,
+            {
+              backgroundColor: colors.surface,
+              borderRadius: radii.card,
+              borderColor: colors.border,
+              padding: spacing.md,
+            },
+          ]}
+        >
+          <View style={styles.accountRow}>
+            <View
+              style={[
+                styles.avatarWrap,
+                {
+                  backgroundColor: isDemoMode ? colors.palette.lime : colors.palette.mist,
+                  borderRadius: radii.full,
+                },
+              ]}
+            >
+              <Ionicons
+                name={isDemoMode ? 'sparkles' : 'person'}
+                size={20}
+                color={colors.palette.forest}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.accountName, { color: colors.text }]}>
+                {user?.displayName || (isDemoMode ? 'Demo Mode User' : 'Authenticated User')}
+              </Text>
+              <Text style={[styles.accountEmail, { color: colors.textMuted }]}>
+                {user?.email || (isDemoMode ? 'Local Simulation (No hardware)' : '')}
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={handleSignOut}
+              style={[
+                styles.logoutBtn,
+                {
+                  backgroundColor: colors.palette.blush,
+                  borderRadius: radii.sm,
+                  borderColor: colors.palette.warningBorder,
+                },
+              ]}
+            >
+              <Ionicons name="log-out-outline" size={14} color={colors.palette.warningText} />
+              <Text style={[styles.logoutBtnText, { color: colors.palette.warningText }]}>
+                {isDemoMode ? 'Exit Demo' : 'Sign Out'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
         {/* Plant Location Profiles */}
         <View style={styles.sectionRow}>
           <View style={[styles.sectionDot, { backgroundColor: colors.palette.forest }]} />
-          <Text style={[styles.sectionHeading, { color: colors.text }]}>Plant Location Profile</Text>
+          <Text style={[styles.sectionHeading, { color: colors.text }]}>
+            Plant Location Profile
+          </Text>
         </View>
         <LocationCard
           location="balcony"
@@ -117,9 +196,17 @@ export default function SettingsScreen() {
             </View>
             <TouchableOpacity
               onPress={refillBottle}
-              style={[styles.smallBtn, { backgroundColor: colors.palette.lime, borderRadius: radii.sm }]}
+              style={[
+                styles.smallBtn,
+                { backgroundColor: colors.palette.lime, borderRadius: radii.sm },
+              ]}
             >
-              <Ionicons name="refresh-outline" size={12} color={colors.palette.ink} style={{ marginRight: 4 }} />
+              <Ionicons
+                name="refresh-outline"
+                size={12}
+                color={colors.palette.ink}
+                style={{ marginRight: 4 }}
+              />
               <Text style={[styles.smallBtnText, { color: colors.palette.ink }]}>Refill</Text>
             </TouchableOpacity>
           </View>
@@ -144,8 +231,15 @@ export default function SettingsScreen() {
 
           <View style={styles.infoLine}>
             <Text style={[styles.infoKey, { color: colors.textMuted }]}>Device ID</Text>
-            <View style={[styles.infoValueWrap, { backgroundColor: colors.palette.mist, borderRadius: radii.sm }]}>
-              <Text style={[styles.infoValMono, { color: colors.palette.forest }]}>{device.id}</Text>
+            <View
+              style={[
+                styles.infoValueWrap,
+                { backgroundColor: colors.palette.mist, borderRadius: radii.sm },
+              ]}
+            >
+              <Text style={[styles.infoValMono, { color: colors.palette.forest }]}>
+                {device.id}
+              </Text>
             </View>
           </View>
           <View style={styles.infoLine}>
@@ -155,14 +249,31 @@ export default function SettingsScreen() {
           <View style={styles.infoLine}>
             <Text style={[styles.infoKey, { color: colors.textMuted }]}>Wi-Fi Signal (RSSI)</Text>
             <View style={styles.rssiRow}>
-              <Ionicons name="wifi" size={14} color={colors.palette.forest} style={{ marginRight: 4 }} />
-              <Text style={[styles.infoVal, { color: colors.text }]}>{device.telemetry.rssi} dBm</Text>
+              <Ionicons
+                name="wifi"
+                size={14}
+                color={colors.palette.forest}
+                style={{ marginRight: 4 }}
+              />
+              <Text style={[styles.infoVal, { color: colors.text }]}>
+                {device.telemetry.rssi} dBm
+              </Text>
             </View>
           </View>
           <View style={styles.infoLine}>
             <Text style={[styles.infoKey, { color: colors.textMuted }]}>Mesh Hub Topology</Text>
-            <View style={[styles.meshBadge, { backgroundColor: colors.palette.lime, borderRadius: radii.sm }]}>
-              <Ionicons name="git-network-outline" size={12} color={colors.palette.forest} style={{ marginRight: 4 }} />
+            <View
+              style={[
+                styles.meshBadge,
+                { backgroundColor: colors.palette.lime, borderRadius: radii.sm },
+              ]}
+            >
+              <Ionicons
+                name="git-network-outline"
+                size={12}
+                color={colors.palette.forest}
+                style={{ marginRight: 4 }}
+              />
               <Text style={[styles.meshBadgeText, { color: colors.palette.forest }]}>
                 Hub-ready
               </Text>
@@ -176,7 +287,7 @@ export default function SettingsScreen() {
             style={[
               styles.card,
               {
-                backgroundColor: 'rgba(248, 215, 218, 0.3)',
+                backgroundColor: 'rgba(248, 215, 218, 0.35)',
                 borderRadius: radii.card,
                 borderColor: colors.palette.blush,
                 padding: spacing.md,
@@ -186,48 +297,211 @@ export default function SettingsScreen() {
             <View style={styles.cardTitleRow}>
               <Ionicons name="construct-outline" size={18} color={colors.palette.warningText} />
               <Text style={[styles.cardTitle, { color: colors.palette.warningText }]}>
-                Hardware Simulator Tools
+                Hardware Simulator Developer Panel
               </Text>
             </View>
-            <Text style={[styles.settingDesc, { color: colors.textMuted, marginBottom: 12 }]}>
-              Trigger live hardware events for testing without physical ESP8266:
+            <Text style={[styles.settingDesc, { color: colors.textMuted, marginBottom: 14 }]}>
+              Control simulation curves, force threshold breaches, and test offline status:
             </Text>
 
-            <View style={styles.devBtnRow}>
+            {/* Force Toggles */}
+            <View style={styles.devGrid}>
               <TouchableOpacity
-                onPress={() => setOnlineStatus(!status.online)}
-                style={[styles.devBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.sm }]}
+                onPress={() => {
+                  const nextState = !offlineTrigger;
+                  setOfflineTrigger(nextState);
+                  simulatedDevice.overrides.forceOffline = nextState;
+                  if (!nextState) {
+                    useLiveDevice.getState().setOnlineStatus(true);
+                  }
+                }}
+                style={[
+                  styles.devToggleCard,
+                  {
+                    backgroundColor: offlineTrigger
+                      ? colors.palette.forest
+                      : colors.surface,
+                    borderColor: colors.border,
+                    borderRadius: radii.sm,
+                  },
+                ]}
               >
-                <Ionicons name="wifi-outline" size={14} color={colors.palette.white} style={{ marginRight: 4 }} />
-                <Text style={styles.devBtnText}>
-                  Toggle {status.online ? 'Offline' : 'Online'}
+                <Ionicons
+                  name={offlineTrigger ? 'cloud-offline' : 'cloud-done-outline'}
+                  size={16}
+                  color={offlineTrigger ? colors.palette.white : colors.palette.forest}
+                />
+                <Text
+                  style={[
+                    styles.devToggleText,
+                    { color: offlineTrigger ? colors.palette.white : colors.text },
+                  ]}
+                >
+                  {offlineTrigger ? 'Device Offline' : 'Device Online'}
                 </Text>
               </TouchableOpacity>
 
               <TouchableOpacity
                 onPress={() => {
-                  useLiveDevice.getState().updateTelemetry({ soilMoisture: 18 });
-                  Alert.alert('Simulated', 'Moisture forced to 18% (Thirsty state)');
+                  const nextState = !bottleEmptyTrigger;
+                  setBottleEmptyTrigger(nextState);
+                  simulatedDevice.overrides.bottleEmptyTrigger = nextState;
                 }}
-                style={[styles.devBtn, { backgroundColor: colors.palette.warningBorder, borderRadius: radii.sm }]}
+                style={[
+                  styles.devToggleCard,
+                  {
+                    backgroundColor: bottleEmptyTrigger
+                      ? colors.palette.warningBorder
+                      : colors.surface,
+                    borderColor: colors.border,
+                    borderRadius: radii.sm,
+                  },
+                ]}
               >
-                <Ionicons name="water-outline" size={14} color={colors.palette.white} style={{ marginRight: 4 }} />
-                <Text style={styles.devBtnText}>Force Thirsty</Text>
+                <Ionicons
+                  name="beaker-outline"
+                  size={16}
+                  color={bottleEmptyTrigger ? colors.palette.white : colors.palette.warningText}
+                />
+                <Text
+                  style={[
+                    styles.devToggleText,
+                    { color: bottleEmptyTrigger ? colors.palette.white : colors.text },
+                  ]}
+                >
+                  {bottleEmptyTrigger ? 'Bottle Empty' : 'Empty Bottle Test'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => {
+                  const nextState = !heatWaveTrigger;
+                  setHeatWaveTrigger(nextState);
+                  simulatedDevice.overrides.heatWaveTrigger = nextState;
+                }}
+                style={[
+                  styles.devToggleCard,
+                  {
+                    backgroundColor: heatWaveTrigger
+                      ? colors.palette.warningBorder
+                      : colors.surface,
+                    borderColor: colors.border,
+                    borderRadius: radii.sm,
+                  },
+                ]}
+              >
+                <Ionicons
+                  name="flame-outline"
+                  size={16}
+                  color={heatWaveTrigger ? colors.palette.white : colors.palette.warningText}
+                />
+                <Text
+                  style={[
+                    styles.devToggleText,
+                    { color: heatWaveTrigger ? colors.palette.white : colors.text },
+                  ]}
+                >
+                  {heatWaveTrigger ? 'Heat Wave (38°C)' : 'Trigger Heat Wave'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Quick Presets for Soil Moisture */}
+            <Text
+              style={[
+                styles.settingLabel,
+                { color: colors.text, marginTop: 12, marginBottom: 8, fontSize: 13 },
+              ]}
+            >
+              Force Plant Health State (Moisture):
+            </Text>
+            <View style={styles.presetRow}>
+              <TouchableOpacity
+                onPress={() => {
+                  simulatedDevice.overrides.forcedMoisture = 18;
+                  useLiveDevice.getState().updateTelemetry({ soilMoisture: 18 });
+                }}
+                style={[
+                  styles.presetBtn,
+                  { backgroundColor: colors.palette.blush, borderRadius: radii.sm },
+                ]}
+              >
+                <Text style={[styles.presetBtnText, { color: colors.palette.warningText }]}>
+                  Thirsty (18%)
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => {
+                  simulatedDevice.overrides.forcedMoisture = 48;
+                  useLiveDevice.getState().updateTelemetry({ soilMoisture: 48 });
+                }}
+                style={[
+                  styles.presetBtn,
+                  { backgroundColor: colors.palette.lime, borderRadius: radii.sm },
+                ]}
+              >
+                <Text style={[styles.presetBtnText, { color: colors.palette.forest }]}>
+                  Healthy (48%)
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => {
+                  simulatedDevice.overrides.forcedMoisture = 85;
+                  useLiveDevice.getState().updateTelemetry({ soilMoisture: 85 });
+                }}
+                style={[
+                  styles.presetBtn,
+                  { backgroundColor: colors.palette.blush, borderRadius: radii.sm },
+                ]}
+              >
+                <Text style={[styles.presetBtnText, { color: colors.palette.warningText }]}>
+                  Overwatered (85%)
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => {
+                  simulatedDevice.overrides.forcedMoisture = null;
+                  simulatedDevice.overrides.forcedTemp = null;
+                  simulatedDevice.overrides.forcedHumidity = null;
+                  simulatedDevice.overrides.forcedBottleRemaining = null;
+                }}
+                style={[
+                  styles.presetBtn,
+                  { backgroundColor: colors.palette.mist, borderRadius: radii.sm },
+                ]}
+              >
+                <Text style={[styles.presetBtnText, { color: colors.palette.ink }]}>Auto</Text>
               </TouchableOpacity>
             </View>
           </View>
         )}
 
         {/* Version Footer */}
-        <TouchableOpacity activeOpacity={0.8} onPress={handleVersionTap} style={styles.versionFooter}>
-          <View style={[styles.versionWrap, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
-            <Ionicons name="leaf-outline" size={16} color={colors.palette.sage} style={{ marginRight: 6 }} />
+        <TouchableOpacity
+          activeOpacity={0.8}
+          onPress={handleVersionTap}
+          style={styles.versionFooter}
+        >
+          <View
+            style={[
+              styles.versionWrap,
+              { backgroundColor: colors.palette.mist, borderRadius: radii.md },
+            ]}
+          >
+            <Ionicons
+              name="leaf-outline"
+              size={16}
+              color={colors.palette.sage}
+              style={{ marginRight: 6 }}
+            />
             <View>
               <Text style={[styles.versionText, { color: colors.textMuted }]}>
                 LeafLink Mobile App v1.0.0 (Expo SDK 57)
               </Text>
               <Text style={[styles.versionHint, { color: colors.palette.sage }]}>
-                {devPanelOpen ? 'Developer mode enabled' : 'Tap 5 times to reveal simulation tools'}
+                {devPanelOpen
+                  ? 'Developer mode enabled'
+                  : 'Tap 5 times to reveal simulation tools'}
               </Text>
             </View>
           </View>
@@ -253,6 +527,37 @@ const styles = StyleSheet.create({
     fontSize: 13,
     marginTop: 2,
     marginBottom: 16,
+  },
+  accountRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  avatarWrap: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  accountName: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  accountEmail: {
+    fontSize: 12,
+    marginTop: 2,
+  },
+  logoutBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+    gap: 4,
+  },
+  logoutBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
   },
   sectionRow: {
     flexDirection: 'row',
@@ -355,21 +660,33 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
-  devBtnRow: {
-    flexDirection: 'row',
+  devGrid: {
     gap: 8,
-    marginTop: 4,
   },
-  devBtn: {
-    flex: 1,
+  devToggleCard: {
     flexDirection: 'row',
-    paddingVertical: 11,
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderWidth: 1,
+    gap: 8,
+  },
+  devToggleText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  presetRow: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  presetBtn: {
+    flex: 1,
+    paddingVertical: 8,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  devBtnText: {
-    color: '#FFF',
-    fontSize: 12,
+  presetBtnText: {
+    fontSize: 11,
     fontWeight: '700',
   },
   versionFooter: {

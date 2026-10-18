@@ -9,4 +9,8 @@ config.resolver.extraNodeModules = {
   buffer: require.resolve('buffer'),
 };
 
+// Allow 3D model formats to be loaded as assets
+config.resolver.assetExts.push('glb', 'gltf', 'obj', 'bin');
+
 module.exports = config;
+

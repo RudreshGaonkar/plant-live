@@ -1,0 +1,51 @@
+{
+  "rules": {
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "owners": {
+      "$deviceId": {
+        ".read": "auth != null",
+        ".write": "auth != null && (!data.exists() || data.val() === auth.uid)"
+      }
+    },
+    "devices": {
+      "$deviceId": {
+        ".read": "auth != null && (root.child('owners').child($deviceId).val() === auth.uid || auth.token.deviceId === $deviceId)",
+        "config": {
+          ".write": "auth != null && root.child('owners').child($deviceId).val() === auth.uid"
+        },
+        "command": {
+          ".write": "auth != null && (root.child('owners').child($deviceId).val() === auth.uid || auth.token.deviceId === $deviceId)"
+        },
+        "telemetry": {
+          ".write": "auth != null && (auth.token.deviceId === $deviceId || root.child('owners').child($deviceId).val() === auth.uid)"
+        },
+        "status": {
+          ".write": "auth != null && (auth.token.deviceId === $deviceId || root.child('owners').child($deviceId).val() === auth.uid)"
+        }
+      }
+    },
+    "history": {
+      "$deviceId": {
+        ".read": "auth != null && (root.child('owners').child($deviceId).val() === auth.uid || auth.token.deviceId === $deviceId)",
+        ".write": "auth != null && (auth.token.deviceId === $deviceId || root.child('owners').child($deviceId).val() === auth.uid)"
+      }
+    },
+    "waterLogs": {
+      "$deviceId": {
+        ".read": "auth != null && (root.child('owners').child($deviceId).val() === auth.uid || auth.token.deviceId === $deviceId)",
+        ".write": "auth != null && (auth.token.deviceId === $deviceId || root.child('owners').child($deviceId).val() === auth.uid)"
+      }
+    },
+    "alerts": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    }
+  }
+}

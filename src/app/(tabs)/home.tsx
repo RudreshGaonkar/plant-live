@@ -12,11 +12,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice } from '@/store/useLiveDevice';
 import { usePlantState } from '@/hooks/usePlantState';
-import {
-  Plant3DPlaceholder,
-  MetricTile,
-  BottleGauge,
-} from '@/components';
+import { MetricTile, BottleGauge, Plant3DHero } from '@/components';
 
 export default function HomeScreen() {
   const { colors, radii, spacing } = useAppTheme();
@@ -120,14 +116,16 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {/* Hero 3D Card */}
-        <Plant3DPlaceholder
+        {/* Hero 3D Plant Card */}
+        <Plant3DHero
           health={health}
           isWatering={isWatering}
           secondsLeft={secondsLeft}
           location={config.location}
+          mode={config.mode}
           plantName={config.plantName}
           plantSpecies={config.plantSpecies}
+          lastSeen={status.lastSeen}
         />
 
         {/* Quick Actions Row */}
