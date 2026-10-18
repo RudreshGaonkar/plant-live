@@ -1,18 +1,42 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
+import { Buffer } from 'buffer';
+import React, { useEffect } from 'react';
+import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
+import { LeafThemeProvider } from '@/theme';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+(globalThis as unknown as { Buffer: typeof Buffer }).Buffer =
+  (globalThis as unknown as { Buffer: typeof Buffer }).Buffer || Buffer;
 
 SplashScreen.preventAutoHideAsync();
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+function RootNavigator() {
+
+  useEffect(() => {
+    SplashScreen.hideAsync();
+  }, []);
+
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
-    </ThemeProvider>
+    <>
+      <StatusBar style="dark" />
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen
+          name="add-device"
+          options={{
+            headerShown: false,
+            presentation: 'modal',
+          }}
+        />
+      </Stack>
+    </>
+  );
+}
+
+export default function RootLayout() {
+  return (
+    <LeafThemeProvider>
+      <RootNavigator />
+    </LeafThemeProvider>
   );
 }
