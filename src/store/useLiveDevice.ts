@@ -100,6 +100,9 @@ export interface LiveDeviceStore {
   updateThresholds: (thresholds: Partial<DeviceConfig['thresholds']>) => void;
   updateSensors: (sensors: Partial<DeviceConfig['sensors']>) => void;
   updateTelemetry: (telemetry: Partial<DeviceTelemetry>) => void;
+  updateConfig: (config: Partial<DeviceConfig>) => void;
+  updateCalibration: (calibration: DeviceConfig['calibration']) => void;
+  removeDevice: (id: string) => void;
   addDevice: (device: DeviceRecord) => void;
   setOnlineStatus: (online: boolean) => void;
 }
@@ -432,6 +435,55 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
           },
         },
       },
+    });
+  },
+
+  updateConfig: (configPartial) => {
+    const { activeDeviceId, devices } = get();
+    const active = devices[activeDeviceId];
+    if (!active) return;
+    set({
+      devices: {
+        ...devices,
+        [activeDeviceId]: {
+          ...active,
+          config: {
+            ...active.config,
+            ...configPartial,
+          },
+        },
+      },
+    });
+  },
+
+  updateCalibration: (calibration) => {
+    const { activeDeviceId, devices } = get();
+    const active = devices[activeDeviceId];
+    if (!active) return;
+    set({
+      devices: {
+        ...devices,
+        [activeDeviceId]: {
+          ...active,
+          config: {
+            ...active.config,
+            calibration,
+          },
+        },
+      },
+    });
+  },
+
+  removeDevice: (id) => {
+    const { devices, activeDeviceId } = get();
+    const newDevices = { ...devices };
+    delete newDevices[id];
+    const remainingKeys = Object.keys(newDevices);
+    set({
+      devices: newDevices,
+      activeDeviceId: remainingKeys.includes(activeDeviceId)
+        ? activeDeviceId
+        : (remainingKeys[0] ?? ''),
     });
   },
 

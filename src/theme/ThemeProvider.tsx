@@ -6,10 +6,20 @@ export interface ThemeRadii {
   md: number;
   lg: number;
   xl: number; // 20px
+  tile: number; // 20dp - bento tile radius (uiLayout §10)
   card: number; // 24px - organic spec requirement
-  hero: number; // 28px
+  hero: number; // 28px - sheet top radius
+  heroCorner: number; // 48dp - asymmetric top-left corner
   island: number; // 32px floating island navbar
   full: number;
+}
+
+export interface ThemeShadow {
+  color: string;
+  offsetY: number;
+  blur: number;
+  opacity: number;
+  elevation: number; // Android
 }
 
 export interface ThemeSpacing {
@@ -43,6 +53,7 @@ export interface AppTheme {
   };
   radii: ThemeRadii;
   spacing: ThemeSpacing;
+  shadow: ThemeShadow;
 }
 
 const radii: ThemeRadii = {
@@ -50,10 +61,20 @@ const radii: ThemeRadii = {
   md: 14,
   lg: 18,
   xl: 20,
+  tile: 20,
   card: 24,
   hero: 28,
+  heroCorner: 48,
   island: 32,
   full: 9999,
+};
+
+const shadow: ThemeShadow = {
+  color: '#1F2A21',
+  offsetY: 8,
+  blur: 24,
+  opacity: 0.08,
+  elevation: 12,
 };
 
 const spacing: ThemeSpacing = {
@@ -87,6 +108,7 @@ export const lightTheme: AppTheme = {
   },
   radii,
   spacing,
+  shadow,
 };
 
 export const darkTheme: AppTheme = {
@@ -111,6 +133,7 @@ export const darkTheme: AppTheme = {
   },
   radii,
   spacing,
+  shadow,
 };
 
 const ThemeContext = createContext<AppTheme>(lightTheme);

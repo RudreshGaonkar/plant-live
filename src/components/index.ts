@@ -7,6 +7,8 @@ export * from './Plant3DPlaceholder';
 export * from './DeviceQRScanner';
 export * from './CalibrationWizard';
 export * from './WaterNowSheet';
+export * from './PlantPassportHeader';
+export * from './SliderControl';
 
 
 

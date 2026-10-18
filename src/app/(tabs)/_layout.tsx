@@ -1,99 +1,62 @@
-import { useAppTheme } from '@/theme';
-import { Tabs } from 'expo-router';
-import { Platform } from 'react-native';
-import Ionicons from '@expo/vector-icons/Ionicons';
+/**
+ * Tab Layout – "The Stage" Architecture
+ * Uses FloatingDock as a custom tab bar with Expo Router Tabs.
+ * uiLayout.md Section 2 & 13
+ */
+import React, { useState } from 'react';
+import { View } from 'react-native';
+import { Tabs, router, useSegments } from 'expo-router';
+import { FloatingDock } from '@/components/FloatingDock';
+import { WaterNowSheet } from '@/components/WaterNowSheet';
 
 export default function TabLayout() {
-  const { colors, radii } = useAppTheme();
+  const segments = useSegments();
+  const [waterSheetVisible, setWaterSheetVisible] = useState(false);
+
+  // Derive active route from segments
+  const activeRoute = segments[segments.length - 1] ?? 'home';
+
+  const handleTabPress = (name: string) => {
+    router.navigate(`/(tabs)/${name}` as Parameters<typeof router.navigate>[0]);
+  };
+
+  const handleWaterDialSelect = (duration: number) => {
+    if (duration === -1) {
+      // Custom → open full water sheet
+      setWaterSheetVisible(true);
+    } else {
+      setWaterSheetVisible(true);
+    }
+  };
 
   return (
-    <Tabs
-      screenOptions={{
-        headerShown: false,
-        tabBarActiveTintColor: colors.palette.forest,
-        tabBarInactiveTintColor: colors.palette.sage,
-        tabBarShowLabel: true,
-        tabBarLabelStyle: {
-          fontSize: 10,
-          fontWeight: '700',
-          marginTop: -2,
-          letterSpacing: 0.2,
-        },
-        tabBarStyle: {
-          position: 'absolute',
-          bottom: Platform.OS === 'ios' ? 26 : 18,
-          left: 20,
-          right: 20,
-          height: 62,
-          borderRadius: radii.island,
-          backgroundColor: colors.palette.white,
-          borderWidth: 1.5,
-          borderColor: colors.palette.lime,
-          paddingBottom: 8,
-          paddingTop: 8,
-          shadowColor: colors.palette.ink,
-          shadowOffset: { width: 0, height: 8 },
-          shadowOpacity: 0.1,
-          shadowRadius: 20,
-          elevation: 12,
-        },
-        tabBarItemStyle: {
-          paddingVertical: 2,
-        },
-      }}
-    >
-      <Tabs.Screen
-        name="home"
-        options={{
-          title: 'Home',
-          tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? 'leaf' : 'leaf-outline'}
-              size={22}
-              color={color}
-            />
-          ),
+    <View style={{ flex: 1 }}>
+      <Tabs
+        screenOptions={{
+          headerShown: false,
+          tabBarStyle: { display: 'none' }, // hide standard tab bar
         }}
+      >
+        <Tabs.Screen name="home" />
+        <Tabs.Screen name="history" />
+        <Tabs.Screen name="alerts" />
+        <Tabs.Screen name="control" />
+        <Tabs.Screen name="settings" />
+      </Tabs>
+
+      {/* Custom floating dock overlays on top of all tabs */}
+      <FloatingDock
+        activeRoute={activeRoute}
+        onTabPress={handleTabPress}
+        onWaterPress={() => setWaterSheetVisible(true)}
+        onWaterDialSelect={handleWaterDialSelect}
       />
-      <Tabs.Screen
-        name="control"
-        options={{
-          title: 'Control',
-          tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? 'water' : 'water-outline'}
-              size={22}
-              color={color}
-            />
-          ),
-        }}
+
+      {/* Global Water Sheet accessible from dock */}
+      <WaterNowSheet
+        visible={waterSheetVisible}
+        onClose={() => setWaterSheetVisible(false)}
       />
-      <Tabs.Screen
-        name="history"
-        options={{
-          title: 'History',
-          tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? 'stats-chart' : 'stats-chart-outline'}
-              size={22}
-              color={color}
-            />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="settings"
-        options={{
-          title: 'Settings',
-          tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? 'settings' : 'settings-outline'}
-              size={22}
-              color={color}
-            />
-          ),
-        }}
-      />
-    </Tabs>
+    </View>
   );
 }

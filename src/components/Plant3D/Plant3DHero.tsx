@@ -136,103 +136,20 @@ export function Plant3DHero({
   const modeLabel = mode === 'auto' ? 'Auto' : 'Manual';
 
   return (
-    <Animated.View
-      entering={FadeIn.duration(400)}
-      style={[styles.heroWrapper, borderStyle, { borderRadius: radii.hero }]}
-    >
-      <LinearGradient
-        colors={gradient}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={[styles.gradientContainer, { borderRadius: radii.hero }]}
-      >
-        {/* Overlay chips top row */}
-        <View style={styles.topChipRow}>
-          <TouchableOpacity
-            onPress={onLocationPress}
-            style={[
-              styles.locationChip,
-              {
-                backgroundColor: 'rgba(255,255,255,0.85)',
-                borderRadius: radii.full,
-              },
-            ]}
-          >
-            <Ionicons name="location-outline" size={12} color={colors.palette.forest} />
-            <Text style={[styles.chipText, { color: colors.palette.forest }]}>
-              {locationLabel.toUpperCase()}
-            </Text>
-          </TouchableOpacity>
+    <View style={styles.heroWrapper}>
+      {/* 3D / Fallback Stage */}
+      <View style={styles.sceneStage}>
+        <React.Suspense fallback={<FallbackIllustration health={health} />}>
+          <PlantScene3D
+            health={health}
+            isWatering={isWatering}
+          />
+        </React.Suspense>
 
-          <View style={styles.topChipRight}>
-            <View
-              style={[
-                styles.modeChip,
-                {
-                  backgroundColor:
-                    mode === 'auto'
-                      ? 'rgba(90,138,92,0.85)'
-                      : 'rgba(255,255,255,0.75)',
-                  borderRadius: radii.full,
-                },
-              ]}
-            >
-              <Ionicons
-                name={mode === 'auto' ? 'sync-outline' : 'hand-left-outline'}
-                size={12}
-                color={mode === 'auto' ? '#FFFFFF' : colors.palette.ink}
-              />
-              <Text
-                style={[
-                  styles.chipText,
-                  {
-                    color: mode === 'auto' ? '#FFFFFF' : colors.palette.ink,
-                  },
-                ]}
-              >
-                {modeLabel}
-              </Text>
-            </View>
-          </View>
-        </View>
-
-        {/* 3D / Fallback Stage */}
-        <View style={styles.sceneStage}>
-          <React.Suspense fallback={<FallbackIllustration health={health} />}>
-            <PlantScene3D
-              health={health}
-              isWatering={isWatering}
-            />
-          </React.Suspense>
-
-          {/* Watering overlay on top of the 3D scene */}
-          <WateringOverlay isActive={isWatering} secondsLeft={secondsLeft} />
-        </View>
-
-        {/* Plant name block */}
-        <View style={styles.plantInfoRow}>
-          <View style={styles.plantNameWrap}>
-            <Text style={styles.plantName}>{plantName}</Text>
-            <Text style={styles.plantSpecies}>{plantSpecies}</Text>
-          </View>
-
-          {/* Health state chip */}
-          <View
-            style={[
-              styles.healthChip,
-              { backgroundColor: chip.bg, borderRadius: radii.full },
-            ]}
-          >
-            <Ionicons name={chip.icon} size={13} color={chip.text} />
-            <Text style={[styles.healthChipText, { color: chip.text }]}>
-              {health === 'unknown' && lastSeenMinutesAgo > 0
-                ? `Offline ${lastSeenMinutesAgo}m ago`
-                : chip.label}
-            </Text>
-          </View>
-        </View>
-      </LinearGradient>
-    </Animated.View>
+        {/* Watering overlay on top of the 3D scene */}
+        <WateringOverlay isActive={isWatering} secondsLeft={secondsLeft} />
+      </View>
+    </View>
   );
 }
 
@@ -297,15 +214,9 @@ function FallbackIllustration({ health }: { health: PlantHealthState }) {
 
 const styles = StyleSheet.create({
   heroWrapper: {
-    height: 340,
-    marginVertical: 10,
-    borderWidth: 2,
+    flex: 1,
+    width: '100%',
     overflow: 'hidden',
-    shadowColor: '#1F2A21',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.18,
-    shadowRadius: 20,
-    elevation: 8,
   },
   gradientContainer: {
     flex: 1,
