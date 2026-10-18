@@ -81,8 +81,11 @@ export default function ControlScreen() {
           ]}
         >
           <View style={styles.cardHeaderRow}>
-            <View>
-              <Text style={[styles.cardTitle, { color: colors.text }]}>Operating Mode</Text>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <View style={styles.cardTitleRow}>
+                <Ionicons name="settings-outline" size={18} color={colors.palette.forest} />
+                <Text style={[styles.cardTitle, { color: colors.text }]}>Operating Mode</Text>
+              </View>
               <Text style={[styles.cardDesc, { color: colors.textMuted }]}>
                 {isAuto
                   ? 'Auto mode waters based on sensor thresholds & moisture checks.'
@@ -92,7 +95,7 @@ export default function ControlScreen() {
             <StatusChip status={health} />
           </View>
 
-          <View style={styles.toggleRow}>
+          <View style={[styles.toggleRow, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
             <TouchableOpacity
               activeOpacity={0.8}
               onPress={() => isAuto || toggleMode()}
@@ -100,17 +103,17 @@ export default function ControlScreen() {
                 styles.toggleBtn,
                 {
                   backgroundColor: isAuto ? colors.palette.forest : 'transparent',
-                  borderRadius: radii.md,
+                  borderRadius: radii.md - 2,
                 },
               ]}
             >
               <Ionicons
                 name="flash"
                 size={16}
-                color={isAuto ? '#FFF' : colors.text}
+                color={isAuto ? colors.palette.white : colors.text}
                 style={{ marginRight: 6 }}
               />
-              <Text style={[styles.toggleText, { color: isAuto ? '#FFF' : colors.text }]}>
+              <Text style={[styles.toggleText, { color: isAuto ? colors.palette.white : colors.text }]}>
                 Automatic
               </Text>
             </TouchableOpacity>
@@ -122,17 +125,17 @@ export default function ControlScreen() {
                 styles.toggleBtn,
                 {
                   backgroundColor: !isAuto ? colors.palette.forest : 'transparent',
-                  borderRadius: radii.md,
+                  borderRadius: radii.md - 2,
                 },
               ]}
             >
               <Ionicons
                 name="hand-left"
                 size={16}
-                color={!isAuto ? '#FFF' : colors.text}
+                color={!isAuto ? colors.palette.white : colors.text}
                 style={{ marginRight: 6 }}
               />
-              <Text style={[styles.toggleText, { color: !isAuto ? '#FFF' : colors.text }]}>
+              <Text style={[styles.toggleText, { color: !isAuto ? colors.palette.white : colors.text }]}>
                 Manual
               </Text>
             </TouchableOpacity>
@@ -151,46 +154,59 @@ export default function ControlScreen() {
             },
           ]}
         >
-          <Text style={[styles.cardTitle, { color: colors.text }]}>Dispense Water</Text>
+          <View style={styles.cardTitleRow}>
+            <Ionicons name="water-outline" size={18} color={colors.palette.forest} />
+            <Text style={[styles.cardTitle, { color: colors.text }]}>Dispense Water</Text>
+          </View>
           <Text style={[styles.cardDesc, { color: colors.textMuted }]}>
             Select pump activation duration:
           </Text>
 
           {/* Duration Chips */}
           <View style={styles.durationRow}>
-            {durationOptions.map((sec) => (
-              <TouchableOpacity
-                key={sec}
-                activeOpacity={0.8}
-                onPress={() => setSelectedDuration(sec)}
-                style={[
-                  styles.durationChip,
-                  {
-                    backgroundColor:
-                      selectedDuration === sec
-                        ? colors.palette.forest
-                        : 'rgba(90, 138, 92, 0.1)',
-                    borderColor:
-                      selectedDuration === sec
-                        ? colors.palette.forest
-                        : colors.palette.sage,
-                    borderRadius: radii.md,
-                  },
-                ]}
-              >
-                <Text
+            {durationOptions.map((sec) => {
+              const isSelected = selectedDuration === sec;
+              return (
+                <TouchableOpacity
+                  key={sec}
+                  activeOpacity={0.8}
+                  onPress={() => setSelectedDuration(sec)}
                   style={[
-                    styles.durationText,
+                    styles.durationChip,
                     {
-                      color: selectedDuration === sec ? '#FFF' : colors.text,
-                      fontWeight: selectedDuration === sec ? '800' : '600',
+                      backgroundColor: isSelected
+                        ? colors.palette.forest
+                        : colors.palette.mist,
+                      borderColor: isSelected
+                        ? colors.palette.forest
+                        : colors.palette.lime,
+                      borderRadius: radii.md,
                     },
                   ]}
                 >
-                  {sec} sec
-                </Text>
-              </TouchableOpacity>
-            ))}
+                  <Text
+                    style={[
+                      styles.durationValue,
+                      {
+                        color: isSelected ? colors.palette.white : colors.palette.ink,
+                      },
+                    ]}
+                  >
+                    {sec}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.durationUnit,
+                      {
+                        color: isSelected ? colors.palette.lime : colors.palette.sage,
+                      },
+                    ]}
+                  >
+                    sec
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
 
           {/* Big Action Button */}
@@ -209,7 +225,7 @@ export default function ControlScreen() {
             <Ionicons
               name={isWatering ? 'hourglass' : 'water'}
               size={20}
-              color="#FFF"
+              color={colors.palette.white}
               style={{ marginRight: 8 }}
             />
             <Text style={styles.waterNowBtnText}>
@@ -219,13 +235,34 @@ export default function ControlScreen() {
             </Text>
           </TouchableOpacity>
 
+          {/* Watering progress bar */}
+          {isWatering && (
+            <View style={[styles.progressTrack, { backgroundColor: colors.palette.mist }]}>
+              <View
+                style={[
+                  styles.progressFill,
+                  {
+                    width: `${((selectedDuration - secondsLeft) / selectedDuration) * 100}%`,
+                    backgroundColor: colors.palette.forest,
+                  },
+                ]}
+              />
+            </View>
+          )}
+
           <View style={styles.estimateRow}>
-            <Text style={[styles.estimateLabel, { color: colors.textMuted }]}>
-              Estimated output: ~{selectedDuration * config.bottle.flowMlPerSec} ml
-            </Text>
-            <Text style={[styles.estimateLabel, { color: colors.textMuted }]}>
-              Reservoir: {config.bottle.remainingMl} ml left
-            </Text>
+            <View style={styles.estimateItem}>
+              <Ionicons name="beaker-outline" size={13} color={colors.textMuted} style={{ marginRight: 4 }} />
+              <Text style={[styles.estimateLabel, { color: colors.textMuted }]}>
+                ~{selectedDuration * config.bottle.flowMlPerSec} ml output
+              </Text>
+            </View>
+            <View style={styles.estimateItem}>
+              <Ionicons name="flask-outline" size={13} color={colors.textMuted} style={{ marginRight: 4 }} />
+              <Text style={[styles.estimateLabel, { color: colors.textMuted }]}>
+                {config.bottle.remainingMl} ml left
+              </Text>
+            </View>
           </View>
         </View>
 
@@ -241,7 +278,10 @@ export default function ControlScreen() {
             },
           ]}
         >
-          <Text style={[styles.cardTitle, { color: colors.text }]}>ESP8266 Command Stream</Text>
+          <View style={styles.cardTitleRow}>
+            <Ionicons name="radio-outline" size={18} color={colors.palette.forest} />
+            <Text style={[styles.cardTitle, { color: colors.text }]}>ESP8266 Command Stream</Text>
+          </View>
           <View style={styles.streamRow}>
             <View
               style={[
@@ -259,6 +299,14 @@ export default function ControlScreen() {
                 : 'Stream listening on /devices/' + device.id + '/command'}
             </Text>
           </View>
+          {isWatering && (
+            <View style={[styles.streamActive, { backgroundColor: colors.palette.lime, borderRadius: radii.sm }]}>
+              <Ionicons name="pulse-outline" size={14} color={colors.palette.forest} style={{ marginRight: 6 }} />
+              <Text style={[styles.streamActiveText, { color: colors.palette.forest }]}>
+                Relay active for {secondsLeft} more seconds
+              </Text>
+            </View>
+          )}
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -270,7 +318,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   container: {
-    paddingBottom: 90,
+    paddingBottom: 100,
   },
   screenTitle: {
     fontSize: 26,
@@ -297,20 +345,23 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     marginBottom: 14,
   },
-  cardTitle: {
-    fontSize: 18,
-    fontWeight: '700',
+  cardTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
     marginBottom: 4,
+  },
+  cardTitle: {
+    fontSize: 17,
+    fontWeight: '700',
   },
   cardDesc: {
     fontSize: 13,
     lineHeight: 18,
-    maxWidth: 240,
+    marginBottom: 4,
   },
   toggleRow: {
     flexDirection: 'row',
-    backgroundColor: '#EDF2EC',
-    borderRadius: 14,
     padding: 4,
     gap: 4,
   },
@@ -332,12 +383,18 @@ const styles = StyleSheet.create({
   },
   durationChip: {
     flex: 1,
-    paddingVertical: 12,
+    paddingVertical: 14,
     alignItems: 'center',
     borderWidth: 1.5,
   },
-  durationText: {
-    fontSize: 14,
+  durationValue: {
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  durationUnit: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 1,
   },
   waterNowBtn: {
     flexDirection: 'row',
@@ -348,17 +405,31 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.12,
     shadowRadius: 8,
-    elevation: 3,
+    elevation: 4,
   },
   waterNowBtnText: {
     color: '#FFF',
     fontSize: 17,
     fontWeight: '800',
   },
+  progressTrack: {
+    height: 4,
+    borderRadius: 2,
+    marginTop: 10,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 2,
+  },
   estimateRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: 10,
+    marginTop: 12,
+  },
+  estimateItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   estimateLabel: {
     fontSize: 12,
@@ -377,5 +448,17 @@ const styles = StyleSheet.create({
   streamStatus: {
     fontSize: 13,
     fontWeight: '500',
+    flex: 1,
+  },
+  streamActive: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  streamActiveText: {
+    fontSize: 12,
+    fontWeight: '700',
   },
 });

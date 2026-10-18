@@ -28,8 +28,9 @@ export const Plant3DPlaceholder: React.FC<Plant3DPlaceholderProps> = ({
     if (isWatering) {
       return {
         iconName: 'water' as const,
-        iconColor: colors.palette.forest,
+        iconColor: colors.palette.white,
         banner: `Watering Active (${secondsLeft}s)...`,
+        glowColor: colors.palette.forest,
       };
     }
     switch (health) {
@@ -38,12 +39,14 @@ export const Plant3DPlaceholder: React.FC<Plant3DPlaceholderProps> = ({
           iconName: 'alert-circle' as const,
           iconColor: colors.palette.warningText,
           banner: 'Moisture Below Minimum Threshold',
+          glowColor: colors.palette.blush,
         };
       case 'overwatered':
         return {
           iconName: 'warning' as const,
           iconColor: colors.palette.warningText,
           banner: 'Soil Moisture High / Soggy Roots',
+          glowColor: colors.palette.blush,
         };
       case 'healthy':
       default:
@@ -51,17 +54,24 @@ export const Plant3DPlaceholder: React.FC<Plant3DPlaceholderProps> = ({
           iconName: 'leaf' as const,
           iconColor: colors.palette.forest,
           banner: 'Optimal Photosynthesis & Soil Balance',
+          glowColor: colors.palette.mint,
         };
     }
   };
 
-  const { iconName, iconColor, banner } = getVisual();
+  const { iconName, iconColor, banner, glowColor } = getVisual();
 
   const getCardBg = () => {
     if (health === 'thirsty' || health === 'overwatered') {
       return colors.palette.blush;
     }
     return colors.palette.mist;
+  };
+
+  const getCardBorder = () => {
+    if (isWatering) return colors.palette.forest;
+    if (health === 'thirsty' || health === 'overwatered') return colors.palette.warningBorder;
+    return colors.palette.lime;
   };
 
   return (
@@ -72,10 +82,14 @@ export const Plant3DPlaceholder: React.FC<Plant3DPlaceholderProps> = ({
           backgroundColor: getCardBg(),
           borderRadius: radii.hero,
           borderTopRightRadius: radii.hero * 1.5,
-          borderColor: isWatering ? colors.palette.forest : colors.palette.lime,
+          borderColor: getCardBorder(),
         },
       ]}
     >
+      {/* Decorative background circles */}
+      <View style={[styles.bgCircleLg, { backgroundColor: glowColor, opacity: 0.15 }]} />
+      <View style={[styles.bgCircleSm, { backgroundColor: colors.palette.lime, opacity: 0.12 }]} />
+
       {/* Top Tag Badges */}
       <View style={styles.topRow}>
         <View style={[styles.tagWrap, { backgroundColor: colors.palette.white }]}>
@@ -89,21 +103,33 @@ export const Plant3DPlaceholder: React.FC<Plant3DPlaceholderProps> = ({
 
       {/* 3D Scene / Illustration Stage */}
       <View style={styles.stage}>
-        {isWatering && (
-          <View style={styles.wateringDrops}>
-            <Ionicons name="water" size={24} color={colors.palette.forest} />
-          </View>
-        )}
-
+        {/* Layered glow rings */}
+        <View
+          style={[
+            styles.outerGlow,
+            {
+              backgroundColor: glowColor,
+              opacity: 0.2,
+            },
+          ]}
+        />
         <View
           style={[
             styles.potGlow,
             {
-              backgroundColor: isWatering ? colors.palette.mint : colors.palette.lime,
+              backgroundColor: isWatering ? colors.palette.mint : glowColor,
             },
           ]}
         >
-          <Ionicons name={iconName} size={72} color={iconColor} />
+          {/* Watering indicator drops */}
+          {isWatering && (
+            <View style={styles.wateringOverlay}>
+              <Ionicons name="water" size={18} color={colors.palette.forest} style={{ opacity: 0.6, position: 'absolute', top: -10, left: 20 }} />
+              <Ionicons name="water" size={14} color={colors.palette.forest} style={{ opacity: 0.4, position: 'absolute', top: -6, right: 18 }} />
+              <Ionicons name="water" size={10} color={colors.palette.forest} style={{ opacity: 0.3, position: 'absolute', top: -14, left: 50 }} />
+            </View>
+          )}
+          <Ionicons name={iconName} size={64} color={iconColor} />
         </View>
 
         <Text style={[styles.plantTitle, { color: colors.palette.ink }]}>{plantName}</Text>
@@ -117,19 +143,37 @@ export const Plant3DPlaceholder: React.FC<Plant3DPlaceholderProps> = ({
           {
             backgroundColor: isWatering
               ? colors.palette.forest
+              : health === 'thirsty' || health === 'overwatered'
+              ? colors.palette.warningBorder
               : colors.palette.lime,
             borderRadius: radii.md,
           },
         ]}
       >
-        <Text
-          style={[
-            styles.bannerText,
-            { color: isWatering ? colors.palette.white : colors.palette.ink },
-          ]}
-        >
-          {banner}
-        </Text>
+        <View style={styles.footerRow}>
+          <View
+            style={[
+              styles.pulseDot,
+              {
+                backgroundColor: isWatering || health === 'thirsty' || health === 'overwatered'
+                  ? colors.palette.white
+                  : colors.palette.forest,
+              },
+            ]}
+          />
+          <Text
+            style={[
+              styles.bannerText,
+              {
+                color: isWatering || health === 'thirsty' || health === 'overwatered'
+                  ? colors.palette.white
+                  : colors.palette.ink,
+              },
+            ]}
+          >
+            {banner}
+          </Text>
+        </View>
       </View>
     </View>
   );
@@ -137,17 +181,39 @@ export const Plant3DPlaceholder: React.FC<Plant3DPlaceholderProps> = ({
 
 const styles = StyleSheet.create({
   heroContainer: {
-    height: 310,
-    padding: 16,
+    height: 320,
+    padding: 18,
     justifyContent: 'space-between',
     borderWidth: 1.5,
     marginVertical: 10,
-    elevation: 2,
+    elevation: 3,
+    overflow: 'hidden',
+    shadowColor: '#1F2A21',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+  },
+  bgCircleLg: {
+    position: 'absolute',
+    width: 240,
+    height: 240,
+    borderRadius: 120,
+    top: -40,
+    right: -60,
+  },
+  bgCircleSm: {
+    position: 'absolute',
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    bottom: 20,
+    left: -30,
   },
   topRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    zIndex: 2,
   },
   tagWrap: {
     flexDirection: 'row',
@@ -156,6 +222,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 12,
+    shadowColor: '#1F2A21',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    elevation: 1,
   },
   locationBadge: {
     fontSize: 11,
@@ -166,19 +237,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     position: 'relative',
+    zIndex: 2,
   },
-  wateringDrops: {
+  outerGlow: {
     position: 'absolute',
-    top: -16,
-    zIndex: 10,
+    width: 160,
+    height: 160,
+    borderRadius: 80,
   },
   potGlow: {
-    width: 130,
-    height: 130,
-    borderRadius: 65,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 8,
+    marginBottom: 10,
+    position: 'relative',
+  },
+  wateringOverlay: {
+    position: 'absolute',
+    width: '100%',
+    height: '100%',
   },
   plantTitle: {
     fontSize: 20,
@@ -188,12 +267,24 @@ const styles = StyleSheet.create({
   plantSubtitle: {
     fontSize: 13,
     fontWeight: '500',
+    marginTop: 2,
   },
   footerBanner: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
     alignItems: 'center',
     justifyContent: 'center',
+    zIndex: 2,
+  },
+  footerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pulseDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
   bannerText: {
     fontSize: 12,

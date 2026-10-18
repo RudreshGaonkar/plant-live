@@ -29,12 +29,23 @@ export default function HomeScreen() {
     return (
       <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
         <View style={styles.emptyContainer}>
-          <Text style={[styles.emptyText, { color: colors.text }]}>No device connected</Text>
+          <View
+            style={[
+              styles.emptyIconWrap,
+              { backgroundColor: colors.palette.lime },
+            ]}
+          >
+            <Ionicons name="leaf-outline" size={48} color={colors.palette.forest} />
+          </View>
+          <Text style={[styles.emptyTitle, { color: colors.text }]}>No Device Connected</Text>
+          <Text style={[styles.emptySubtitle, { color: colors.textMuted }]}>
+            Pair your ESP8266 plant companion to start monitoring
+          </Text>
           <TouchableOpacity
-            style={[styles.addBtn, { backgroundColor: colors.primary }]}
+            style={[styles.addBtn, { backgroundColor: colors.primary, borderRadius: radii.xl }]}
             onPress={() => router.push('/add-device')}
           >
-            <Ionicons name="add" size={18} color="#FFF" style={{ marginRight: 6 }} />
+            <Ionicons name="add" size={18} color={colors.palette.white} style={{ marginRight: 6 }} />
             <Text style={styles.addBtnText}>Add First Plant Device</Text>
           </TouchableOpacity>
         </View>
@@ -66,6 +77,7 @@ export default function HomeScreen() {
                   backgroundColor: status.online
                     ? colors.palette.mint
                     : colors.palette.blush,
+                  borderRadius: radii.full,
                 },
               ]}
             >
@@ -95,7 +107,13 @@ export default function HomeScreen() {
 
             <TouchableOpacity
               onPress={() => router.push('/add-device')}
-              style={[styles.iconButton, { backgroundColor: colors.surface }]}
+              style={[
+                styles.iconButton,
+                {
+                  backgroundColor: colors.surface,
+                  borderColor: colors.border,
+                },
+              ]}
             >
               <Ionicons name="add" size={20} color={colors.palette.forest} />
             </TouchableOpacity>
@@ -129,8 +147,8 @@ export default function HomeScreen() {
             <Ionicons
               name={isWatering ? 'hourglass-outline' : 'water'}
               size={18}
-              color="#FFF"
-              style={{ marginRight: 6 }}
+              color={colors.palette.white}
+              style={{ marginRight: 8 }}
             />
             <Text style={styles.primaryActionText}>
               {isWatering ? `Watering (${secondsLeft}s)...` : 'Water Now'}
@@ -166,7 +184,10 @@ export default function HomeScreen() {
 
         {/* 2x2 Metric Tiles */}
         <View style={styles.sectionHeaderRow}>
-          <Text style={[styles.sectionTitle, { color: colors.text }]}>Live Telemetry</Text>
+          <View style={styles.sectionTitleRow}>
+            <View style={[styles.sectionDot, { backgroundColor: colors.palette.forest }]} />
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Live Telemetry</Text>
+          </View>
           <Text style={[styles.sectionSubtitle, { color: colors.textMuted }]}>
             Synced via ESP8266
           </Text>
@@ -223,7 +244,7 @@ export default function HomeScreen() {
         </View>
 
         {/* Water Reservoir Bottle Gauge */}
-        <View style={{ marginTop: 12 }}>
+        <View style={{ marginTop: 8 }}>
           <BottleGauge
             remainingMl={config.bottle.remainingMl}
             capacityMl={config.bottle.capacityMl}
@@ -241,24 +262,25 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
-    paddingBottom: 90,
+    paddingBottom: 100,
   },
   headerBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   greeting: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
-    letterSpacing: 0.5,
+    letterSpacing: 0.6,
     textTransform: 'uppercase',
   },
   appTitle: {
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: '800',
     letterSpacing: -0.4,
+    marginTop: 2,
   },
   headerActions: {
     flexDirection: 'row',
@@ -268,28 +290,26 @@ const styles = StyleSheet.create({
   onlineBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    gap: 5,
   },
   onlineDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
   },
   onlineText: {
     fontSize: 11,
     fontWeight: '700',
   },
   iconButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(90, 138, 92, 0.2)',
+    borderWidth: 1.5,
   },
   quickActionsRow: {
     flexDirection: 'row',
@@ -299,14 +319,14 @@ const styles = StyleSheet.create({
   primaryActionBtn: {
     flex: 1.8,
     flexDirection: 'row',
-    paddingVertical: 14,
+    paddingVertical: 15,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#1F2A21',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 6,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    elevation: 4,
   },
   primaryActionText: {
     color: '#FFFFFF',
@@ -315,8 +335,8 @@ const styles = StyleSheet.create({
   },
   secondaryActionBtn: {
     flex: 1.2,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1.5,
@@ -325,29 +345,40 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     textTransform: 'uppercase',
+    letterSpacing: 0.3,
   },
   modeValueRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 2,
+    marginTop: 3,
   },
   modeValue: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '800',
   },
   sectionHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'baseline',
-    marginTop: 14,
-    marginBottom: 6,
+    alignItems: 'center',
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  sectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  sectionDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
   sectionTitle: {
     fontSize: 18,
     fontWeight: '700',
   },
   sectionSubtitle: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '500',
   },
   grid: {
@@ -361,22 +392,41 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24,
+    padding: 32,
   },
-  emptyText: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginBottom: 16,
+  emptyIconWrap: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  emptyTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  emptySubtitle: {
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
   },
   addBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 12,
+    paddingHorizontal: 22,
+    paddingVertical: 14,
+    shadowColor: '#1F2A21',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    elevation: 3,
   },
   addBtnText: {
     color: '#FFF',
     fontWeight: '700',
+    fontSize: 15,
   },
 });

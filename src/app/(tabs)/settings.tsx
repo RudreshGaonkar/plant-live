@@ -54,7 +54,10 @@ export default function SettingsScreen() {
         </Text>
 
         {/* Plant Location Profiles */}
-        <Text style={[styles.sectionHeading, { color: colors.text }]}>Plant Location Profile</Text>
+        <View style={styles.sectionRow}>
+          <View style={[styles.sectionDot, { backgroundColor: colors.palette.forest }]} />
+          <Text style={[styles.sectionHeading, { color: colors.text }]}>Plant Location Profile</Text>
+        </View>
         <LocationCard
           location="balcony"
           selected={config.location === 'balcony'}
@@ -83,7 +86,10 @@ export default function SettingsScreen() {
             },
           ]}
         >
-          <Text style={[styles.cardTitle, { color: colors.text }]}>Sensors & Reservoir</Text>
+          <View style={styles.cardTitleRow}>
+            <Ionicons name="hardware-chip-outline" size={18} color={colors.palette.forest} />
+            <Text style={[styles.cardTitle, { color: colors.text }]}>Sensors & Reservoir</Text>
+          </View>
 
           <View style={styles.settingRow}>
             <View style={{ flex: 1 }}>
@@ -95,12 +101,12 @@ export default function SettingsScreen() {
             <Switch
               value={hasLdr}
               onValueChange={(val) => updateSensors({ lightMode: val ? 'digital' : 'none' })}
-              trackColor={{ false: '#D0D8D0', true: colors.palette.forest }}
-              thumbColor="#FFFFFF"
+              trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
+              thumbColor={colors.palette.white}
             />
           </View>
 
-          <View style={[styles.divider, { backgroundColor: colors.border }]} />
+          <View style={[styles.divider, { backgroundColor: colors.palette.lime }]} />
 
           <View style={styles.settingRow}>
             <View style={{ flex: 1 }}>
@@ -111,9 +117,10 @@ export default function SettingsScreen() {
             </View>
             <TouchableOpacity
               onPress={refillBottle}
-              style={[styles.smallBtn, { backgroundColor: colors.palette.lime }]}
+              style={[styles.smallBtn, { backgroundColor: colors.palette.lime, borderRadius: radii.sm }]}
             >
-              <Text style={styles.smallBtnText}>Refill 100%</Text>
+              <Ionicons name="refresh-outline" size={12} color={colors.palette.ink} style={{ marginRight: 4 }} />
+              <Text style={[styles.smallBtnText, { color: colors.palette.ink }]}>Refill</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -130,10 +137,16 @@ export default function SettingsScreen() {
             },
           ]}
         >
-          <Text style={[styles.cardTitle, { color: colors.text }]}>Device & Mesh Hub</Text>
+          <View style={styles.cardTitleRow}>
+            <Ionicons name="server-outline" size={18} color={colors.palette.forest} />
+            <Text style={[styles.cardTitle, { color: colors.text }]}>Device & Mesh Hub</Text>
+          </View>
+
           <View style={styles.infoLine}>
             <Text style={[styles.infoKey, { color: colors.textMuted }]}>Device ID</Text>
-            <Text style={[styles.infoVal, { color: colors.text }]}>{device.id}</Text>
+            <View style={[styles.infoValueWrap, { backgroundColor: colors.palette.mist, borderRadius: radii.sm }]}>
+              <Text style={[styles.infoValMono, { color: colors.palette.forest }]}>{device.id}</Text>
+            </View>
           </View>
           <View style={styles.infoLine}>
             <Text style={[styles.infoKey, { color: colors.textMuted }]}>Firmware Version</Text>
@@ -141,13 +154,19 @@ export default function SettingsScreen() {
           </View>
           <View style={styles.infoLine}>
             <Text style={[styles.infoKey, { color: colors.textMuted }]}>Wi-Fi Signal (RSSI)</Text>
-            <Text style={[styles.infoVal, { color: colors.text }]}>{device.telemetry.rssi} dBm</Text>
+            <View style={styles.rssiRow}>
+              <Ionicons name="wifi" size={14} color={colors.palette.forest} style={{ marginRight: 4 }} />
+              <Text style={[styles.infoVal, { color: colors.text }]}>{device.telemetry.rssi} dBm</Text>
+            </View>
           </View>
           <View style={styles.infoLine}>
             <Text style={[styles.infoKey, { color: colors.textMuted }]}>Mesh Hub Topology</Text>
-            <Text style={[styles.infoVal, { color: colors.palette.forest, fontWeight: '700' }]}>
-              Hub-ready (Standby)
-            </Text>
+            <View style={[styles.meshBadge, { backgroundColor: colors.palette.lime, borderRadius: radii.sm }]}>
+              <Ionicons name="git-network-outline" size={12} color={colors.palette.forest} style={{ marginRight: 4 }} />
+              <Text style={[styles.meshBadgeText, { color: colors.palette.forest }]}>
+                Hub-ready
+              </Text>
+            </View>
           </View>
         </View>
 
@@ -157,28 +176,29 @@ export default function SettingsScreen() {
             style={[
               styles.card,
               {
-                backgroundColor: 'rgba(248, 215, 218, 0.4)',
+                backgroundColor: 'rgba(248, 215, 218, 0.3)',
                 borderRadius: radii.card,
                 borderColor: colors.palette.blush,
                 padding: spacing.md,
               },
             ]}
           >
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+            <View style={styles.cardTitleRow}>
               <Ionicons name="construct-outline" size={18} color={colors.palette.warningText} />
-              <Text style={[styles.cardTitle, { color: colors.palette.warningText, marginBottom: 0 }]}>
+              <Text style={[styles.cardTitle, { color: colors.palette.warningText }]}>
                 Hardware Simulator Tools
               </Text>
             </View>
-            <Text style={[styles.settingDesc, { color: colors.textMuted, marginBottom: 10 }]}>
+            <Text style={[styles.settingDesc, { color: colors.textMuted, marginBottom: 12 }]}>
               Trigger live hardware events for testing without physical ESP8266:
             </Text>
 
             <View style={styles.devBtnRow}>
               <TouchableOpacity
                 onPress={() => setOnlineStatus(!status.online)}
-                style={[styles.devBtn, { backgroundColor: colors.palette.forest }]}
+                style={[styles.devBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.sm }]}
               >
+                <Ionicons name="wifi-outline" size={14} color={colors.palette.white} style={{ marginRight: 4 }} />
                 <Text style={styles.devBtnText}>
                   Toggle {status.online ? 'Offline' : 'Online'}
                 </Text>
@@ -189,8 +209,9 @@ export default function SettingsScreen() {
                   useLiveDevice.getState().updateTelemetry({ soilMoisture: 18 });
                   Alert.alert('Simulated', 'Moisture forced to 18% (Thirsty state)');
                 }}
-                style={[styles.devBtn, { backgroundColor: colors.palette.warningBorder }]}
+                style={[styles.devBtn, { backgroundColor: colors.palette.warningBorder, borderRadius: radii.sm }]}
               >
+                <Ionicons name="water-outline" size={14} color={colors.palette.white} style={{ marginRight: 4 }} />
                 <Text style={styles.devBtnText}>Force Thirsty</Text>
               </TouchableOpacity>
             </View>
@@ -199,12 +220,17 @@ export default function SettingsScreen() {
 
         {/* Version Footer */}
         <TouchableOpacity activeOpacity={0.8} onPress={handleVersionTap} style={styles.versionFooter}>
-          <Text style={[styles.versionText, { color: colors.textMuted }]}>
-            LeafLink Mobile App v1.0.0 (Expo SDK 57)
-          </Text>
-          <Text style={[styles.versionHint, { color: colors.textMuted }]}>
-            {devPanelOpen ? '● Developer mode enabled' : 'Tap 5 times to reveal simulation tools'}
-          </Text>
+          <View style={[styles.versionWrap, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
+            <Ionicons name="leaf-outline" size={16} color={colors.palette.sage} style={{ marginRight: 6 }} />
+            <View>
+              <Text style={[styles.versionText, { color: colors.textMuted }]}>
+                LeafLink Mobile App v1.0.0 (Expo SDK 57)
+              </Text>
+              <Text style={[styles.versionHint, { color: colors.palette.sage }]}>
+                {devPanelOpen ? 'Developer mode enabled' : 'Tap 5 times to reveal simulation tools'}
+              </Text>
+            </View>
+          </View>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
@@ -216,7 +242,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   container: {
-    paddingBottom: 90,
+    paddingBottom: 100,
   },
   title: {
     fontSize: 26,
@@ -228,11 +254,21 @@ const styles = StyleSheet.create({
     marginTop: 2,
     marginBottom: 16,
   },
+  sectionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 10,
+    marginBottom: 8,
+  },
+  sectionDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
   sectionHeading: {
     fontSize: 16,
     fontWeight: '700',
-    marginTop: 10,
-    marginBottom: 8,
   },
   card: {
     borderWidth: 1.5,
@@ -243,16 +279,21 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     elevation: 2,
   },
-  cardTitle: {
-    fontSize: 18,
-    fontWeight: '700',
+  cardTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
     marginBottom: 12,
+  },
+  cardTitle: {
+    fontSize: 17,
+    fontWeight: '700',
   },
   settingRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 6,
+    paddingVertical: 8,
   },
   settingLabel: {
     fontSize: 15,
@@ -261,43 +302,70 @@ const styles = StyleSheet.create({
   settingDesc: {
     fontSize: 12,
     marginTop: 2,
+    lineHeight: 16,
   },
   divider: {
     height: 1,
     marginVertical: 10,
   },
   smallBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
+    paddingVertical: 7,
   },
   smallBtnText: {
     fontSize: 12,
     fontWeight: '700',
-    color: '#1F2A21',
   },
   infoLine: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    paddingVertical: 6,
+    alignItems: 'center',
+    paddingVertical: 8,
   },
   infoKey: {
     fontSize: 13,
+    flex: 1,
   },
   infoVal: {
     fontSize: 13,
     fontWeight: '600',
   },
+  infoValueWrap: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  infoValMono: {
+    fontSize: 12,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  rssiRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  meshBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  meshBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
   devBtnRow: {
     flexDirection: 'row',
     gap: 8,
-    marginTop: 6,
+    marginTop: 4,
   },
   devBtn: {
     flex: 1,
-    paddingVertical: 10,
+    flexDirection: 'row',
+    paddingVertical: 11,
     alignItems: 'center',
-    borderRadius: 8,
+    justifyContent: 'center',
   },
   devBtnText: {
     color: '#FFF',
@@ -305,8 +373,13 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   versionFooter: {
+    paddingVertical: 20,
+  },
+  versionWrap: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 24,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
   },
   versionText: {
     fontSize: 12,
@@ -314,6 +387,6 @@ const styles = StyleSheet.create({
   },
   versionHint: {
     fontSize: 11,
-    marginTop: 4,
+    marginTop: 2,
   },
 });
