@@ -208,7 +208,7 @@ void setup() {
     FirebaseJson statusJson;
     statusJson.set("online", true);
     statusJson.set("firmware", "v1.0.4-esp8266");
-    statusJson.set("lastSeen/{.sv}", "timestamp");
+    statusJson.set("lastSeen/.sv", "timestamp");
     Firebase.RTDB.updateNode(&fbdo, statusPath.c_str(), &statusJson);
 
     // Begin RTDB Stream on Device Path
@@ -335,7 +335,7 @@ void transmitTelemetry() {
 
   json.set("pumpOn", isPumpActive);
   json.set("rssi", telemetry.rssi);
-  json.set("ts/{.sv}", "timestamp");
+  json.set("ts/.sv", "timestamp");
 
   if (!Firebase.RTDB.updateNode(&fbdo, path.c_str(), &json)) {
     Serial.printf("[Telemetry] Update failed: %s\n", fbdo.errorReason().c_str());
@@ -345,7 +345,7 @@ void transmitTelemetry() {
   String statusPath = "devices/" + deviceId + "/status";
   FirebaseJson statusJson;
   statusJson.set("online", true);
-  statusJson.set("lastSeen/{.sv}", "timestamp");
+  statusJson.set("lastSeen/.sv", "timestamp");
   Firebase.RTDB.updateNode(&fbdo, statusPath.c_str(), &statusJson);
 }
 
@@ -357,7 +357,7 @@ void appendHistorySnapshot() {
 
   String path = "history/" + deviceId;
   FirebaseJson json;
-  json.set("ts/{.sv}", "timestamp");
+  json.set("ts/.sv", "timestamp");
   json.set("soilMoisture", (int)round(telemetry.soilMoisture));
   json.set("temperature", telemetry.temperature);
   json.set("humidity", telemetry.humidity);
@@ -612,7 +612,7 @@ void updateCommandAck(String cmdId, String status, String reason) {
   if (reason.length() > 0) {
     ackJson.set("reason", reason);
   }
-  ackJson.set("ts/{.sv}", "timestamp");
+  ackJson.set("ts/.sv", "timestamp");
 
   Firebase.RTDB.updateNode(&fbdo, path.c_str(), &ackJson);
 }
@@ -622,7 +622,7 @@ void logWateringEvent(String trigger, int durationSec, float before, float after
 
   String path = "waterLogs/" + deviceId;
   FirebaseJson json;
-  json.set("ts/{.sv}", "timestamp");
+  json.set("ts/.sv", "timestamp");
   json.set("trigger", trigger);
   json.set("durationSec", durationSec);
   json.set("moistureBefore", (int)round(before));
