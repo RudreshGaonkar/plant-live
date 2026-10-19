@@ -151,3 +151,39 @@ export const appendWaterLogInRTDB = async (
   await set(newRef, log);
   return newRef.key;
 };
+
+export interface DeviceHistoryRecord {
+  id: string;
+  ts: number;
+  soilMoisture: number;
+  temperature: number;
+  humidity: number;
+  light?: number | null;
+}
+
+/**
+ * Attaches a realtime listener to `history/{deviceId}`
+ */
+export const listenToDeviceHistory = (
+  deviceId: string,
+  onData: (history: DeviceHistoryRecord[]) => void
+) => {
+  const historyRef = ref(db, `history/${deviceId}`);
+  const unsubscribe = onValue(historyRef, (snapshot) => {
+    if (snapshot.exists()) {
+      const data = snapshot.val();
+      const records: DeviceHistoryRecord[] = Object.keys(data).map((key) => ({
+        id: key,
+        ...data[key],
+      }));
+      // Sort oldest to newest for chronological plotting
+      records.sort((a, b) => a.ts - b.ts);
+      onData(records);
+    } else {
+      onData([]);
+    }
+  });
+
+  return () => off(historyRef, 'value', unsubscribe);
+};
+

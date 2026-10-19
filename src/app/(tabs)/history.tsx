@@ -1,644 +1,450 @@
-/**
- * Insights Screen – "Day Ribbon"
- * - Horizontal 24h/7d scrub ribbon with draggable time cursor
- * - One big chart area with Moisture/Temp/Humidity metric switcher
- * - "What happened" timeline with event cards
- * - Swipeable insight cards carousel
- * uiLayout.md Section 5
- */
-import React, { useState, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
-  TouchableOpacity,
-  Dimensions,
+  SafeAreaView,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import Svg, { Polyline, Line, Circle as SvgCircle, Text as SvgText } from 'react-native-svg';
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withSpring,
-  runOnJS,
-} from 'react-native-reanimated';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
-import { useLiveDevice, WaterLog } from '@/store/useLiveDevice';
+import { useLiveDevice, WaterLog, DeviceRecord } from '@/store/useLiveDevice';
+import { useSession } from '@/store/useSession';
+import { useAlertEngine } from '@/hooks/useAlertEngine';
+import { listenToDeviceHistory, DeviceHistoryRecord } from '@/services/devices';
+import { DayRibbon, TimeWindow } from '@/components/DayRibbon';
+import {
+  TelemetryChart,
+  ChartMetricKey,
+  ChartDataPoint,
+  CHART_WIDTH,
+  CHART_HEIGHT,
+} from '@/components/TelemetryChart';
+import { InsightCardCarousel, InsightCardData } from '@/components/InsightCardCarousel';
+import { EventTimeline } from '@/components/EventTimeline';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const CHART_PADDING = 16;
-const CHART_W = SCREEN_WIDTH - CHART_PADDING * 2 - 32;
-const CHART_H = 160;
-
-type MetricKey = 'moisture' | 'temp' | 'humidity';
-type TimeWindow = '24h' | '7d';
-
-const METRIC_CONFIG: Record<MetricKey, {
-  label: string;
-  unit: string;
-  color: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  max: number;
-}> = {
-  moisture: { label: 'Moisture', unit: '%', color: '#5A8A5C', icon: 'leaf-outline', max: 100 },
-  temp: { label: 'Temperature', unit: '°C', color: '#AEE09A', icon: 'thermometer-outline', max: 50 },
-  humidity: { label: 'Humidity', unit: '%', color: '#80B07F', icon: 'water-outline', max: 100 },
-};
-
-// Generate synthetic sparkline data from water logs + current telemetry
-function buildChartPoints(
+/**
+ * Builds continuous historical telemetry data points.
+ * Combines real RTDB history (if available) with realistic diurnal curves and watering step-ups.
+ */
+function generateHistoricalSeries(
+  device: DeviceRecord,
   waterLogs: WaterLog[],
-  currentValue: number,
-  metric: MetricKey,
-  windowHours: number
-): { x: number; y: number; isWater: boolean }[] {
+  realHistory: DeviceHistoryRecord[],
+  timeWindow: TimeWindow,
+  chartWidth: number,
+  chartHeight: number
+): Record<ChartMetricKey, ChartDataPoint[]> {
   const now = Date.now();
+  const windowHours = timeWindow === '24h' ? 24 : 168; // 24h or 7 days
   const windowMs = windowHours * 3600000;
-  const relevantLogs = waterLogs
-    .filter((l) => now - l.ts < windowMs)
-    .sort((a, b) => a.ts - b.ts);
+  const startTime = now - windowMs;
 
-  const points: { ts: number; val: number; isWater: boolean }[] = [];
+  const numPoints = timeWindow === '24h' ? 25 : 29; // Hourly for 24h, 6-hourly for 7d
+  const stepMs = windowMs / (numPoints - 1);
 
-  // Synthesize data from logs
-  relevantLogs.forEach((log) => {
-    if (metric === 'moisture') {
-      points.push({ ts: log.ts - 60000, val: log.moistureBefore, isWater: false });
-      points.push({ ts: log.ts, val: log.moistureAfter, isWater: true });
+  const { location, thresholds, sensors } = device.config;
+  const currentTelem = device.telemetry;
+
+  // Filter relevant water logs in this window
+  const logsInWindow = waterLogs.filter((l) => l.ts >= startTime && l.ts <= now);
+
+  const moisturePoints: ChartDataPoint[] = [];
+  const tempPoints: ChartDataPoint[] = [];
+  const humidityPoints: ChartDataPoint[] = [];
+  const lightPoints: ChartDataPoint[] = [];
+
+  for (let i = 0; i < numPoints; i++) {
+    const ptTs = i === numPoints - 1 ? now : startTime + i * stepMs;
+    const x = (i / (numPoints - 1)) * chartWidth;
+    const date = new Date(ptTs);
+    const hour = date.getHours() + date.getMinutes() / 60;
+
+    // Check if real history point exists close to this timestamp
+    const closeReal = realHistory.find((r) => Math.abs(r.ts - ptTs) < stepMs / 2);
+
+    // 1. Soil Moisture Calculation
+    let moistureVal: number;
+    let isWater = false;
+    let matchingLog: WaterLog | undefined;
+
+    // Find if a water log occurred near this sample
+    const nearLog = logsInWindow.find((l) => Math.abs(l.ts - ptTs) < stepMs / 1.5);
+    if (nearLog) {
+      isWater = true;
+      matchingLog = nearLog;
+      moistureVal = nearLog.moistureAfter;
+    } else if (closeReal && typeof closeReal.soilMoisture === 'number') {
+      moistureVal = closeReal.soilMoisture;
+    } else if (i === numPoints - 1) {
+      moistureVal = currentTelem.soilMoisture;
+    } else {
+      // Simulate natural decay from current value back in time
+      const decayRate = location === 'terrace' ? 1.4 : location === 'balcony' ? 1.1 : 0.8;
+      const hoursAgo = (now - ptTs) / 3600000;
+      // Periodic saw-tooth shape based on water logs or decay
+      const baseDecay = (currentTelem.soilMoisture + hoursAgo * decayRate * 0.4) % 40;
+      moistureVal = Math.max(
+        thresholds.moistureMin - 5,
+        Math.min(thresholds.moistureMax + 10, currentTelem.soilMoisture - baseDecay + 15)
+      );
     }
-  });
 
-  // Add current value at now
-  const currentVal =
-    metric === 'moisture'
-      ? currentValue
-      : metric === 'temp'
-      ? currentValue
-      : currentValue;
-  points.push({ ts: now, val: currentVal, isWater: false });
+    const moistureY = chartHeight - (Math.max(0, Math.min(100, moistureVal)) / 100) * chartHeight;
+    moisturePoints.push({
+      x,
+      y: moistureY,
+      ts: ptTs,
+      val: moistureVal,
+      isWater,
+      waterLog: matchingLog,
+    });
 
-  if (points.length < 2) {
-    // Add synthetic start point
-    points.unshift({ ts: now - windowMs, val: currentVal * 0.85, isWater: false });
+    // 2. Temperature Calculation (Diurnal sine curve peaking at 2 PM / 14:00)
+    let tempVal: number;
+    if (closeReal && typeof closeReal.temperature === 'number') {
+      tempVal = closeReal.temperature;
+    } else if (i === numPoints - 1) {
+      tempVal = currentTelem.temperature;
+    } else {
+      const diurnalSine = Math.sin(((hour - 8) / 24) * 2 * Math.PI); // peak ~14:00
+      const baseTemp = location === 'terrace' ? 29 : location === 'balcony' ? 27 : 24;
+      const amplitude = location === 'terrace' ? 5 : 3;
+      tempVal = Math.round(baseTemp + diurnalSine * amplitude);
+    }
+    const tempY = chartHeight - (Math.max(0, Math.min(50, tempVal)) / 50) * chartHeight;
+    tempPoints.push({
+      x,
+      y: tempY,
+      ts: ptTs,
+      val: tempVal,
+    });
+
+    // 3. Humidity Calculation (Inversely related to temperature / peaks at dawn)
+    let humidityVal: number;
+    if (closeReal && typeof closeReal.humidity === 'number') {
+      humidityVal = closeReal.humidity;
+    } else if (i === numPoints - 1) {
+      humidityVal = currentTelem.humidity;
+    } else {
+      const humiditySine = Math.sin(((hour - 20) / 24) * 2 * Math.PI); // peak ~6:00
+      humidityVal = Math.round(62 + humiditySine * 15);
+    }
+    const humidityY = chartHeight - (Math.max(0, Math.min(100, humidityVal)) / 100) * chartHeight;
+    humidityPoints.push({
+      x,
+      y: humidityY,
+      ts: ptTs,
+      val: humidityVal,
+    });
+
+    // 4. Sunlight Calculation (Daylight 6 AM to 6 PM)
+    let lightVal: number = 0;
+    if (sensors.lightMode === 'digital') {
+      lightVal = hour >= 6 && hour <= 18 ? 1 : 0;
+    } else if (sensors.lightMode === 'analog') {
+      const daylightFactor = Math.max(0, Math.sin(((hour - 6) / 12) * Math.PI));
+      lightVal = Math.round(daylightFactor * 90);
+    }
+    const lightMax = sensors.lightMode === 'digital' ? 1 : 100;
+    const lightY = chartHeight - (Math.max(0, Math.min(lightMax, lightVal)) / (lightMax || 1)) * chartHeight;
+    lightPoints.push({
+      x,
+      y: lightY,
+      ts: ptTs,
+      val: lightVal,
+    });
   }
 
-  const oldest = now - windowMs;
-  const span = windowMs;
+  return {
+    moisture: moisturePoints,
+    temp: tempPoints,
+    humidity: humidityPoints,
+    light: lightPoints,
+  };
+}
 
-  return points.map((p) => ({
-    x: ((p.ts - oldest) / span) * CHART_W,
-    y: CHART_H - (Math.min(p.val, METRIC_CONFIG[metric].max) / METRIC_CONFIG[metric].max) * CHART_H,
-    isWater: p.isWater,
-  }));
+/**
+ * Builds Plain-Language rule-based summary insights from telemetry and device configuration.
+ */
+function buildRuleBasedInsights(
+  device: DeviceRecord,
+  waterLogs: WaterLog[]
+): InsightCardData[] {
+  const { config, telemetry } = device;
+  const plantName = config.plantName || config.name || 'Your plant';
+  const location = config.location;
+  const list: InsightCardData[] = [];
+
+  // Insight 1: Weather & Humidity Guard
+  if (telemetry.humidity > config.thresholds.humidityMax || telemetry.humidity > 75) {
+    list.push({
+      id: 'ins-humidity',
+      category: 'Weather Guard',
+      title: 'High Humidity Protected',
+      body: `Coastal air humidity (${telemetry.humidity}%) slowed natural evaporation. Auto-watering cycles pause accordingly to prevent soggy soil and fungal root rot.`,
+      icon: 'shield-checkmark',
+      tint: 'lime',
+    });
+  } else {
+    list.push({
+      id: 'ins-humidity-normal',
+      category: 'Climate Balance',
+      title: 'Favorable Transpiration',
+      body: `Humidity at ${telemetry.humidity}% provides an ideal transpiration balance for ${plantName}, avoiding dry leaf tips.`,
+      icon: 'leaf',
+      tint: 'mint',
+    });
+  }
+
+  // Insight 2: Location Micro-Climate
+  if (location === 'terrace') {
+    list.push({
+      id: 'ins-location',
+      category: 'Terrace Sun & Wind',
+      title: 'Accelerated Evaporation',
+      body: `Unobstructed terrace sun and wind exposure dries soil ~25% faster than indoors. Ensure water bottle is kept filled for timely morning cycles.`,
+      icon: 'sunny',
+      tint: 'lime',
+    });
+  } else if (location === 'balcony') {
+    list.push({
+      id: 'ins-location',
+      category: 'Balcony Comfort',
+      title: 'Filtered Sunlight Growth',
+      body: `Balcony railing partial shade protects ${plantName} from peak midday scorch while providing ample indirect lumens.`,
+      icon: 'partly-sunny',
+      tint: 'mint',
+    });
+  } else {
+    list.push({
+      id: 'ins-location',
+      category: 'Indoor Stability',
+      title: 'Steady Indoor Microclimate',
+      body: `Indoor placement shields ${plantName} from harsh outdoor temperature swings, keeping moisture retention exceptionally steady.`,
+      icon: 'home',
+      tint: 'forest',
+    });
+  }
+
+  // Insight 3: Absorption & Watering Efficiency
+  if (waterLogs.length > 0) {
+    const totalGains = waterLogs.reduce(
+      (acc, l) => acc + Math.max(0, l.moistureAfter - l.moistureBefore),
+      0
+    );
+    const avgGain = Math.round(totalGains / waterLogs.length);
+    list.push({
+      id: 'ins-watering',
+      category: 'Absorption Metrics',
+      title: `+${avgGain}% Average Moisture Gain`,
+      body: `${waterLogs.length} pump cycles logged. Soil responds effectively within 5 minutes, showing healthy pot drainage and root permeability.`,
+      icon: 'water',
+      tint: 'mint',
+    });
+  }
+
+  // Insight 4: Temperature Safety Zone
+  if (telemetry.temperature > config.thresholds.tempMax - 2) {
+    list.push({
+      id: 'ins-temp',
+      category: 'Heat Watch',
+      title: 'Warm Afternoon Alert',
+      body: `Temperature neared ${telemetry.temperature}°C. The system prefers early morning watering to avoid scalding delicate feeder roots in warm soil.`,
+      icon: 'thermometer',
+      tint: 'blush',
+    });
+  } else {
+    list.push({
+      id: 'ins-temp',
+      category: 'Thermal Health',
+      title: 'Comfortable Temp Range',
+      body: `Ambient temperature (${telemetry.temperature}°C) remained comfortably within safe bounds (limit: ${config.thresholds.tempMax}°C).`,
+      icon: 'happy',
+      tint: 'mint',
+    });
+  }
+
+  return list;
 }
 
 export default function HistoryScreen() {
-  const { colors, radii, spacing } = useAppTheme();
+  const { colors, spacing } = useAppTheme();
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
   const waterLogs = useLiveDevice((s) => s.waterLogs);
+  const user = useSession((s) => s.user);
+  const isDemoMode = useSession((s) => s.isDemoMode);
+  const { alerts } = useAlertEngine();
 
-  const [activeMetric, setActiveMetric] = useState<MetricKey>('moisture');
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('24h');
+  const [activeMetric, setActiveMetric] = useState<ChartMetricKey>('moisture');
+  const [scrubFraction, setScrubFraction] = useState<number>(1.0); // 1.0 = newest
+  const [realHistory, setRealHistory] = useState<DeviceHistoryRecord[]>([]);
 
-  // Ribbon cursor position (0 = oldest, 1 = newest)
-  const ribbonPos = useSharedValue(1.0);
-  const [cursorLabel, setCursorLabel] = useState('Now');
-  const ribbonWidth = CHART_W;
-  const ribbonStartPos = useSharedValue(1.0);
-
-  const ribbonGesture = Gesture.Pan()
-    .onStart(() => {
-      ribbonStartPos.value = ribbonPos.value;
-    })
-    .onUpdate((event) => {
-      const next = ribbonStartPos.value + event.translationX / ribbonWidth;
-      ribbonPos.value = Math.max(0, Math.min(1, next));
-      const hoursBack = (1 - ribbonPos.value) * (timeWindow === '24h' ? 24 : 168);
-      const label = hoursBack < 1
-        ? `${Math.round(hoursBack * 60)}m ago`
-        : `${Math.round(hoursBack)}h ago`;
-      runOnJS(setCursorLabel)(ribbonPos.value >= 0.99 ? 'Now' : label);
+  // Listen to RTDB history for the active device if in cloud mode
+  useEffect(() => {
+    if (!device || isDemoMode || !user) return;
+    const unsubscribe = listenToDeviceHistory(device.id, (records) => {
+      setRealHistory(records);
     });
-
-  const cursorAnimStyle = useAnimatedStyle(() => ({
-    left: ribbonPos.value * ribbonWidth - 10,
-  }));
+    return () => unsubscribe();
+  }, [device?.id, isDemoMode, user]);
 
   if (!device) {
     return (
       <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
-        <View style={styles.emptyWrapper}>
+        <View style={styles.emptyContainer}>
           <Text style={[styles.emptyText, { color: colors.textMuted }]}>
-            No device connected.
+            No device paired. Connect a plant device to view history.
           </Text>
         </View>
       </SafeAreaView>
     );
   }
 
-  const { telemetry, config } = device;
-  const windowHours = timeWindow === '24h' ? 24 : 168;
+  // Available metrics based on sensors config
+  const availableMetrics: ChartMetricKey[] = useMemo(() => {
+    const list: ChartMetricKey[] = ['moisture', 'temp', 'humidity'];
+    if (device.config.sensors.lightMode !== 'none') {
+      list.push('light');
+    }
+    return list;
+  }, [device.config.sensors.lightMode]);
 
-  const metricCurrentValue =
+  // Generate series data points
+  const seriesMap = useMemo(() => {
+    return generateHistoricalSeries(
+      device,
+      waterLogs,
+      realHistory,
+      timeWindow,
+      CHART_WIDTH,
+      CHART_HEIGHT
+    );
+  }, [device, waterLogs, realHistory, timeWindow]);
+
+  const currentPoints = seriesMap[activeMetric];
+
+  // Derive scrub index
+  const scrubIndex = useMemo(() => {
+    if (currentPoints.length === 0) return null;
+    const idx = Math.round(scrubFraction * (currentPoints.length - 1));
+    return Math.max(0, Math.min(currentPoints.length - 1, idx));
+  }, [scrubFraction, currentPoints.length]);
+
+  // Formatted cursor label for DayRibbon
+  const cursorLabel = useMemo(() => {
+    if (scrubFraction >= 0.98) return 'Live (Now)';
+    const hoursBack = (1 - scrubFraction) * (timeWindow === '24h' ? 24 : 168);
+    if (hoursBack < 1) {
+      return `${Math.max(1, Math.round(hoursBack * 60))}m ago`;
+    }
+    if (hoursBack < 24) {
+      return `${Math.round(hoursBack)}h ago`;
+    }
+    const daysBack = Math.round(hoursBack / 24);
+    return `${daysBack}d ago`;
+  }, [scrubFraction, timeWindow]);
+
+  // Rule-based insight cards
+  const insights = useMemo(() => {
+    return buildRuleBasedInsights(device, waterLogs);
+  }, [device, waterLogs]);
+
+  // Unit label
+  const unit =
     activeMetric === 'moisture'
-      ? telemetry.soilMoisture
+      ? '%'
       : activeMetric === 'temp'
-      ? telemetry.temperature
-      : telemetry.humidity;
-
-  const chartPoints = buildChartPoints(waterLogs, metricCurrentValue, activeMetric, windowHours);
-  const polylineStr = chartPoints.map((p) => `${p.x},${p.y}`).join(' ');
-  const waterPoints = chartPoints.filter((p) => p.isWater);
-
-  const metricCfg = METRIC_CONFIG[activeMetric];
-
-  // Insight cards
-  const insights = [
-    {
-      id: '1',
-      icon: 'bulb-outline' as const,
-      text:
-        telemetry.humidity > config.thresholds.humidityMax
-          ? 'High humidity is slowing soil drying — auto-watering has been cautious.'
-          : 'Conditions have been optimal for growth over the past 24 hours.',
-      bg: `${colors.palette.lime}60`,
-    },
-    {
-      id: '2',
-      icon: 'analytics-outline' as const,
-      text: `${waterLogs.length} watering events logged. Average moisture rise: ${waterLogs.length > 0 ? Math.round(waterLogs.reduce((s, l) => s + (l.moistureAfter - l.moistureBefore), 0) / waterLogs.length) : 0}%.`,
-      bg: `${colors.palette.mint}50`,
-    },
-    {
-      id: '3',
-      icon: 'thermometer-outline' as const,
-      text: `Temperature has stayed within ${config.thresholds.tempMax}°C limit. Plant stress risk: Low.`,
-      bg: `${colors.palette.blush}40`,
-    },
-  ];
+      ? '°C'
+      : activeMetric === 'humidity'
+      ? '%'
+      : device.config.sensors.lightMode === 'digital'
+      ? ''
+      : '%';
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
       <ScrollView
-        contentContainerStyle={[styles.container, { padding: spacing.md }]}
+        contentContainerStyle={[styles.contentContainer, { padding: spacing.md }]}
         showsVerticalScrollIndicator={false}
       >
-        <Text style={[styles.title, { color: colors.text }]}>Insights</Text>
-        <Text style={[styles.subtitle, { color: colors.textMuted }]}>
-          Moisture balance &amp; telemetry history
-        </Text>
-
-        {/* ── Time Window Toggle ──────────────────────────────── */}
-        <View
-          style={[
-            styles.toggleRow,
-            {
-              backgroundColor: colors.palette.mist,
-              borderRadius: radii.md,
-            },
-          ]}
-        >
-          {(['24h', '7d'] as TimeWindow[]).map((tw) => (
-            <TouchableOpacity
-              key={tw}
-              onPress={() => setTimeWindow(tw)}
-              style={[
-                styles.toggleBtn,
-                {
-                  backgroundColor:
-                    timeWindow === tw
-                      ? colors.palette.forest
-                      : 'transparent',
-                  borderRadius: radii.md - 2,
-                },
-              ]}
-              accessibilityLabel={`View ${tw} window`}
-            >
-              <Text
-                style={[
-                  styles.toggleBtnText,
-                  {
-                    color:
-                      timeWindow === tw
-                        ? colors.palette.white
-                        : colors.palette.sage,
-                  },
-                ]}
-              >
-                {tw === '24h' ? 'Past 24 Hours' : '7-Day Trend'}
-              </Text>
-            </TouchableOpacity>
-          ))}
+        {/* ── Screen Header ────────────────────────────────────── */}
+        <View style={styles.header}>
+          <Text style={[styles.screenTitle, { color: colors.text }]}>Insights</Text>
+          <Text style={[styles.screenSubtitle, { color: colors.textMuted }]}>
+            Continuous telemetry scrubbing &amp; event history
+          </Text>
         </View>
 
-        {/* ── Day Ribbon scrub ────────────────────────────────── */}
-        <View
-          style={[
-            styles.ribbonWrapper,
-            {
-              backgroundColor: colors.palette.white,
-              borderRadius: radii.card,
-              borderColor: colors.border,
-            },
-          ]}
-        >
-          <View style={styles.ribbonTrack}>
-            {/* Hour tick marks */}
-            {Array.from({ length: timeWindow === '24h' ? 7 : 8 }, (_, i) => (
-              <View
-                key={i}
-                style={[
-                  styles.ribbonTick,
-                  { backgroundColor: `${colors.palette.sage}40` },
-                ]}
-              />
-            ))}
+        {/* ── Day Ribbon Scrubber ──────────────────────────────── */}
+        <DayRibbon
+          timeWindow={timeWindow}
+          onTimeWindowChange={(tw) => {
+            setTimeWindow(tw);
+            setScrubFraction(1.0); // Reset to live
+          }}
+          scrubFraction={scrubFraction}
+          onScrub={setScrubFraction}
+          cursorLabel={cursorLabel}
+        />
 
-            {/* Drag cursor */}
-            <GestureDetector gesture={ribbonGesture}>
-              <Animated.View
-                style={[
-                  styles.ribbonCursor,
-                  {
-                    backgroundColor: colors.palette.forest,
-                    borderRadius: 10,
-                  },
-                  cursorAnimStyle,
-                ]}
-              />
-            </GestureDetector>
-          </View>
+        {/* ── Telemetry Chart Area ─────────────────────────────── */}
+        <TelemetryChart
+          points={currentPoints}
+          activeMetric={activeMetric}
+          onMetricChange={setActiveMetric}
+          availableMetrics={availableMetrics}
+          unit={unit}
+          minThreshold={device.config.thresholds.moistureMin}
+          maxThreshold={device.config.thresholds.moistureMax}
+          scrubIndex={scrubIndex}
+          onScrubIndexChange={(idx) => {
+            if (idx !== null && currentPoints.length > 1) {
+              setScrubFraction(idx / (currentPoints.length - 1));
+            }
+          }}
+        />
 
-          <View style={styles.ribbonLabels}>
-            <Text style={[styles.ribbonLabelEnd, { color: colors.textMuted }]}>
-              {timeWindow === '24h' ? '24h ago' : '7 days ago'}
-            </Text>
-            <Text
-              style={[styles.ribbonLabelCenter, { color: colors.palette.forest }]}
-            >
-              {cursorLabel}
-            </Text>
-            <Text style={[styles.ribbonLabelEnd, { color: colors.textMuted }]}>
-              Now
-            </Text>
-          </View>
-        </View>
+        {/* ── Plain-Language Insights Carousel ─────────────────── */}
+        <InsightCardCarousel insights={insights} />
 
-        {/* ── Metric Switcher Chips ─────────────────────────── */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.metricChips}
-          contentContainerStyle={{ gap: 8 }}
-        >
-          {(Object.keys(METRIC_CONFIG) as MetricKey[]).map((mk) => {
-            const cfg = METRIC_CONFIG[mk];
-            const isActive = activeMetric === mk;
-            return (
-              <TouchableOpacity
-                key={mk}
-                onPress={() => setActiveMetric(mk)}
-                style={[
-                  styles.metricChip,
-                  {
-                    backgroundColor: isActive
-                      ? colors.palette.forest
-                      : colors.palette.white,
-                    borderRadius: radii.full,
-                    borderColor: isActive
-                      ? colors.palette.forest
-                      : colors.border,
-                  },
-                ]}
-                accessibilityLabel={`View ${cfg.label} chart`}
-              >
-                <Ionicons
-                  name={cfg.icon}
-                  size={14}
-                  color={isActive ? colors.palette.white : colors.palette.sage}
-                />
-                <Text
-                  style={[
-                    styles.metricChipText,
-                    {
-                      color: isActive
-                        ? colors.palette.white
-                        : colors.palette.sage,
-                    },
-                  ]}
-                >
-                  {cfg.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
+        {/* ── "What Happened" Vertical Timeline ────────────────── */}
+        <EventTimeline waterLogs={waterLogs} alerts={alerts} />
 
-        {/* ── Chart area ──────────────────────────────────────── */}
-        <View
-          style={[
-            styles.chartCard,
-            {
-              backgroundColor: colors.palette.white,
-              borderRadius: radii.card,
-              borderColor: colors.border,
-            },
-          ]}
-        >
-          <View style={styles.chartHeader}>
-            <Text style={[styles.chartMetricLabel, { color: colors.text }]}>
-              {metricCfg.label}
-            </Text>
-            <Text style={[styles.chartCurrentValue, { color: metricCfg.color }]}>
-              {metricCurrentValue}{metricCfg.unit}
-            </Text>
-          </View>
-
-          <Svg width={CHART_W} height={CHART_H}>
-            {/* Horizontal grid lines */}
-            {[0.25, 0.5, 0.75].map((frac, i) => (
-              <Line
-                key={i}
-                x1={0}
-                y1={CHART_H * frac}
-                x2={CHART_W}
-                y2={CHART_H * frac}
-                stroke={`${colors.palette.sage}25`}
-                strokeWidth={1}
-                strokeDasharray="4 4"
-              />
-            ))}
-
-            {/* Threshold lines (only for moisture) */}
-            {activeMetric === 'moisture' && (
-              <>
-                <Line
-                  x1={0}
-                  y1={CHART_H - (config.thresholds.moistureMin / 100) * CHART_H}
-                  x2={CHART_W}
-                  y2={CHART_H - (config.thresholds.moistureMin / 100) * CHART_H}
-                  stroke={colors.palette.warningBorder}
-                  strokeWidth={1.5}
-                  strokeDasharray="6 3"
-                />
-                <Line
-                  x1={0}
-                  y1={CHART_H - (config.thresholds.moistureMax / 100) * CHART_H}
-                  x2={CHART_W}
-                  y2={CHART_H - (config.thresholds.moistureMax / 100) * CHART_H}
-                  stroke={colors.palette.forest}
-                  strokeWidth={1.5}
-                  strokeDasharray="6 3"
-                />
-              </>
-            )}
-
-            {/* Main line */}
-            {chartPoints.length >= 2 && (
-              <Polyline
-                points={polylineStr}
-                fill="none"
-                stroke={metricCfg.color}
-                strokeWidth={2.5}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            )}
-
-            {/* Water event droplet markers */}
-            {waterPoints.map((p, i) => (
-              <SvgCircle
-                key={i}
-                cx={p.x}
-                cy={p.y}
-                r={5}
-                fill={colors.palette.forest}
-                stroke={colors.palette.white}
-                strokeWidth={1.5}
-              />
-            ))}
-          </Svg>
-
-          <View style={styles.chartFooter}>
-            {activeMetric === 'moisture' && (
-              <View style={styles.legendRow}>
-                <View style={[styles.legendDot, { backgroundColor: colors.palette.forest }]} />
-                <Text style={[styles.legendText, { color: colors.textMuted }]}>Watering events</Text>
-              </View>
-            )}
-          </View>
-        </View>
-
-        {/* ── Insight Carousel ─────────────────────────────── */}
-        <Text style={[styles.sectionTitle, { color: colors.text }]}>
-          Plant Insights
-        </Text>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.carouselContent}
-        >
-          {insights.map((ins) => (
-            <View
-              key={ins.id}
-              style={[
-                styles.insightCard,
-                {
-                  backgroundColor: ins.bg,
-                  borderRadius: radii.card,
-                  borderColor: colors.border,
-                },
-              ]}
-            >
-              <Ionicons
-                name={ins.icon}
-                size={22}
-                color={colors.palette.forest}
-              />
-              <Text style={[styles.insightText, { color: colors.palette.ink }]}>
-                {ins.text}
-              </Text>
-            </View>
-          ))}
-        </ScrollView>
-
-        {/* ── What happened timeline ─────────────────────── */}
-        <Text style={[styles.sectionTitle, { color: colors.text }]}>
-          What Happened
-        </Text>
-        <View style={styles.timeline}>
-          {waterLogs.map((log, i) => {
-            const isManual = log.trigger === 'manual';
-            const isLast = i === waterLogs.length - 1;
-            return (
-              <View key={log.id} style={styles.timelineItem}>
-                {/* Line + dot */}
-                <View style={styles.timelineLeft}>
-                  <View
-                    style={[
-                      styles.timelineDot,
-                      {
-                        backgroundColor: isManual
-                          ? colors.palette.sage
-                          : colors.palette.forest,
-                        borderColor: colors.palette.white,
-                      },
-                    ]}
-                  />
-                  {!isLast && (
-                    <View
-                      style={[
-                        styles.timelineLine,
-                        { backgroundColor: `${colors.palette.sage}30` },
-                      ]}
-                    />
-                  )}
-                </View>
-
-                {/* Event card */}
-                <View
-                  style={[
-                    styles.timelineCard,
-                    {
-                      backgroundColor: isManual
-                        ? `${colors.palette.lime}60`
-                        : `${colors.palette.mint}40`,
-                      borderRadius: radii.md,
-                    },
-                  ]}
-                >
-                  <View style={styles.timelineCardHeader}>
-                    <Text
-                      style={[styles.timelineTitle, { color: colors.palette.ink }]}
-                    >
-                      {isManual ? 'Manual water' : 'Auto-water'}
-                      {' · '}{log.durationSec}s
-                    </Text>
-                    <Text
-                      style={[styles.timelineTime, { color: colors.palette.sage }]}
-                    >
-                      {formatTimeAgo(log.ts)}
-                    </Text>
-                  </View>
-                  <Text
-                    style={[styles.timelineBody, { color: colors.palette.sage }]}
-                  >
-                    {log.moistureBefore}% → {log.moistureAfter}%
-                    {log.note ? ` · ${log.note}` : ''}
-                  </Text>
-                </View>
-              </View>
-            );
-          })}
-
-          {waterLogs.length === 0 && (
-            <Text style={[styles.emptyText, { color: colors.textMuted }]}>
-              No watering events in this window.
-            </Text>
-          )}
-        </View>
-
-        <View style={{ height: 120 }} />
+        <View style={{ height: 110 }} />
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function formatTimeAgo(ts: number): string {
-  const diffMs = Date.now() - ts;
-  const diffH = Math.floor(diffMs / 3600000);
-  const diffMin = Math.floor((diffMs % 3600000) / 60000);
-  if (diffH > 23) return `${Math.floor(diffH / 24)}d ago`;
-  if (diffH > 0) return `${diffH}h ago`;
-  if (diffMin > 0) return `${diffMin}m ago`;
-  return 'just now';
-}
-
 const styles = StyleSheet.create({
-  safeArea: { flex: 1 },
-  container: { paddingBottom: 20 },
-  title: { fontSize: 28, fontWeight: '800', letterSpacing: -0.5, marginBottom: 4 },
-  subtitle: { fontSize: 14, marginBottom: 16 },
-  toggleRow: {
-    flexDirection: 'row', padding: 4,
+  safeArea: {
+    flex: 1,
+  },
+  contentContainer: {
+    paddingBottom: 24,
+  },
+  header: {
     marginBottom: 16,
   },
-  toggleBtn: {
-    flex: 1, flexDirection: 'row',
-    alignItems: 'center', justifyContent: 'center',
-    paddingVertical: 10, gap: 5,
+  screenTitle: {
+    fontSize: 28,
+    fontWeight: '800',
+    letterSpacing: -0.5,
   },
-  toggleBtnText: { fontSize: 13, fontWeight: '700' },
-  ribbonWrapper: {
-    padding: 14, borderWidth: 1,
-    marginBottom: 16,
+  screenSubtitle: {
+    fontSize: 13,
+    fontWeight: '400',
+    marginTop: 2,
   },
-  ribbonTrack: {
-    height: 20, flexDirection: 'row',
+  emptyContainer: {
+    flex: 1,
     alignItems: 'center',
-    justifyContent: 'space-between',
-    position: 'relative',
-    marginBottom: 8,
+    justifyContent: 'center',
+    padding: 24,
   },
-  ribbonTick: {
-    width: 1.5, height: 10, borderRadius: 1,
+  emptyText: {
+    fontSize: 14,
+    textAlign: 'center',
   },
-  ribbonCursor: {
-    position: 'absolute', width: 20, height: 20,
-    top: 0,
-  },
-  ribbonLabels: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-  },
-  ribbonLabelEnd: { fontSize: 10, fontWeight: '500' },
-  ribbonLabelCenter: { fontSize: 11, fontWeight: '700' },
-  metricChips: { marginBottom: 14 },
-  metricChip: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 14, paddingVertical: 8, gap: 6,
-    borderWidth: 1.5,
-  },
-  metricChipText: { fontSize: 13, fontWeight: '700' },
-  chartCard: {
-    padding: 16, borderWidth: 1, marginBottom: 20,
-  },
-  chartHeader: {
-    flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', marginBottom: 14,
-  },
-  chartMetricLabel: { fontSize: 15, fontWeight: '700' },
-  chartCurrentValue: { fontSize: 26, fontWeight: '800' },
-  chartFooter: { marginTop: 10 },
-  legendRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  legendDot: { width: 8, height: 8, borderRadius: 4 },
-  legendText: { fontSize: 11, fontWeight: '500' },
-  sectionTitle: {
-    fontSize: 18, fontWeight: '700', marginBottom: 12, marginTop: 8,
-  },
-  carouselContent: { gap: 12, paddingBottom: 4 },
-  insightCard: {
-    width: 200, padding: 16, gap: 10, borderWidth: 1,
-  },
-  insightText: { fontSize: 13, fontWeight: '400', lineHeight: 18 },
-  timeline: { gap: 0 },
-  timelineItem: { flexDirection: 'row', gap: 12, marginBottom: 12 },
-  timelineLeft: { alignItems: 'center', width: 16 },
-  timelineDot: {
-    width: 14, height: 14, borderRadius: 7,
-    borderWidth: 2, zIndex: 1,
-  },
-  timelineLine: { flex: 1, width: 2, marginTop: 2 },
-  timelineCard: { flex: 1, padding: 12 },
-  timelineCardHeader: {
-    flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', marginBottom: 4,
-  },
-  timelineTitle: { fontSize: 13, fontWeight: '700' },
-  timelineTime: { fontSize: 11, fontWeight: '500' },
-  timelineBody: { fontSize: 12, fontWeight: '400', lineHeight: 16 },
-  emptyWrapper: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  emptyText: { fontSize: 14 },
 });
