@@ -33,7 +33,7 @@ import Animated, {
   Extrapolation,
 } from 'react-native-reanimated';
 import { useAppTheme } from '@/theme';
-import { useLiveDevice } from '@/store/useLiveDevice';
+import { useLiveDevice } from '@/hooks/useLiveDevice';
 import { usePlantState } from '@/hooks/usePlantState';
 import { Plant3DHero } from '@/components/Plant3D';
 import { MoodBubble } from '@/components/MoodBubble';
@@ -112,10 +112,10 @@ export default function HomeScreen() {
             <Ionicons name="leaf-outline" size={56} color={colors.palette.forest} />
           </View>
           <Text style={[styles.emptyTitle, { color: colors.palette.ink }]}>
-            No Plant Connected
+            Unpaired Hardware
           </Text>
           <Text style={[styles.emptySubtitle, { color: colors.palette.sage }]}>
-            Pair your ESP8266 plant companion to start monitoring
+            No device is currently paired under your account. Pair your ESP8266 plant companion to start live monitoring.
           </Text>
           <TouchableOpacity
             style={[
@@ -128,12 +128,12 @@ export default function HomeScreen() {
             onPress={() => router.push('/add-device')}
           >
             <Ionicons
-              name="add"
+              name="link-outline"
               size={18}
               color={colors.palette.white}
               style={{ marginRight: 8 }}
             />
-            <Text style={styles.addBtnText}>Add First Plant Device</Text>
+            <Text style={styles.addBtnText}>Pair Hardware</Text>
           </TouchableOpacity>
         </View>
       </LinearGradient>

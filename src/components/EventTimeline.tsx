@@ -36,8 +36,11 @@ interface EventTimelineProps {
   alerts: AppAlert[];
 }
 
-function formatRelativeTime(ts: number): string {
-  const diffMs = Date.now() - ts;
+function formatRelativeTime(ts: number | undefined): string {
+  const parsed = typeof ts === 'number' ? ts : Number(ts);
+  if (!ts || !isFinite(parsed) || parsed <= 0) return 'Just now';
+  const diffMs = Date.now() - parsed;
+  if (diffMs < 0) return 'Just now';
   const diffMin = Math.floor(diffMs / 60000);
   const diffH = Math.floor(diffMs / 3600000);
   const diffD = Math.floor(diffH / 24);
@@ -48,7 +51,7 @@ function formatRelativeTime(ts: number): string {
   if (diffD === 1) return 'Yesterday';
   if (diffD < 7) return `${diffD}d ago`;
 
-  const date = new Date(ts);
+  const date = new Date(parsed);
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
@@ -249,8 +252,8 @@ export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
                           ]}
                         >
                           {isWater
-                            ? `${event.trigger.toUpperCase()} WATER`
-                            : `${event.severity.toUpperCase()} ALERT`}
+                            ? `${(event.trigger ?? 'manual').toUpperCase()} WATER`
+                            : `${(event.severity ?? 'info').toUpperCase()} ALERT`}
                         </Text>
                       </View>
 

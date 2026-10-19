@@ -18,6 +18,7 @@ import {
   Switch,
   Alert,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -31,6 +32,8 @@ import Animated, {
   FadeIn,
   FadeOut,
 } from 'react-native-reanimated';
+import { ref, set } from 'firebase/database';
+import { db } from '@/services/firebase';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice, PlantLocation, DeviceRecord } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
@@ -57,11 +60,11 @@ export default function AddDeviceScreen() {
   const addDevice = useLiveDevice((s) => s.addDevice);
   const setActiveDeviceId = useSession((s) => s.setActiveDeviceId);
   const isDemoMode = useSession((s) => s.isDemoMode);
+  const user = useSession((s) => s.user);
 
-  // Wizard Step (1 through 5)
   const [step, setStep] = useState<number>(1);
+  const [showWifiGuide, setShowWifiGuide] = useState<boolean>(true);
 
-  // STEP 1 State: Hardware Connection
   const [connectTab, setConnectTab] = useState<'qr' | 'manual' | 'demo'>('qr');
   const [deviceIdInput, setDeviceIdInput] = useState<string>('');
   const [isVerifyingOnline, setIsVerifyingOnline] = useState<boolean>(false);
@@ -223,8 +226,11 @@ export default function AddDeviceScreen() {
     if (!isDemoMode) {
       try {
         await updateDeviceConfigInRTDB(devId, newRecord.config);
+        if (user?.uid) {
+          await set(ref(db, `users/${user.uid}/devices/${devId}`), true);
+          await set(ref(db, `owners/${devId}`), user.uid);
+        }
       } catch {
-        // Fallback silently if offline
       }
     }
 
@@ -291,7 +297,175 @@ export default function AddDeviceScreen() {
         {/* STEP 1: Connect Hardware */}
         {step === 1 && (
           <View>
-            {/* Sub-tab Switcher */}
+            <View
+              style={[
+                styles.wifiGuideCard,
+                {
+                  backgroundColor: colors.surface,
+                  borderRadius: radii.card,
+                  borderColor: colors.border,
+                },
+              ]}
+            >
+              <TouchableOpacity
+                style={styles.wifiGuideHeader}
+                onPress={() => setShowWifiGuide((v) => !v)}
+                activeOpacity={0.7}
+              >
+                <View style={styles.wifiGuideHeaderLeft}>
+                  <View
+                    style={[
+                      styles.wifiIconWrap,
+                      { backgroundColor: colors.palette.lime },
+                    ]}
+                  >
+                    <Ionicons
+                      name="wifi"
+                      size={18}
+                      color={colors.palette.forest}
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text
+                      style={[
+                        styles.wifiGuideTitle,
+                        { color: colors.text },
+                      ]}
+                    >
+                      Wi-Fi Setup Instructions
+                    </Text>
+                    <Text
+                      style={[
+                        styles.wifiGuideSub,
+                        { color: colors.textMuted },
+                      ]}
+                    >
+                      Hardware hotspot & captive portal guide
+                    </Text>
+                  </View>
+                </View>
+                <Ionicons
+                  name={showWifiGuide ? 'chevron-up' : 'chevron-down'}
+                  size={20}
+                  color={colors.palette.sage}
+                />
+              </TouchableOpacity>
+
+              {showWifiGuide && (
+                <View style={styles.wifiGuideBody}>
+                  <View style={styles.wifiStepItem}>
+                    <View
+                      style={[
+                        styles.stepNumBadge,
+                        { backgroundColor: colors.palette.forest },
+                      ]}
+                    >
+                      <Text style={styles.stepNumText}>1</Text>
+                    </View>
+                    <View style={styles.stepContent}>
+                      <Text
+                        style={[
+                          styles.stepText,
+                          { color: colors.text },
+                        ]}
+                      >
+                        <Text style={styles.stepBold}>Power on the device: </Text>
+                        When the ESP8266 turns on and cannot find a saved Wi-Fi network, it creates its own temporary setup Wi-Fi hotspot named <Text style={styles.stepCode}>LeafLink-&lt;chipId&gt;</Text> (e.g., <Text style={styles.stepCode}>LeafLink-A1B2C3</Text>).
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.wifiStepItem}>
+                    <View
+                      style={[
+                        styles.stepNumBadge,
+                        { backgroundColor: colors.palette.forest },
+                      ]}
+                    >
+                      <Text style={styles.stepNumText}>2</Text>
+                    </View>
+                    <View style={styles.stepContent}>
+                      <Text
+                        style={[
+                          styles.stepText,
+                          { color: colors.text },
+                        ]}
+                      >
+                        <Text style={styles.stepBold}>Connect with Phone: </Text>
+                        Open Wi-Fi settings on your phone, connect to <Text style={styles.stepCode}>LeafLink-&lt;chipId&gt;</Text>, and enter the setup password <Text style={styles.stepCode}>leafsetup</Text>.
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.wifiStepItem}>
+                    <View
+                      style={[
+                        styles.stepNumBadge,
+                        { backgroundColor: colors.palette.forest },
+                      ]}
+                    >
+                      <Text style={styles.stepNumText}>3</Text>
+                    </View>
+                    <View style={styles.stepContent}>
+                      <Text
+                        style={[
+                          styles.stepText,
+                          { color: colors.text },
+                        ]}
+                      >
+                        <Text style={styles.stepBold}>Captive Portal Opens: </Text>
+                        A setup page pops up on your phone automatically (or navigate to <Text style={styles.stepCode}>192.168.4.1</Text> in your browser).
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.wifiStepItem}>
+                    <View
+                      style={[
+                        styles.stepNumBadge,
+                        { backgroundColor: colors.palette.forest },
+                      ]}
+                    >
+                      <Text style={styles.stepNumText}>4</Text>
+                    </View>
+                    <View style={styles.stepContent}>
+                      <Text
+                        style={[
+                          styles.stepText,
+                          { color: colors.text },
+                        ]}
+                      >
+                        <Text style={styles.stepBold}>Enter Wi-Fi Details: </Text>
+                        Tap <Text style={styles.stepBold}>Configure WiFi</Text>, select your home Wi-Fi network from the scanned list, type your Wi-Fi password, and tap <Text style={styles.stepBold}>Save</Text>.
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.wifiStepItem}>
+                    <View
+                      style={[
+                        styles.stepNumBadge,
+                        { backgroundColor: colors.palette.forest },
+                      ]}
+                    >
+                      <Text style={styles.stepNumText}>5</Text>
+                    </View>
+                    <View style={styles.stepContent}>
+                      <Text
+                        style={[
+                          styles.stepText,
+                          { color: colors.text },
+                        ]}
+                      >
+                        <Text style={styles.stepBold}>Saved to Flash Memory: </Text>
+                        The ESP8266 saves your Wi-Fi credentials inside its internal memory, turns off the setup hotspot, and connects to Firebase.
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+              )}
+            </View>
+
             <View style={[styles.tabBar, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
               <TouchableOpacity
                 onPress={() => setConnectTab('qr')}
@@ -1119,5 +1293,75 @@ const styles = StyleSheet.create({
   specDivider: {
     height: 1,
     backgroundColor: 'rgba(0,0,0,0.05)',
+  },
+  wifiGuideCard: {
+    borderWidth: 1,
+    padding: 14,
+    marginBottom: 14,
+  },
+  wifiGuideHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  wifiGuideHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  wifiIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  wifiGuideTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  wifiGuideSub: {
+    fontSize: 11,
+    marginTop: 1,
+  },
+  wifiGuideBody: {
+    marginTop: 14,
+    gap: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0,0,0,0.06)',
+    paddingTop: 12,
+  },
+  wifiStepItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  stepNumBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+  },
+  stepNumText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  stepContent: {
+    flex: 1,
+  },
+  stepText: {
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  stepBold: {
+    fontWeight: '700',
+  },
+  stepCode: {
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
 });

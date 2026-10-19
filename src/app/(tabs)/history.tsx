@@ -4,8 +4,8 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  SafeAreaView,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice, WaterLog, DeviceRecord } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
@@ -268,6 +268,7 @@ function buildRuleBasedInsights(
 }
 
 export default function HistoryScreen() {
+  const insets = useSafeAreaInsets();
   const { colors, spacing } = useAppTheme();
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
   const waterLogs = useLiveDevice((s) => s.waterLogs);
@@ -343,13 +344,13 @@ export default function HistoryScreen() {
 
   if (!device) {
     return (
-      <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
+      <View style={[styles.safeArea, { backgroundColor: colors.background, paddingTop: insets.top + 12 }]}>
         <View style={styles.emptyContainer}>
           <Text style={[styles.emptyText, { color: colors.textMuted }]}>
             No device paired. Connect a plant device to view history.
           </Text>
         </View>
-      </SafeAreaView>
+      </View>
     );
   }
 
@@ -366,9 +367,9 @@ export default function HistoryScreen() {
       : '%';
 
   return (
-    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
+    <View style={[styles.safeArea, { backgroundColor: colors.background, paddingTop: insets.top + 12 }]}>
       <ScrollView
-        contentContainerStyle={[styles.contentContainer, { padding: spacing.md }]}
+        contentContainerStyle={[styles.contentContainer, { padding: spacing.md, paddingBottom: 120 }]}
         showsVerticalScrollIndicator={false}
       >
         {/* ── Screen Header ────────────────────────────────────── */}
@@ -413,10 +414,8 @@ export default function HistoryScreen() {
 
         {/* ── "What Happened" Vertical Timeline ────────────────── */}
         <EventTimeline waterLogs={waterLogs} alerts={alerts} />
-
-        <View style={{ height: 110 }} />
       </ScrollView>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -424,9 +423,7 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
   },
-  contentContainer: {
-    paddingBottom: 24,
-  },
+  contentContainer: {},
   header: {
     marginBottom: 16,
   },

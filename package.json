@@ -46,10 +46,14 @@
   },
   "devDependencies": {
     "@expo/ngrok": "^4.1.3",
+    "@types/jest": "^30.0.0",
     "@types/react": "~19.2.4",
     "@types/three": "^0.186.0",
+    "dotenv": "^18.0.8",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~57.0.2",
+    "ts-jest": "^29.4.15",
+    "ts-node": "^10.9.2",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -58,7 +62,9 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "test": "jest",
+    "seed": "ts-node scripts/seedDemoData.ts"
   },
   "private": true
 }

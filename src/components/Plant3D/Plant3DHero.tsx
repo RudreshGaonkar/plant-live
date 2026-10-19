@@ -11,18 +11,15 @@
  *   OVERWATERED → yellowed, soggy chip "Too wet"
  *   UNKNOWN     → greyed, "Last seen X min ago"
  */
-import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useEffect, useRef } from 'react';
+import { View, StyleSheet } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withRepeat,
   withSequence,
-  withTiming,
   withSpring,
-  FadeIn,
 } from 'react-native-reanimated';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
@@ -66,28 +63,7 @@ export function Plant3DHero({
   health,
   isWatering = false,
   secondsLeft = 0,
-  location = 'balcony',
-  mode = 'auto',
-  plantName = 'Monstera Deliciosa',
-  plantSpecies = 'Swiss Cheese Plant',
-  lastSeen,
-  onLocationPress,
 }: Plant3DHeroProps) {
-  const { colors, radii } = useAppTheme();
-  const [now, setNow] = useState(() => (lastSeen ?? 0));
-
-  // Periodic ticker to refresh relative elapsed time
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setNow(Date.now());
-    }, 30000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const lastSeenMinutesAgo = lastSeen
-    ? Math.max(0, Math.floor((now - lastSeen) / 60000))
-    : 0;
-
   const hasFiredHaptic = useRef(false);
 
   // Haptic feedback on watering start
@@ -100,40 +76,6 @@ export function Plant3DHero({
       hasFiredHaptic.current = false;
     }
   }, [isWatering]);
-
-  const gradient = gradientColors[health];
-  const chip = stateChips[health];
-
-  // Pulsating border highlight for watering
-  const borderOpacity = useSharedValue(0.6);
-  useEffect(() => {
-    if (isWatering) {
-      borderOpacity.value = withRepeat(
-        withSequence(
-          withTiming(1, { duration: 400 }),
-          withTiming(0.3, { duration: 400 })
-        ),
-        -1,
-        false
-      );
-    } else {
-      borderOpacity.value = withTiming(0.6);
-    }
-  }, [isWatering, borderOpacity]);
-
-  const borderStyle = useAnimatedStyle(() => ({
-    borderColor: isWatering
-      ? `rgba(174, 224, 154, ${borderOpacity.value})`
-      : 'transparent',
-  }));
-
-  const locationLabel = {
-    balcony: 'Balcony',
-    terrace: 'Terrace',
-    indoor: 'Indoor',
-  }[location] ?? location;
-
-  const modeLabel = mode === 'auto' ? 'Auto' : 'Manual';
 
   return (
     <View style={styles.heroWrapper}>

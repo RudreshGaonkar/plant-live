@@ -14,37 +14,37 @@
     },
     "devices": {
       "$deviceId": {
-        ".read": "auth != null && (root.child('owners').child($deviceId).val() === auth.uid || auth.token.deviceId === $deviceId)",
+        ".read": "auth != null",
         "config": {
-          ".write": "auth != null && root.child('owners').child($deviceId).val() === auth.uid"
+          ".write": "auth != null"
         },
         "command": {
-          ".write": "auth != null && (root.child('owners').child($deviceId).val() === auth.uid || auth.token.deviceId === $deviceId)"
+          ".write": "auth != null"
         },
         "telemetry": {
-          ".write": "auth != null && (auth.token.deviceId === $deviceId || root.child('owners').child($deviceId).val() === auth.uid)"
+          ".write": "auth != null"
         },
         "status": {
-          ".write": "auth != null && (auth.token.deviceId === $deviceId || root.child('owners').child($deviceId).val() === auth.uid)"
+          ".write": "auth != null"
         }
       }
     },
     "history": {
       "$deviceId": {
-        ".read": "auth != null && (root.child('owners').child($deviceId).val() === auth.uid || auth.token.deviceId === $deviceId)",
-        ".write": "auth != null && (auth.token.deviceId === $deviceId || root.child('owners').child($deviceId).val() === auth.uid)"
+        ".read": "auth != null",
+        ".write": "auth != null"
       }
     },
     "waterLogs": {
       "$deviceId": {
-        ".read": "auth != null && (root.child('owners').child($deviceId).val() === auth.uid || auth.token.deviceId === $deviceId)",
-        ".write": "auth != null && (auth.token.deviceId === $deviceId || root.child('owners').child($deviceId).val() === auth.uid)"
+        ".read": "auth != null",
+        ".write": "auth != null"
       }
     },
     "alerts": {
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && auth.uid === $uid"
+        ".write": "auth != null"
       }
     }
   }

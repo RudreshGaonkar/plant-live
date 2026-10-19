@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useLiveDevice, computePlantHealthState, DeviceRecord } from '@/store/useLiveDevice';
+import { useLiveDevice, computePlantHealthState, DeviceRecord } from '@/hooks/useLiveDevice';
 import { useSession } from '@/store/useSession';
 import {
   listenToDeviceTelemetry,

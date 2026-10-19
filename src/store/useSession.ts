@@ -25,9 +25,9 @@ export const useSession = create<SessionState>((set, get) => ({
   user: null,
   isLoading: true,
   isDemoMode: false,
-  activeDeviceId: 'demo-leaf-01',
+  activeDeviceId: '',
 
-  setUser: (user) => set({ user }),
+  setUser: (user) => set({ user, isDemoMode: user ? false : get().isDemoMode }),
 
   enterDemoMode: () =>
     set({
@@ -45,7 +45,7 @@ export const useSession = create<SessionState>((set, get) => ({
     set({
       isDemoMode: false,
       user: null,
-      activeDeviceId: 'leaf-node-01',
+      activeDeviceId: '',
     }),
 
   setActiveDeviceId: (deviceId: string) => set({ activeDeviceId: deviceId }),
@@ -56,17 +56,11 @@ export const useSession = create<SessionState>((set, get) => ({
       return;
     }
     await fbSignOut(auth);
-    set({ user: null });
+    set({ user: null, activeDeviceId: '', isDemoMode: false });
   },
 
   initializeAuthListener: () => {
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser: User | null) => {
-      // Don't overwrite if in demo mode
-      if (get().isDemoMode) {
-        set({ isLoading: false });
-        return;
-      }
-
       if (firebaseUser) {
         set({
           user: {
@@ -74,10 +68,15 @@ export const useSession = create<SessionState>((set, get) => ({
             email: firebaseUser.email,
             displayName: firebaseUser.displayName,
           },
+          isDemoMode: false,
           isLoading: false,
         });
       } else {
-        set({ user: null, isLoading: false });
+        if (!get().isDemoMode) {
+          set({ user: null, activeDeviceId: '', isDemoMode: false, isLoading: false });
+        } else {
+          set({ isLoading: false });
+        }
       }
     });
 

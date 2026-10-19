@@ -37,6 +37,7 @@ export default function LoginScreen() {
   const {
     control,
     handleSubmit,
+    setValue,
     formState: { errors },
   } = useForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
@@ -246,6 +247,27 @@ export default function LoginScreen() {
                   <Ionicons name="arrow-forward" size={18} color={colors.palette.white} />
                 </>
               )}
+            </TouchableOpacity>
+
+            {/* Quick Fill Seeded Account Button */}
+            <TouchableOpacity
+              style={{
+                borderColor: colors.palette.forest,
+                borderRadius: radii.full,
+                marginTop: 10,
+                paddingVertical: 10,
+                alignItems: 'center',
+                borderWidth: 1,
+                backgroundColor: `${colors.palette.lime}20`,
+              }}
+              onPress={() => {
+                setValue('email', 'demo@leaflink.local');
+                setValue('password', 'leaflink123');
+              }}
+            >
+              <Text style={{ color: colors.palette.forest, fontWeight: '700', fontSize: 13 }}>
+                Fill Test Account (demo@leaflink.local)
+              </Text>
             </TouchableOpacity>
 
             {/* Sign Up Navigation */}

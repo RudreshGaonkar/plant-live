@@ -107,7 +107,7 @@ export interface LiveDeviceStore {
   setOnlineStatus: (online: boolean) => void;
 }
 
-const mockDevice: DeviceRecord = {
+export const mockDevice: DeviceRecord = {
   id: 'esp8266-demo-01',
   config: {
     name: 'Balcony Hub Plant',
@@ -185,10 +185,8 @@ const initialWaterLogs: WaterLog[] = [
 ];
 
 export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
-  devices: {
-    [mockDevice.id]: mockDevice,
-  },
-  activeDeviceId: mockDevice.id,
+  devices: {},
+  activeDeviceId: '',
   waterLogs: initialWaterLogs,
   isWateringActive: false,
   wateringSecondsLeft: 0,
