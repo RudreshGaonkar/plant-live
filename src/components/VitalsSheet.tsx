@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/immutability */
 /**
  * VitalsSheet
  * Draggable bottom sheet with 3 snap points (Peek ~28%, Half ~55%, Full ~90%).
@@ -8,7 +9,7 @@
  * - Full: Half + water log list
  * uiLayout.md Section 3 – Layer 5
  */
-import React, { useCallback, useEffect } from 'react';
+import React, { useEffect } from 'react';
 import {
   View,
   Text,

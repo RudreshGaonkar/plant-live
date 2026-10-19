@@ -53,6 +53,7 @@ export function DayRibbon({
     .onUpdate((event) => {
       const delta = event.translationX / RIBBON_WIDTH;
       const nextPos = Math.max(0, Math.min(1, startPos.value + delta));
+      // eslint-disable-next-line react-hooks/immutability
       ribbonPos.value = nextPos;
       runOnJS(onScrub)(nextPos);
     })

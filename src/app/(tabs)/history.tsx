@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -289,29 +289,19 @@ export default function HistoryScreen() {
     return () => unsubscribe();
   }, [device?.id, isDemoMode, user]);
 
-  if (!device) {
-    return (
-      <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
-        <View style={styles.emptyContainer}>
-          <Text style={[styles.emptyText, { color: colors.textMuted }]}>
-            No device paired. Connect a plant device to view history.
-          </Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  // Available metrics based on sensors config
+  // Available metrics based on sensors config — hoisted ABOVE early return to satisfy Rules of Hooks
   const availableMetrics: ChartMetricKey[] = useMemo(() => {
+    if (!device) return ['moisture', 'temp', 'humidity'] as ChartMetricKey[];
     const list: ChartMetricKey[] = ['moisture', 'temp', 'humidity'];
     if (device.config.sensors.lightMode !== 'none') {
       list.push('light');
     }
     return list;
-  }, [device.config.sensors.lightMode]);
+  }, [device]);
 
   // Generate series data points
   const seriesMap = useMemo(() => {
+    if (!device) return { moisture: [], temp: [], humidity: [], light: [] } as Record<ChartMetricKey, ChartDataPoint[]>;
     return generateHistoricalSeries(
       device,
       waterLogs,
@@ -345,10 +335,23 @@ export default function HistoryScreen() {
     return `${daysBack}d ago`;
   }, [scrubFraction, timeWindow]);
 
-  // Rule-based insight cards
+  // Rule-based insight cards — hoisted ABOVE early return
   const insights = useMemo(() => {
+    if (!device) return [];
     return buildRuleBasedInsights(device, waterLogs);
   }, [device, waterLogs]);
+
+  if (!device) {
+    return (
+      <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
+        <View style={styles.emptyContainer}>
+          <Text style={[styles.emptyText, { color: colors.textMuted }]}>
+            No device paired. Connect a plant device to view history.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   // Unit label
   const unit =

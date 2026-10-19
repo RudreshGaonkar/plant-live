@@ -60,10 +60,12 @@ export function BottleRail({
 
   const openPopover = () => {
     setPopoverOpen(true);
+    // eslint-disable-next-line react-hooks/immutability
     popoverScale.value = withSpring(1, { damping: 14 });
   };
 
   const closePopover = () => {
+    // eslint-disable-next-line react-hooks/immutability
     popoverScale.value = withTiming(0, { duration: 180 });
     setTimeout(() => setPopoverOpen(false), 200);
   };

@@ -6,7 +6,7 @@
  * - Info: lime
  * uiLayout.md Section 6
  */
-import React, { useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,

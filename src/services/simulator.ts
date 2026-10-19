@@ -1,13 +1,25 @@
 import { useLiveDevice, DeviceRecord, WaterLog } from '@/store/useLiveDevice';
 
+export type SimulatorScenario =
+  | 'none'
+  | 'bottleEmpty'
+  | 'heatWave'
+  | 'soilDry'
+  | 'overwatered'
+  | 'forceOffline';
+
+export interface SimulatorOverrides {
+  forcedMoisture: number | null;
+  forcedTemp: number | null;
+  forcedHumidity: number | null;
+  forcedBottleRemaining: number | null;
+  forceOffline: boolean;
+  activeScenario: SimulatorScenario;
+}
+
 /**
  * SimulatedDevice implements the hardware contract described in Sections 7.8 & 8 of spec.md.
- * It simulates physical hardware locally:
- * - Telemetry ticks every 2 seconds.
- * - Soil moisture decays faster for terrace/balcony locations.
- * - Temperature and humidity follow smooth curves with integer noise (like DHT11).
- * - Light status toggles bright/dim over time if enabled.
- * - Responds to `waterNow` command: updates pump status, darkens soil, decreases bottle level, and logs water event.
+ * Enables 100% offline testing and presentation without hardware or Firebase billing.
  */
 export class SimulatedDevice {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -15,27 +27,23 @@ export class SimulatedDevice {
   private isRunning = false;
   private stepCount = 0;
 
-  // Developer panel override states
-  public overrides: {
-    forcedMoisture: number | null;
-    forcedTemp: number | null;
-    forcedHumidity: number | null;
-    forcedBottleRemaining: number | null;
-    forceOffline: boolean;
-    bottleEmptyTrigger: boolean;
-    heatWaveTrigger: boolean;
-  } = {
+  // Active overrides
+  public overrides: SimulatorOverrides = {
     forcedMoisture: null,
     forcedTemp: null,
     forcedHumidity: null,
     forcedBottleRemaining: null,
     forceOffline: false,
-    bottleEmptyTrigger: false,
-    heatWaveTrigger: false,
+    activeScenario: 'none',
   };
 
   constructor(deviceId: string = 'demo-leaf-01') {
     this.deviceId = deviceId;
+  }
+
+  public getTargetDeviceId(): string {
+    const store = useLiveDevice.getState();
+    return store.activeDeviceId || this.deviceId;
   }
 
   public start() {
@@ -58,13 +66,15 @@ export class SimulatedDevice {
     this.isRunning = false;
   }
 
-  private ensureInitialState() {
+  public ensureInitialState() {
     const store = useLiveDevice.getState();
-    if (!store.devices[this.deviceId]) {
+    const targetId = this.getTargetDeviceId();
+
+    if (!store.devices[targetId]) {
       const initialDev: DeviceRecord = {
-        id: this.deviceId,
+        id: targetId,
         config: {
-          name: 'Demo Plant Hub',
+          name: 'Balcony Hub Plant',
           plantName: 'Monstera Deliciosa',
           plantSpecies: 'Swiss Cheese Plant',
           hubId: 'hub-demo-1',
@@ -89,7 +99,7 @@ export class SimulatedDevice {
             flowMlPerSec: 15,
             remainingMl: 380,
           },
-          pairedAt: Date.now() - 86400000 * 2,
+          pairedAt: Date.now() - 86400000 * 3,
         },
         telemetry: {
           soilRaw: 620,
@@ -109,28 +119,275 @@ export class SimulatedDevice {
       };
 
       store.addDevice(initialDev);
+      store.setActiveDeviceId(targetId);
     }
   }
 
+  /**
+   * Applies a one-tap scenario preset trigger (Spec Section 7.8)
+   */
+  public triggerScenario(scenario: SimulatorScenario) {
+    this.overrides.activeScenario = scenario;
+    const targetId = this.getTargetDeviceId();
+    const store = useLiveDevice.getState();
+    const device = store.devices[targetId];
+
+    switch (scenario) {
+      case 'bottleEmpty':
+        this.overrides.forceOffline = false;
+        this.overrides.forcedBottleRemaining = 0;
+        this.overrides.forcedMoisture = null;
+        this.overrides.forcedTemp = null;
+        this.overrides.forcedHumidity = null;
+        if (device) {
+          useLiveDevice.setState((prev) => ({
+            devices: {
+              ...prev.devices,
+              [targetId]: {
+                ...device,
+                config: {
+                  ...device.config,
+                  bottle: { ...device.config.bottle, remainingMl: 0 },
+                },
+                status: { ...device.status, online: true, lastSeen: Date.now() },
+              },
+            },
+          }));
+        }
+        break;
+
+      case 'heatWave':
+        this.overrides.forceOffline = false;
+        this.overrides.forcedTemp = 42;
+        this.overrides.forcedHumidity = 25;
+        if (device) {
+          useLiveDevice.setState((prev) => ({
+            devices: {
+              ...prev.devices,
+              [targetId]: {
+                ...device,
+                telemetry: {
+                  ...device.telemetry,
+                  temperature: 42,
+                  humidity: 25,
+                  ts: Date.now(),
+                },
+                status: { ...device.status, online: true, lastSeen: Date.now() },
+              },
+            },
+          }));
+        }
+        break;
+
+      case 'soilDry':
+        this.overrides.forceOffline = false;
+        this.overrides.forcedMoisture = 15;
+        if (device) {
+          useLiveDevice.setState((prev) => ({
+            devices: {
+              ...prev.devices,
+              [targetId]: {
+                ...device,
+                telemetry: {
+                  ...device.telemetry,
+                  soilMoisture: 15,
+                  ts: Date.now(),
+                },
+                status: { ...device.status, online: true, lastSeen: Date.now() },
+              },
+            },
+          }));
+        }
+        break;
+
+      case 'overwatered':
+        this.overrides.forceOffline = false;
+        this.overrides.forcedMoisture = 90;
+        this.overrides.forcedHumidity = 85;
+        if (device) {
+          useLiveDevice.setState((prev) => ({
+            devices: {
+              ...prev.devices,
+              [targetId]: {
+                ...device,
+                telemetry: {
+                  ...device.telemetry,
+                  soilMoisture: 90,
+                  humidity: 85,
+                  ts: Date.now(),
+                },
+                status: { ...device.status, online: true, lastSeen: Date.now() },
+              },
+            },
+          }));
+        }
+        break;
+
+      case 'forceOffline':
+        this.overrides.forceOffline = true;
+        if (device) {
+          useLiveDevice.setState((prev) => ({
+            devices: {
+              ...prev.devices,
+              [targetId]: {
+                ...device,
+                status: {
+                  ...device.status,
+                  online: false,
+                  lastSeen: Date.now() - 250000, // > 3 min ago
+                },
+              },
+            },
+          }));
+        }
+        break;
+
+      case 'none':
+      default:
+        this.resetOverrides();
+        break;
+    }
+  }
+
+  public resetOverrides() {
+    this.overrides = {
+      forcedMoisture: null,
+      forcedTemp: null,
+      forcedHumidity: null,
+      forcedBottleRemaining: null,
+      forceOffline: false,
+      activeScenario: 'none',
+    };
+
+    const targetId = this.getTargetDeviceId();
+    const store = useLiveDevice.getState();
+    const device = store.devices[targetId];
+    if (device) {
+      useLiveDevice.setState((prev) => ({
+        devices: {
+          ...prev.devices,
+          [targetId]: {
+            ...device,
+            status: {
+              ...device.status,
+              online: true,
+              lastSeen: Date.now(),
+            },
+          },
+        },
+      }));
+    }
+  }
+
+  /**
+   * Sets manual slider telemetry overrides with immediate reactive dispatch
+   */
+  public setForcedMoisture(val: number | null) {
+    this.overrides.forcedMoisture = val;
+    this.overrides.activeScenario = 'none';
+    const targetId = this.getTargetDeviceId();
+    if (val !== null) {
+      const dev = useLiveDevice.getState().devices[targetId];
+      if (dev) {
+        useLiveDevice.setState((prev) => ({
+          devices: {
+            ...prev.devices,
+            [targetId]: {
+              ...dev,
+              telemetry: { ...dev.telemetry, soilMoisture: val, ts: Date.now() },
+            },
+          },
+        }));
+      }
+    }
+  }
+
+  public setForcedTemp(val: number | null) {
+    this.overrides.forcedTemp = val;
+    this.overrides.activeScenario = 'none';
+    const targetId = this.getTargetDeviceId();
+    if (val !== null) {
+      const dev = useLiveDevice.getState().devices[targetId];
+      if (dev) {
+        useLiveDevice.setState((prev) => ({
+          devices: {
+            ...prev.devices,
+            [targetId]: {
+              ...dev,
+              telemetry: { ...dev.telemetry, temperature: val, ts: Date.now() },
+            },
+          },
+        }));
+      }
+    }
+  }
+
+  public setForcedHumidity(val: number | null) {
+    this.overrides.forcedHumidity = val;
+    this.overrides.activeScenario = 'none';
+    const targetId = this.getTargetDeviceId();
+    if (val !== null) {
+      const dev = useLiveDevice.getState().devices[targetId];
+      if (dev) {
+        useLiveDevice.setState((prev) => ({
+          devices: {
+            ...prev.devices,
+            [targetId]: {
+              ...dev,
+              telemetry: { ...dev.telemetry, humidity: val, ts: Date.now() },
+            },
+          },
+        }));
+      }
+    }
+  }
+
+  public setForcedBottleRemaining(val: number | null) {
+    this.overrides.forcedBottleRemaining = val;
+    this.overrides.activeScenario = 'none';
+    const targetId = this.getTargetDeviceId();
+    if (val !== null) {
+      const dev = useLiveDevice.getState().devices[targetId];
+      if (dev) {
+        useLiveDevice.setState((prev) => ({
+          devices: {
+            ...prev.devices,
+            [targetId]: {
+              ...dev,
+              config: {
+                ...dev.config,
+                bottle: { ...dev.config.bottle, remainingMl: val },
+              },
+            },
+          },
+        }));
+      }
+    }
+  }
+
+  /**
+   * Main 2-second simulation tick
+   */
   private tick() {
     const store = useLiveDevice.getState();
-    const device = store.devices[this.deviceId];
+    const targetId = this.getTargetDeviceId();
+    const device = store.devices[targetId];
     if (!device) return;
 
     this.stepCount++;
 
-    // Check forceOffline override
+    // 1. Force offline simulation
     if (this.overrides.forceOffline) {
       if (device.status.online) {
         useLiveDevice.setState((prev) => ({
           devices: {
             ...prev.devices,
-            [this.deviceId]: {
+            [targetId]: {
               ...device,
               status: {
                 ...device.status,
                 online: false,
-                lastSeen: Date.now() - 200000, // > 3 min ago
+                lastSeen: Date.now() - 220000, // > 3 min
               },
             },
           },
@@ -139,13 +396,12 @@ export class SimulatedDevice {
       return;
     }
 
-    // Natural decay rates based on location (Terrace > Balcony > Indoor)
+    // 2. Moisture decay rate (faster for terrace/balcony)
     let decayRate = 0.2;
-    if (device.config.location === 'terrace') decayRate = 0.5;
+    if (device.config.location === 'terrace') decayRate = 0.55;
     else if (device.config.location === 'balcony') decayRate = 0.35;
     else if (device.config.location === 'indoor') decayRate = 0.15;
 
-    // Calculate moisture
     let currentMoisture = device.telemetry.soilMoisture;
     if (this.overrides.forcedMoisture !== null) {
       currentMoisture = this.overrides.forcedMoisture;
@@ -153,60 +409,62 @@ export class SimulatedDevice {
       currentMoisture = Math.max(10, currentMoisture - decayRate);
     }
 
-    // Calculate DHT11 simulated values (integer with gentle sine fluctuation)
-    let temp = Math.round(27 + 2 * Math.sin(this.stepCount / 10));
-    if (this.overrides.heatWaveTrigger) {
-      temp = 38; // Above tempMax (35)
-    } else if (this.overrides.forcedTemp !== null) {
+    // 3. DHT11 temperature and humidity curves with integer noise
+    let temp: number;
+    if (this.overrides.forcedTemp !== null) {
       temp = this.overrides.forcedTemp;
+    } else {
+      const sineWave = Math.sin(this.stepCount / 10);
+      const ambientNoise = (this.stepCount % 3 === 0 ? 1 : 0);
+      temp = Math.round(27 + 3 * sineWave + ambientNoise);
     }
 
-    let humidity = Math.round(62 + 4 * Math.cos(this.stepCount / 8));
+    let humidity: number;
     if (this.overrides.forcedHumidity !== null) {
       humidity = this.overrides.forcedHumidity;
+    } else {
+      const cosineWave = Math.cos(this.stepCount / 8);
+      humidity = Math.round(62 + 5 * cosineWave);
     }
 
-    // Toggle light status periodically (every 10 ticks = 20s) if digital lightMode
-    const light =
-      device.config.sensors.lightMode === 'none'
-        ? null
-        : Math.floor(this.stepCount / 10) % 2 === 0
-        ? 1
-        : 0;
+    // 4. Sunlight toggling over time (Bright / Dim) if digital
+    let light: number | null = null;
+    if (device.config.sensors.lightMode === 'digital') {
+      light = Math.floor(this.stepCount / 12) % 2 === 0 ? 1 : 0;
+    } else if (device.config.sensors.lightMode === 'analog') {
+      light = Math.round(45 + 35 * Math.sin(this.stepCount / 15));
+    }
 
-    // Bottle remaining level override
+    // 5. Bottle remaining level
     let remainingMl = device.config.bottle.remainingMl;
-    if (this.overrides.bottleEmptyTrigger) {
-      remainingMl = 0;
-    } else if (this.overrides.forcedBottleRemaining !== null) {
+    if (this.overrides.forcedBottleRemaining !== null) {
       remainingMl = this.overrides.forcedBottleRemaining;
     }
 
-    // Autonomous Auto-watering logic (Section 8.1 of spec.md)
+    // 6. Autonomous Auto-Watering decision (Spec Section 8.1)
     if (
       device.config.mode === 'auto' &&
       !store.isWateringActive &&
       remainingMl > 20 &&
       currentMoisture < device.config.thresholds.moistureMin
     ) {
-      // Guard: Coastal humidity guard
+      // High humidity guard
       if (
         humidity > device.config.thresholds.humidityMax &&
         currentMoisture > device.config.thresholds.moistureMin - 10
       ) {
-        // Delayed due to high humidity
+        // Delayed due to coastal humidity
       } else {
-        // Trigger auto cycle
         this.runWaterCycle('auto', device.config.thresholds.pumpDurationSec || 5);
         return;
       }
     }
 
-    // Commit telemetry tick to store
+    // 7. Commit telemetry tick
     useLiveDevice.setState((prev) => ({
       devices: {
         ...prev.devices,
-        [this.deviceId]: {
+        [targetId]: {
           ...device,
           config: {
             ...device.config,
@@ -239,11 +497,13 @@ export class SimulatedDevice {
   }
 
   /**
-   * Runs watering cycle with non-blocking lifecycle updates matching hardware
+   * Simulates full `waterNow` command lifecycle:
+   * sent -> received -> running -> done, updates bottle, moisture, and appends waterLog
    */
   public runWaterCycle(trigger: 'auto' | 'manual', durationSec: number = 5) {
     const store = useLiveDevice.getState();
-    const device = store.devices[this.deviceId];
+    const targetId = this.getTargetDeviceId();
+    const device = store.devices[targetId];
     if (!device || store.isWateringActive) return;
 
     const moistureBefore = device.telemetry.soilMoisture;
@@ -256,7 +516,7 @@ export class SimulatedDevice {
       wateringSecondsLeft: durationSec,
       devices: {
         ...store.devices,
-        [this.deviceId]: {
+        [targetId]: {
           ...device,
           telemetry: {
             ...device.telemetry,
@@ -284,7 +544,7 @@ export class SimulatedDevice {
         clearInterval(waterInterval);
 
         const stateNow = useLiveDevice.getState();
-        const devNow = stateNow.devices[this.deviceId];
+        const devNow = stateNow.devices[targetId];
         const newMoisture = Math.min(100, Math.round(moistureBefore + 18));
 
         const newLog: WaterLog = {
@@ -303,7 +563,7 @@ export class SimulatedDevice {
           waterLogs: [newLog, ...stateNow.waterLogs],
           devices: {
             ...stateNow.devices,
-            [this.deviceId]: {
+            [targetId]: {
               ...devNow,
               config: {
                 ...devNow.config,

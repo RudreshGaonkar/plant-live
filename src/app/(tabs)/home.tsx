@@ -11,7 +11,7 @@
  *
  * uiLayout.md Section 3
  */
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -82,6 +82,18 @@ export default function HomeScreen() {
     return { opacity };
   });
 
+  // lastSeenMinutes — computed before early return to satisfy Rules of Hooks
+  const [lastSeenMinutes, setLastSeenMinutes] = useState(0);
+  useEffect(() => {
+    if (!device) return;
+    const compute = () =>
+      setLastSeenMinutes(Math.round((Date.now() - device.status.lastSeen) / 60000));
+    compute();
+    const timer = setInterval(compute, 60000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [device?.status.lastSeen]);
+
   // Empty state – no device paired
   if (!device) {
     return (
@@ -132,11 +144,6 @@ export default function HomeScreen() {
   const gradientColors = STAGE_GRADIENTS[health] ?? STAGE_GRADIENTS.unknown;
   const isOffline = !status.online;
   const deviceList = Object.values(devices);
-  // Snapshot time outside of render loop (purity rule)
-  const lastSeenMinutes = React.useMemo(
-    () => Math.round((Date.now() - status.lastSeen) / 60000),
-    [status.lastSeen]
-  );
 
   return (
     <View style={styles.stage}>

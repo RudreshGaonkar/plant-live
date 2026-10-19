@@ -1,4 +1,5 @@
-import React, { useRef, useMemo } from 'react';
+/* eslint-disable react-hooks/refs */
+import React, { useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -6,7 +7,6 @@ import {
   TouchableOpacity,
   PanResponder,
   GestureResponderEvent,
-  PanResponderGestureState,
 } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
@@ -44,32 +44,33 @@ export function SliderControl({
     return Math.max(min, Math.min(max, stepped));
   };
 
-  const calculateValueFromTouch = (pageX: number) => {
-    const relativeX = pageX - trackLayoutXRef.current;
-    const ratio = Math.max(0, Math.min(1, relativeX / trackWidthRef.current));
-    const rawVal = min + ratio * (max - min);
-    return clampValue(rawVal);
-  };
+  const propsRef = useRef({ min, max, step, onChange });
+  useEffect(() => {
+    propsRef.current = { min, max, step, onChange };
+  });
 
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: () => true,
-        onPanResponderGrant: (evt: GestureResponderEvent) => {
-          const newVal = calculateValueFromTouch(evt.nativeEvent.pageX);
-          onChange(newVal);
-        },
-        onPanResponderMove: (
-          evt: GestureResponderEvent,
-          _gestureState: PanResponderGestureState
-        ) => {
-          const newVal = calculateValueFromTouch(evt.nativeEvent.pageX);
-          onChange(newVal);
-        },
-      }),
-    [min, max, step, onChange]
-  );
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (evt: GestureResponderEvent) => {
+        const currentProps = propsRef.current;
+        const relativeX = evt.nativeEvent.pageX - trackLayoutXRef.current;
+        const ratio = Math.max(0, Math.min(1, relativeX / (trackWidthRef.current || 1)));
+        const rawVal = currentProps.min + ratio * (currentProps.max - currentProps.min);
+        const stepped = Math.round((rawVal - currentProps.min) / currentProps.step) * currentProps.step + currentProps.min;
+        currentProps.onChange(Math.max(currentProps.min, Math.min(currentProps.max, stepped)));
+      },
+      onPanResponderMove: (evt: GestureResponderEvent) => {
+        const currentProps = propsRef.current;
+        const relativeX = evt.nativeEvent.pageX - trackLayoutXRef.current;
+        const ratio = Math.max(0, Math.min(1, relativeX / (trackWidthRef.current || 1)));
+        const rawVal = currentProps.min + ratio * (currentProps.max - currentProps.min);
+        const stepped = Math.round((rawVal - currentProps.min) / currentProps.step) * currentProps.step + currentProps.min;
+        currentProps.onChange(Math.max(currentProps.min, Math.min(currentProps.max, stepped)));
+      },
+    })
+  ).current;
 
   const percentage = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
 

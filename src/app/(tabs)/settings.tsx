@@ -17,19 +17,19 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
-import { useLiveDevice, PlantLocation, LightMode } from '@/store/useLiveDevice';
+import { useLiveDevice, LightMode } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
-import { simulatedDevice } from '@/services/simulator';
 import {
   PlantPassportHeader,
   SliderControl,
   CalibrationWizard,
   CalibrationValues,
+  DeveloperPanel,
 } from '@/components';
 
 export default function SettingsScreen() {
-  const { colors, radii, spacing, shadow } = useAppTheme();
-  const { user, isDemoMode, signOut } = useSession();
+  const { colors, radii, spacing } = useAppTheme();
+  const { isDemoMode, signOut } = useSession();
 
   // Store bindings
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
@@ -37,10 +37,7 @@ export default function SettingsScreen() {
   const updateSensors = useLiveDevice((s) => s.updateSensors);
   const updateConfig = useLiveDevice((s) => s.updateConfig);
   const updateCalibration = useLiveDevice((s) => s.updateCalibration);
-  const updateLocation = useLiveDevice((s) => s.updateLocation);
   const refillBottle = useLiveDevice((s) => s.refillBottle);
-  const updateTelemetry = useLiveDevice((s) => s.updateTelemetry);
-  const setOnlineStatus = useLiveDevice((s) => s.setOnlineStatus);
   const removeDevice = useLiveDevice((s) => s.removeDevice);
 
   // Hidden developer panel unlock (5 taps on version label - spec section 7.8)
@@ -54,7 +51,7 @@ export default function SettingsScreen() {
   const [tempUnit, setTempUnit] = useState<'C' | 'F'>('C');
   const [selectedTheme, setSelectedTheme] = useState<'Light' | 'Dark' | 'System'>('Light');
   const [quietHoursEnabled, setQuietHoursEnabled] = useState<boolean>(false);
-  const [quietHoursRange, setQuietHoursRange] = useState<string>('22:00 - 07:00');
+  const quietHoursRange = '22:00 - 07:00';
 
   // Alert Category Toggles
   const [alerts, setAlerts] = useState({
@@ -65,14 +62,6 @@ export default function SettingsScreen() {
     offline: true,
   });
 
-  // Developer panel override states
-  const [devMoisture, setDevMoisture] = useState<number>(device?.telemetry.soilMoisture ?? 42);
-  const [devTemp, setDevTemp] = useState<number>(device?.telemetry.temperature ?? 28);
-  const [devHumidity, setDevHumidity] = useState<number>(device?.telemetry.humidity ?? 65);
-  const [devBottle, setDevBottle] = useState<number>(device?.config.bottle.remainingMl ?? 380);
-  const [isForcedOffline, setIsForcedOffline] = useState<boolean>(false);
-  const [isBottleEmptyScenario, setIsBottleEmptyScenario] = useState<boolean>(false);
-  const [isHeatWaveScenario, setIsHeatWaveScenario] = useState<boolean>(false);
 
   if (!device) {
     return (
@@ -146,82 +135,6 @@ export default function SettingsScreen() {
     );
   };
 
-  // Developer panel slider handlers
-  const handleForceMoisture = (val: number) => {
-    setDevMoisture(val);
-    simulatedDevice.overrides.forcedMoisture = val;
-    updateTelemetry({ soilMoisture: val });
-  };
-
-  const handleForceTemp = (val: number) => {
-    setDevTemp(val);
-    simulatedDevice.overrides.forcedTemp = val;
-    updateTelemetry({ temperature: val });
-  };
-
-  const handleForceHumidity = (val: number) => {
-    setDevHumidity(val);
-    simulatedDevice.overrides.forcedHumidity = val;
-    updateTelemetry({ humidity: val });
-  };
-
-  const handleForceBottle = (val: number) => {
-    setDevBottle(val);
-    simulatedDevice.overrides.forcedBottleRemaining = val;
-    updateConfig({
-      bottle: {
-        ...config.bottle,
-        remainingMl: val,
-      },
-    });
-  };
-
-  // Scenario Triggers
-  const handleTriggerBottleEmpty = () => {
-    const next = !isBottleEmptyScenario;
-    setIsBottleEmptyScenario(next);
-    simulatedDevice.overrides.bottleEmptyTrigger = next;
-    if (next) {
-      handleForceBottle(0);
-    } else {
-      handleForceBottle(config.bottle.capacityMl);
-    }
-  };
-
-  const handleTriggerHeatWave = () => {
-    const next = !isHeatWaveScenario;
-    setIsHeatWaveScenario(next);
-    simulatedDevice.overrides.heatWaveTrigger = next;
-    if (next) {
-      handleForceTemp(38);
-      handleForceHumidity(30);
-    } else {
-      simulatedDevice.overrides.forcedTemp = null;
-      simulatedDevice.overrides.forcedHumidity = null;
-    }
-  };
-
-  const handleTriggerOffline = () => {
-    const next = !isForcedOffline;
-    setIsForcedOffline(next);
-    simulatedDevice.overrides.forceOffline = next;
-    setOnlineStatus(!next);
-  };
-
-  const handleResetDevOverrides = () => {
-    simulatedDevice.overrides.forcedMoisture = null;
-    simulatedDevice.overrides.forcedTemp = null;
-    simulatedDevice.overrides.forcedHumidity = null;
-    simulatedDevice.overrides.forcedBottleRemaining = null;
-    simulatedDevice.overrides.forceOffline = false;
-    simulatedDevice.overrides.bottleEmptyTrigger = false;
-    simulatedDevice.overrides.heatWaveTrigger = false;
-    setIsForcedOffline(false);
-    setIsBottleEmptyScenario(false);
-    setIsHeatWaveScenario(false);
-    setOnlineStatus(true);
-    Alert.alert('Overrides Cleared', 'Simulator is now running on natural telemetry curves.');
-  };
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
@@ -861,265 +774,10 @@ export default function SettingsScreen() {
       </ScrollView>
 
       {/* --- DEVELOPER PANEL MODAL (Spec Section 7.8) --- */}
-      <Modal
+      <DeveloperPanel
         visible={devPanelOpen}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setDevPanelOpen(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <View
-            style={[
-              styles.devModalSheet,
-              {
-                backgroundColor: colors.surface,
-                borderTopLeftRadius: radii.hero,
-                borderTopRightRadius: radii.hero,
-              },
-            ]}
-          >
-            {/* Modal Header */}
-            <View style={styles.devModalHeader}>
-              <View style={{ flex: 1 }}>
-                <View style={styles.devHeaderTitleRow}>
-                  <Ionicons name="construct" size={18} color={colors.palette.warningText} />
-                  <Text style={[styles.devModalTitle, { color: colors.palette.warningText }]}>
-                    Hardware Simulator Dev Panel
-                  </Text>
-                </View>
-                <Text style={[styles.devModalSubtitle, { color: colors.textMuted }]}>
-                  Spec §7.8: Force telemetry & test alert triggers
-                </Text>
-              </View>
-
-              <TouchableOpacity
-                onPress={() => setDevPanelOpen(false)}
-                style={[styles.closeModalBtn, { backgroundColor: colors.palette.mist }]}
-              >
-                <Ionicons name="close" size={20} color={colors.text} />
-              </TouchableOpacity>
-            </View>
-
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.devScrollContent}>
-              {/* Scenario Quick Buttons */}
-              <Text style={[styles.devSectionLabel, { color: colors.text }]}>
-                Test State Scenarios
-              </Text>
-
-              <View style={styles.devScenariosRow}>
-                {/* Bottle Empty Scenario */}
-                <TouchableOpacity
-                  onPress={handleTriggerBottleEmpty}
-                  style={[
-                    styles.scenarioBtn,
-                    {
-                      backgroundColor: isBottleEmptyScenario
-                        ? colors.palette.warningBorder
-                        : colors.palette.mist,
-                      borderColor: colors.palette.warningBorder,
-                      borderRadius: radii.sm,
-                    },
-                  ]}
-                >
-                  <Ionicons
-                    name="beaker-outline"
-                    size={16}
-                    color={isBottleEmptyScenario ? colors.palette.white : colors.palette.warningText}
-                  />
-                  <Text
-                    style={[
-                      styles.scenarioBtnText,
-                      {
-                        color: isBottleEmptyScenario
-                          ? colors.palette.white
-                          : colors.palette.warningText,
-                      },
-                    ]}
-                  >
-                    {isBottleEmptyScenario ? 'Bottle Empty Active' : 'Bottle Empty'}
-                  </Text>
-                </TouchableOpacity>
-
-                {/* Heat Wave Scenario */}
-                <TouchableOpacity
-                  onPress={handleTriggerHeatWave}
-                  style={[
-                    styles.scenarioBtn,
-                    {
-                      backgroundColor: isHeatWaveScenario
-                        ? colors.palette.warningBorder
-                        : colors.palette.mist,
-                      borderColor: colors.palette.warningBorder,
-                      borderRadius: radii.sm,
-                    },
-                  ]}
-                >
-                  <Ionicons
-                    name="flame-outline"
-                    size={16}
-                    color={isHeatWaveScenario ? colors.palette.white : colors.palette.warningText}
-                  />
-                  <Text
-                    style={[
-                      styles.scenarioBtnText,
-                      {
-                        color: isHeatWaveScenario
-                          ? colors.palette.white
-                          : colors.palette.warningText,
-                      },
-                    ]}
-                  >
-                    {isHeatWaveScenario ? 'Heat Wave (38°C)' : 'Heat Wave'}
-                  </Text>
-                </TouchableOpacity>
-
-                {/* Device Offline Scenario */}
-                <TouchableOpacity
-                  onPress={handleTriggerOffline}
-                  style={[
-                    styles.scenarioBtn,
-                    {
-                      backgroundColor: isForcedOffline
-                        ? colors.palette.forest
-                        : colors.palette.mist,
-                      borderColor: colors.palette.forest,
-                      borderRadius: radii.sm,
-                    },
-                  ]}
-                >
-                  <Ionicons
-                    name="cloud-offline-outline"
-                    size={16}
-                    color={isForcedOffline ? colors.palette.white : colors.palette.forest}
-                  />
-                  <Text
-                    style={[
-                      styles.scenarioBtnText,
-                      {
-                        color: isForcedOffline
-                          ? colors.palette.white
-                          : colors.palette.forest,
-                      },
-                    ]}
-                  >
-                    {isForcedOffline ? 'Forced Offline' : 'Device Offline'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Sliders to Force Telemetry Values */}
-              <Text style={[styles.devSectionLabel, { color: colors.text, marginTop: 16 }]}>
-                Force Live Telemetry Sliders
-              </Text>
-
-              {/* Force Soil Moisture */}
-              <SliderControl
-                label="Soil Moisture"
-                value={devMoisture}
-                min={0}
-                max={100}
-                step={1}
-                unit="%"
-                accentColor={colors.palette.forest}
-                onChange={handleForceMoisture}
-              />
-
-              {/* Force Temperature */}
-              <SliderControl
-                label="Temperature"
-                value={devTemp}
-                min={10}
-                max={45}
-                step={1}
-                unit="°C"
-                accentColor={colors.palette.warningBorder}
-                onChange={handleForceTemp}
-              />
-
-              {/* Force Humidity */}
-              <SliderControl
-                label="Humidity"
-                value={devHumidity}
-                min={20}
-                max={95}
-                step={1}
-                unit="%"
-                accentColor={colors.palette.sage}
-                onChange={handleForceHumidity}
-              />
-
-              {/* Force Bottle Level */}
-              <SliderControl
-                label="Reservoir Bottle Level"
-                value={devBottle}
-                min={0}
-                max={config.bottle.capacityMl}
-                step={25}
-                unit=" ml"
-                accentColor={colors.palette.forest}
-                onChange={handleForceBottle}
-              />
-
-              {/* Quick Health State Presets */}
-              <Text style={[styles.devSectionLabel, { color: colors.text, marginTop: 14 }]}>
-                Quick Health State Presets
-              </Text>
-
-              <View style={styles.presetButtonsRow}>
-                <TouchableOpacity
-                  onPress={() => handleForceMoisture(18)}
-                  style={[
-                    styles.presetBtn,
-                    { backgroundColor: colors.palette.blush, borderRadius: radii.sm },
-                  ]}
-                >
-                  <Text style={[styles.presetBtnText, { color: colors.palette.warningText }]}>
-                    Thirsty (18%)
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  onPress={() => handleForceMoisture(48)}
-                  style={[
-                    styles.presetBtn,
-                    { backgroundColor: colors.palette.lime, borderRadius: radii.sm },
-                  ]}
-                >
-                  <Text style={[styles.presetBtnText, { color: colors.palette.forest }]}>
-                    Healthy (48%)
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  onPress={() => handleForceMoisture(85)}
-                  style={[
-                    styles.presetBtn,
-                    { backgroundColor: colors.palette.blush, borderRadius: radii.sm },
-                  ]}
-                >
-                  <Text style={[styles.presetBtnText, { color: colors.palette.warningText }]}>
-                    Overwatered (85%)
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Clear / Reset Button */}
-              <TouchableOpacity
-                onPress={handleResetDevOverrides}
-                style={[
-                  styles.resetOverridesBtn,
-                  { backgroundColor: colors.palette.mist, borderColor: colors.border, borderRadius: radii.sm },
-                ]}
-              >
-                <Ionicons name="refresh-outline" size={16} color={colors.text} />
-                <Text style={[styles.resetOverridesText, { color: colors.text }]}>
-                  Reset All Overrides (Natural Curves)
-                </Text>
-              </TouchableOpacity>
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
+        onClose={() => setDevPanelOpen(false)}
+      />
 
       {/* --- CALIBRATION WIZARD MODAL --- */}
       <Modal
