@@ -28,22 +28,7 @@ import {
 } from 'react-native-gesture-handler';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
-import { useLiveDevice } from '@/store/useLiveDevice';
-import { computePlantHealthState } from '@/store/useLiveDevice';
-
-type AlertSeverity = 'critical' | 'warning' | 'info';
-type AlertStatus = 'unread' | 'read' | 'snoozed';
-
-interface AppAlert {
-  id: string;
-  severity: AlertSeverity;
-  title: string;
-  body: string;
-  plantName: string;
-  ts: number;
-  status: AlertStatus;
-  actionLabel?: string;
-}
+import { useAlertEngine, AppAlert, AlertSeverity } from '@/hooks/useAlertEngine';
 
 const SEVERITY_COLORS: Record<
   AlertSeverity,
@@ -69,112 +54,22 @@ const SEVERITY_COLORS: Record<
   },
 };
 
-function buildAlertsFromDevice(device: ReturnType<typeof useLiveDevice.getState>['devices'][string] | undefined): AppAlert[] {
-  if (!device) return [];
-  const health = computePlantHealthState(device);
-  const alerts: AppAlert[] = [];
-
-  if (!device.status.online) {
-    alerts.push({
-      id: 'offline',
-      severity: 'critical',
-      title: 'Device Offline',
-      body: `${device.config.name} has not reported in over 3 minutes. Check Wi-Fi connection.`,
-      plantName: device.config.plantName,
-      ts: device.status.lastSeen,
-      status: 'unread',
-      actionLabel: 'Check Settings',
-    });
-  }
-
-  if (health === 'thirsty') {
-    alerts.push({
-      id: 'thirsty',
-      severity: 'warning',
-      title: 'Low Soil Moisture',
-      body: `${device.config.plantName} soil is at ${device.telemetry.soilMoisture}%, below the ${device.config.thresholds.moistureMin}% threshold.`,
-      plantName: device.config.plantName,
-      ts: Date.now() - 600000,
-      status: 'unread',
-      actionLabel: 'Water Now',
-    });
-  }
-
-  if (device.config.bottle.remainingMl <= 20) {
-    alerts.push({
-      id: 'bottle',
-      severity: 'critical',
-      title: 'Water Bottle Empty',
-      body: 'Estimated bottle level is critically low. Pump is disabled until refilled.',
-      plantName: device.config.plantName,
-      ts: Date.now() - 1200000,
-      status: 'unread',
-      actionLabel: 'I Refilled',
-    });
-  }
-
-  if (device.telemetry.temperature > device.config.thresholds.tempMax) {
-    alerts.push({
-      id: 'heat',
-      severity: 'warning',
-      title: 'High Temperature',
-      body: `Temperature is ${device.telemetry.temperature}°C, above recommended ${device.config.thresholds.tempMax}°C.`,
-      plantName: device.config.plantName,
-      ts: Date.now() - 1800000,
-      status: 'unread',
-    });
-  }
-
-  alerts.push({
-    id: 'watered',
-    severity: 'info',
-    title: 'Auto-watering Completed',
-    body: `${device.config.plantName} was watered for 5s. Moisture rose from 27% to 47%.`,
-    plantName: device.config.plantName,
-    ts: Date.now() - 14400000,
-    status: 'read',
-  });
-
-  return alerts;
-}
-
 export default function AlertsScreen() {
   const { colors, radii, spacing } = useAppTheme();
-  const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
-  const refillBottle = useLiveDevice((s) => s.refillBottle);
+  const {
+    alerts,
+    unreadAlerts,
+    criticalAlerts,
+    warningAlerts,
+    infoAlerts,
+    markRead,
+    markAllRead,
+    snooze,
+    handleAction,
+    isCloudSynced,
+  } = useAlertEngine();
 
-  const [alerts, setAlerts] = useState<AppAlert[]>(() =>
-    buildAlertsFromDevice(device)
-  );
-
-  const markRead = (id: string) => {
-    setAlerts((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, status: 'read' } : a))
-    );
-  };
-
-  const snooze = (id: string) => {
-    setAlerts((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, status: 'snoozed' } : a))
-    );
-  };
-
-  const handleAction = (alert: AppAlert) => {
-    if (alert.id === 'bottle') {
-      refillBottle();
-      markRead(alert.id);
-    } else {
-      markRead(alert.id);
-    }
-  };
-
-  const unreadAlerts = alerts.filter((a) => a.status === 'unread');
   const readAlerts = alerts.filter((a) => a.status !== 'unread');
-
-  const criticalAlerts = unreadAlerts.filter((a) => a.severity === 'critical');
-  const warningAlerts = unreadAlerts.filter((a) => a.severity === 'warning');
-  const infoAlerts = unreadAlerts.filter((a) => a.severity === 'info');
-
   const isEmpty = alerts.length === 0 || unreadAlerts.length === 0;
 
   return (
@@ -186,7 +81,44 @@ export default function AlertsScreen() {
         showsVerticalScrollIndicator={false}
       >
         {/* Header */}
-        <Text style={[styles.title, { color: colors.text }]}>Alerts</Text>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text style={[styles.title, { color: colors.text }]}>Alerts</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 5,
+                paddingHorizontal: 8,
+                paddingVertical: 4,
+                borderRadius: radii.sm,
+                backgroundColor: isCloudSynced ? `${colors.palette.forest}15` : `${colors.palette.sage}20`,
+              }}
+            >
+              <Ionicons
+                name={isCloudSynced ? 'cloud-done-outline' : 'hardware-chip-outline'}
+                size={12}
+                color={isCloudSynced ? colors.palette.forest : colors.palette.sage}
+              />
+              <Text
+                style={{
+                  fontSize: 10,
+                  fontWeight: '700',
+                  color: isCloudSynced ? colors.palette.forest : colors.palette.sage,
+                }}
+              >
+                {isCloudSynced ? 'Cloud Synced' : 'Local Engine'}
+              </Text>
+            </View>
+            {unreadAlerts.length > 0 && (
+              <TouchableOpacity onPress={markAllRead}>
+                <Text style={{ fontSize: 12, fontWeight: '700', color: colors.palette.forest }}>
+                  Mark all read
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
         <Text style={[styles.subtitle, { color: colors.textMuted }]}>
           {unreadAlerts.length > 0
             ? `${unreadAlerts.length} item${unreadAlerts.length > 1 ? 's' : ''} need your attention`

@@ -14,13 +14,26 @@ import { simulatedDevice } from '@/services/simulator';
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
 function RootNavigator() {
-  const { initializeAuthListener, isDemoMode } = useSession();
+  const { user, isDemoMode, initializeAuthListener } = useSession();
 
   useEffect(() => {
     const unsubscribe = initializeAuthListener();
     SplashScreen.hideAsync().catch(() => {});
     return () => unsubscribe();
   }, [initializeAuthListener]);
+
+  // Register push notifications when authenticated
+  useEffect(() => {
+    if (user && !isDemoMode) {
+      import('@/services/notifications').then(({ registerForPushNotificationsAsync, savePushTokenToRTDB }) => {
+        registerForPushNotificationsAsync().then((token) => {
+          if (token && user.uid) {
+            savePushTokenToRTDB(user.uid, token);
+          }
+        });
+      });
+    }
+  }, [user, isDemoMode]);
 
   // Start or stop simulator based on Demo Mode
   useEffect(() => {
