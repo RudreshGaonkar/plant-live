@@ -73,10 +73,6 @@ export default function HomeScreen() {
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.verticalCenter}>
-          <View style={styles.noWater}>
-            <ThemedText type='subtitle'>No Water</ThemedText>
-          </View>
-
           <View style={styles.heading}>
             <View style={styles.horizontalCenter}>
               <TouchableOpacity style={styles.button}>
