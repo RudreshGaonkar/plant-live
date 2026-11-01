@@ -38,7 +38,13 @@
       "expo-image",
       "expo-status-bar",
       "expo-web-browser",
-      "expo-asset"
+      "expo-asset",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow LeafLink to use your location for accurate outdoor weather."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

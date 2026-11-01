@@ -308,6 +308,36 @@ export function useAlertEngine() {
         }
       }
 
+      // 6. Smart Terrace Rain Delay Notice
+      const weather = useLiveDevice.getState().weather;
+      if (
+        location === 'terrace' &&
+        config.mode === 'auto' &&
+        weather &&
+        weather.rainProbability > 70 &&
+        telemetry.soilMoisture < thresholds.moistureMin &&
+        telemetry.soilMoisture >= 15 // Override if below CRITICAL_MIN (15%)
+      ) {
+        if (shouldAlert('info')) {
+          const body = `${plantName} is on the Terrace. Auto-watering is temporarily delayed because rain probability is ${weather.rainProbability}%. Current soil moisture is ${telemetry.soilMoisture}%.`;
+          newAlerts.push({
+            id: `terrace-rain-delay-${deviceId}-${now}`,
+            deviceId,
+            type: 'info',
+            alertType: 'info',
+            severity: 'info',
+            title: 'Smart Terrace Rain Delay',
+            body,
+            message: body,
+            plantName,
+            createdAt: now,
+            ts: now,
+            timestamp: now,
+            status: 'active',
+          });
+        }
+      }
+
       return newAlerts;
     },
     []

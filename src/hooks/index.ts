@@ -5,3 +5,4 @@ export * from './useAlertEngine';
 export * from './useDeviceTelemetry';
 export * from './usePlantData';
 export * from './useAlerts';
+export * from './useWeather';

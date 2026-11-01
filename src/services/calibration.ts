@@ -45,6 +45,8 @@ export function rawToMoisturePercent(
  *         else:
  *             trigger auto cycle
  */
+export const CRITICAL_MIN = 15;
+
 export interface AutoWaterEvaluationInput {
   mode: 'auto' | 'manual';
   remainingBottleMl: number;
@@ -56,6 +58,8 @@ export interface AutoWaterEvaluationInput {
   temperature: number;
   tempMax: number;
   light?: number | null; // 1 = bright, 0 = dim/dark
+  location?: 'indoor' | 'balcony' | 'terrace' | string;
+  rainProbability?: number; // 0 - 100 percentage
 }
 
 export type AutoWaterDecision =
@@ -81,6 +85,20 @@ export function evaluateAutoWaterDecision(
   }
 
   // Soil is below moistureMin: check guards
+
+  // Smart Terrace Rain Delay Logic:
+  // Apply rain-delay logic using this dynamic weather data ONLY when the active plant location is set to "Terrace" and rain probability exceeds 70%.
+  // Override rain-delay if soil moisture drops below CRITICAL_MIN (15%) to avoid false alarms.
+  // Do NOT affect manual watering or indoor plants.
+  if (
+    input.location === 'terrace' &&
+    typeof input.rainProbability === 'number' &&
+    input.rainProbability > 70 &&
+    input.soilMoisture >= CRITICAL_MIN
+  ) {
+    return { action: 'delay', reason: 'terrace_rain_delay' };
+  }
+
   // 1. Coastal high humidity guard
   if (
     input.humidity > input.humidityMax &&

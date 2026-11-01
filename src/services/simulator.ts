@@ -441,14 +441,23 @@ export class SimulatedDevice {
       remainingMl = this.overrides.forcedBottleRemaining;
     }
 
-    // 6. Autonomous Auto-Watering decision (Spec Section 8.1)
+    // 6. Autonomous Auto-Watering decision (Spec Section 8.1 & Smart Terrace Rain Delay)
     if (
       device.config.mode === 'auto' &&
       !store.isWateringActive &&
       currentMoisture < device.config.thresholds.moistureMin
     ) {
-      // High humidity guard
-      if (
+      // Smart Terrace Rain Delay Logic:
+      // Apply rain-delay logic using dynamic weather data ONLY when active plant location is set to "Terrace" and rain probability exceeds 70%.
+      // Override rain-delay if soil moisture drops below CRITICAL_MIN (15%) to avoid false alarms.
+      // Do NOT affect manual watering or indoor plants.
+      const isTerrace = device.config.location === 'terrace';
+      const rainProbability = store.weather?.rainProbability ?? 0;
+      const isCriticalMoisture = currentMoisture < 15; // CRITICAL_MIN
+
+      if (isTerrace && rainProbability > 70 && !isCriticalMoisture) {
+        // Delayed due to impending terrace rainfall
+      } else if (
         humidity > device.config.thresholds.humidityMax &&
         currentMoisture > device.config.thresholds.moistureMin - 10
       ) {

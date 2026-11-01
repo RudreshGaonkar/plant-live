@@ -23,7 +23,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
-import { PlantHealthState } from '@/store/useLiveDevice';
+import { PlantHealthState, WeatherData } from '@/store/useLiveDevice';
 import { WateringOverlay } from './WateringOverlay';
 import { PlantScene3D } from './PlantScene3D';
 
@@ -36,6 +36,7 @@ export interface Plant3DHeroProps {
   plantName?: string;
   plantSpecies?: string;
   lastSeen?: number;
+  weather?: WeatherData | null;
   onLocationPress?: () => void;
 }
 

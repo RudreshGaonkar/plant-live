@@ -42,6 +42,8 @@ import { BottleRail } from '@/components/BottleRail';
 import { LiveChips } from '@/components/LiveChips';
 import { VitalsSheet } from '@/components/VitalsSheet';
 import { GardenStrip } from '@/components/GardenStrip';
+import { WeatherWidget } from '@/components/WeatherWidget';
+import { useWeather } from '@/hooks/useWeather';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -69,6 +71,16 @@ export default function HomeScreen() {
   const triggerWaterNow = useLiveDevice((s) => s.triggerWaterNow);
 
   const [gardenStripOpen, setGardenStripOpen] = useState(false);
+
+  // Dynamic device location weather & smart terrace rain delay
+  const currentPlantLocation =
+    device?.config?.location && device.config.plantName !== 'Terrace Tulsi Pot'
+      ? device.config.location
+      : 'indoor';
+  const { weather, loading: weatherLoading, isRainDelayActive } = useWeather(
+    device ? currentPlantLocation : undefined,
+    device?.telemetry?.soilMoisture
+  );
 
   // Shared value that tracks VitalsSheet's translateY to drive overlay fades
   const sheetTranslateY = useSharedValue(SNAP_PEEK_Y);
@@ -227,6 +239,7 @@ export default function HomeScreen() {
           plantName={plantDisplayName}
           plantSpecies={config.plantSpecies}
           lastSeen={status.lastSeen}
+          weather={weather}
         />
       </View>
 
@@ -352,6 +365,24 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* ── Layer 1b: Floating Weather Widget (Centrally below location bar, top center of plant scene) ── */}
+      <Animated.View
+        style={[
+          styles.weatherWidgetContainer,
+          {
+            top: Math.max(insets.top, 24) + (isOffline ? 104 : 58),
+          },
+          overlayAnimStyle,
+        ]}
+        pointerEvents="box-none"
+      >
+        <WeatherWidget
+          weather={weather}
+          loading={weatherLoading}
+          isRainDelayActive={isRainDelayActive}
+        />
+      </Animated.View>
 
       {/* GardenStrip dropdown */}
       {gardenStripOpen && (
@@ -547,6 +578,13 @@ const styles = StyleSheet.create({
     top: '34%',
     alignSelf: 'center',
     zIndex: 8,
+  },
+  weatherWidgetContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 9,
   },
   bottleRailContainer: {
     position: 'absolute',

@@ -96,12 +96,28 @@ export interface DeviceRecord {
   };
 }
 
+export interface WeatherData {
+  temperature: number;
+  weathercode: number;
+  conditionText: string;
+  icon: string;
+  isRaining: boolean;
+  rainProbability: number;
+  latitude: number;
+  longitude: number;
+  cityName?: string;
+  isFallback: boolean;
+  lastUpdated: number;
+}
+
 export interface LiveDeviceStore {
   devices: Record<string, DeviceRecord>;
   activeDeviceId: string;
   waterLogs: WaterLog[];
   isWateringActive: boolean;
   wateringSecondsLeft: number;
+  weather: WeatherData | null;
+  weatherLoading: boolean;
   
   // Actions
   setActiveDeviceId: (id: string) => void;
@@ -117,6 +133,8 @@ export interface LiveDeviceStore {
   removeDevice: (id: string) => void;
   addDevice: (device: DeviceRecord) => void;
   setOnlineStatus: (online: boolean) => void;
+  setWeather: (weather: WeatherData | null) => void;
+  setWeatherLoading: (loading: boolean) => void;
 }
 
 export const mockDevice: DeviceRecord = {
@@ -225,6 +243,8 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   waterLogs: [],
   isWateringActive: false,
   wateringSecondsLeft: 0,
+  weather: null,
+  weatherLoading: false,
 
   setActiveDeviceId: (id) => set({ activeDeviceId: id }),
 
@@ -564,6 +584,9 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
       },
     });
   },
+
+  setWeather: (weather) => set({ weather }),
+  setWeatherLoading: (weatherLoading) => set({ weatherLoading }),
 }));
 
 export const computePlantHealthState = (device?: DeviceRecord): PlantHealthState => {
