@@ -29,7 +29,7 @@ import {
 
 export default function SettingsScreen() {
   const { colors, radii, spacing } = useAppTheme();
-  const { isDemoMode, signOut } = useSession();
+  const { signOut } = useSession();
 
   // Store bindings
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
@@ -628,7 +628,7 @@ export default function SettingsScreen() {
           >
             <Ionicons name="log-out-outline" size={16} color={colors.palette.warningText} />
             <Text style={[styles.signOutText, { color: colors.palette.warningText }]}>
-              {isDemoMode ? 'Exit Demo Session' : 'Sign Out of Account'}
+              Sign Out of Account
             </Text>
           </TouchableOpacity>
         </View>

@@ -5,18 +5,18 @@ import { useSession } from '@/store/useSession';
 import { useAppTheme } from '@/theme';
 
 export default function Index() {
-  const { user, isDemoMode, isLoading } = useSession();
+  const { user, isLoading } = useSession();
   const { colors } = useAppTheme();
 
   useEffect(() => {
     if (!isLoading) {
-      if (user || isDemoMode) {
+      if (user) {
         router.replace('/(tabs)/home');
       } else {
         router.replace('/(auth)/login');
       }
     }
-  }, [user, isDemoMode, isLoading]);
+  }, [user, isLoading]);
 
   return (
     <View

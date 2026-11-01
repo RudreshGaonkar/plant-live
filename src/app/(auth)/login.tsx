@@ -18,7 +18,6 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { auth } from '@/services/firebase';
-import { useSession } from '@/store/useSession';
 import { useAppTheme } from '@/theme';
 
 const loginSchema = z.object({
@@ -30,7 +29,6 @@ type LoginFormData = z.infer<typeof loginSchema>;
 
 export default function LoginScreen() {
   const { colors, radii } = useAppTheme();
-  const { enterDemoMode } = useSession();
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -60,11 +58,6 @@ export default function LoginScreen() {
     } finally {
       setIsSubmitting(false);
     }
-  };
-
-  const handleDemoMode = () => {
-    enterDemoMode();
-    router.replace('/(tabs)/home');
   };
 
   return (
@@ -286,56 +279,6 @@ export default function LoginScreen() {
                 </Text>
               </TouchableOpacity>
             </View>
-          </View>
-
-          {/* Demo Mode Action Card */}
-          <View
-            style={[
-              styles.demoCard,
-              {
-                backgroundColor: colors.palette.mist,
-                borderColor: colors.palette.lime,
-                borderRadius: radii.card,
-              },
-            ]}
-          >
-            <View style={styles.demoContent}>
-              <Ionicons
-                name="sparkles-outline"
-                size={24}
-                color={colors.palette.forest}
-              />
-              <View style={styles.demoTextWrap}>
-                <Text style={[styles.demoTitle, { color: colors.text }]}>
-                  No hardware or account?
-                </Text>
-                <Text style={[styles.demoDesc, { color: colors.textMuted }]}>
-                  Explore all live metrics, 3D views & watering with the local simulator.
-                </Text>
-              </View>
-            </View>
-
-            <TouchableOpacity
-              style={[
-                styles.demoButton,
-                {
-                  backgroundColor: colors.palette.lime,
-                  borderColor: colors.palette.forest,
-                  borderRadius: radii.full,
-                },
-              ]}
-              onPress={handleDemoMode}
-            >
-              <Ionicons name="play" size={16} color={colors.palette.forest} />
-              <Text
-                style={[
-                  styles.demoButtonText,
-                  { color: colors.palette.forest, fontWeight: '700' },
-                ]}
-              >
-                Try Demo Mode
-              </Text>
-            </TouchableOpacity>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>

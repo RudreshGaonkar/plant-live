@@ -9,7 +9,7 @@
  * - Full: Half + water log list
  * uiLayout.md Section 3 – Layer 5
  */
-import React, { useEffect } from 'react';
+import React, { useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -108,7 +108,7 @@ export function VitalsSheet({
   const translateY = animatedTranslateY ?? internalTranslateY;
   const currentSnap = useSharedValue<SheetSnap>('peek');
 
-  const snapTo = (snap: SheetSnap) => {
+  const snapTo = useCallback((snap: SheetSnap) => {
     'worklet';
     const yMap: Record<SheetSnap, number> = {
       full: snapPoints[0],
@@ -120,14 +120,14 @@ export function VitalsSheet({
       stiffness: 160,
     });
     currentSnap.value = snap;
-  };
+  }, [translateY, currentSnap]);
 
   // Force external snap (e.g. watering started → collapse to peek)
   useEffect(() => {
     if (forceSnap) {
       snapTo(forceSnap);
     }
-  }, [forceSnap]);
+  }, [forceSnap, snapTo]);
 
   // Safely notify onTranslateY if passed via JS callback
   useAnimatedReaction(
@@ -316,7 +316,7 @@ export function VitalsSheet({
               No watering events recorded yet.
             </Text>
           ) : (
-            waterLogs.map((log) => (
+            waterLogs.slice(0, 8).map((log) => (
               <WaterLogRow key={log.id} log={log} colors={colors} radii={radii} />
             ))
           )}

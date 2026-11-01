@@ -40,7 +40,7 @@ export interface Plant3DHeroProps {
 }
 
 // Background gradient pairs per health state
-const gradientColors: Record<
+export const gradientColors: Record<
   PlantHealthState,
   [string, string, string]
 > = {
@@ -51,7 +51,7 @@ const gradientColors: Record<
 };
 
 // Spec 5.1 accent chip colours per state
-const stateChips: Record<PlantHealthState, { label: string; bg: string; text: string; icon: keyof typeof Ionicons.glyphMap }> =
+export const stateChips: Record<PlantHealthState, { label: string; bg: string; text: string; icon: keyof typeof Ionicons.glyphMap }> =
   {
     healthy: { label: 'Healthy', bg: '#AEE09A', text: '#1F2A21', icon: 'checkmark-circle' },
     thirsty: { label: 'Needs Water', bg: '#F8D7DA', text: '#C0505E', icon: 'water-outline' },

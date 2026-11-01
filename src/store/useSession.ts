@@ -27,35 +27,29 @@ export const useSession = create<SessionState>((set, get) => ({
   isDemoMode: false,
   activeDeviceId: '',
 
-  setUser: (user) => set({ user, isDemoMode: user ? false : get().isDemoMode }),
+  setUser: (user) => set({ user, isDemoMode: false }),
 
-  enterDemoMode: () =>
-    set({
-      isDemoMode: true,
-      isLoading: false,
-      user: {
-        uid: 'demo-user-123',
-        email: 'demo@leaflink.local',
-        displayName: 'Plant Parent (Demo)',
-      },
-      activeDeviceId: 'demo-leaf-01',
-    }),
+  enterDemoMode: () => {
+    // Demo Mode disabled globally – no-op for backward compatibility
+    set({ isDemoMode: false });
+  },
 
-  exitDemoMode: () =>
+  exitDemoMode: () => {
     set({
       isDemoMode: false,
       user: null,
       activeDeviceId: '',
-    }),
+    });
+  },
 
   setActiveDeviceId: (deviceId: string) => set({ activeDeviceId: deviceId }),
 
   signOut: async () => {
-    if (get().isDemoMode) {
-      get().exitDemoMode();
-      return;
+    try {
+      await fbSignOut(auth);
+    } catch (err) {
+      console.warn('[Session] Sign out error:', err);
     }
-    await fbSignOut(auth);
     set({ user: null, activeDeviceId: '', isDemoMode: false });
   },
 
@@ -72,11 +66,7 @@ export const useSession = create<SessionState>((set, get) => ({
           isLoading: false,
         });
       } else {
-        if (!get().isDemoMode) {
-          set({ user: null, activeDeviceId: '', isDemoMode: false, isLoading: false });
-        } else {
-          set({ isLoading: false });
-        }
+        set({ user: null, activeDeviceId: '', isDemoMode: false, isLoading: false });
       }
     });
 

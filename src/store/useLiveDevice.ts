@@ -37,10 +37,14 @@ export interface DeviceConfig {
 export interface DeviceTelemetry {
   soilRaw: number;
   soilMoisture: number; // 0 - 100 %
+  waterRaw?: number;
+  waterLevel?: number; // 0 - 100 %
+  waterLevelLow?: boolean;
   temperature: number; // DHT11 C
   humidity: number; // DHT11 % RH
   light: number | null; // null if no LDR; 0/1 or 0-100
   pumpOn: boolean;
+  isPumpActive?: boolean;
   rssi: number;
   ts: number;
 }
@@ -69,6 +73,7 @@ export interface DeviceCommand {
 export interface WaterLog {
   id: string;
   ts: number;
+  timestamp?: number;
   trigger: 'auto' | 'manual';
   durationSec: number;
   moistureBefore: number;
@@ -82,6 +87,13 @@ export interface DeviceRecord {
   telemetry: DeviceTelemetry;
   status: DeviceStatus;
   command?: DeviceCommand;
+  control?: {
+    pumpState?: boolean;
+    manualOverride?: boolean;
+    timestamp?: number;
+    durationSec?: number;
+    [key: string]: any;
+  };
 }
 
 export interface LiveDeviceStore {
@@ -110,17 +122,17 @@ export interface LiveDeviceStore {
 export const mockDevice: DeviceRecord = {
   id: 'esp8266-demo-01',
   config: {
-    name: 'Balcony Hub Plant',
+    name: 'Indoor Plant',
     plantName: 'Monstera Deliciosa',
     plantSpecies: 'Swiss Cheese Plant',
     hubId: 'hub-home-1',
-    location: 'balcony',
+    location: 'indoor',
     mode: 'auto',
     thresholds: {
-      moistureMin: 30,
-      moistureMax: 60,
-      tempMax: 35,
-      humidityMax: 80,
+      moistureMin: 35,
+      moistureMax: 65,
+      tempMax: 32,
+      humidityMax: 75,
       pumpDurationSec: 5,
     },
     sensors: {
@@ -154,40 +166,63 @@ export const mockDevice: DeviceRecord = {
   },
 };
 
-const initialWaterLogs: WaterLog[] = [
-  {
-    id: 'log-1',
-    ts: Date.now() - 3600000 * 4,
-    trigger: 'auto',
-    durationSec: 5,
-    moistureBefore: 27,
-    moistureAfter: 48,
-    note: 'Optimal morning watering cycle',
+export const createDefaultDeviceRecord = (id: string = 'leaf-node-01'): DeviceRecord => ({
+  id,
+  config: {
+    name: 'LeafLink Node',
+    plantName: 'Monstera Deliciosa',
+    plantSpecies: 'Swiss Cheese Plant',
+    hubId: 'hub-main',
+    location: 'indoor',
+    mode: 'auto',
+    thresholds: {
+      moistureMin: 35,
+      moistureMax: 65,
+      tempMax: 32,
+      humidityMax: 75,
+      pumpDurationSec: 5,
+    },
+    sensors: {
+      lightMode: 'digital',
+    },
+    calibration: {
+      soilDryRaw: 1024,
+      soilWetRaw: 400,
+    },
+    bottle: {
+      capacityMl: 500,
+      flowMlPerSec: 15,
+      remainingMl: 500,
+    },
+    pairedAt: Date.now(),
   },
-  {
-    id: 'log-2',
-    ts: Date.now() - 3600000 * 18,
-    trigger: 'manual',
-    durationSec: 3,
-    moistureBefore: 29,
-    moistureAfter: 44,
-    note: 'Quick manual refresh',
+  telemetry: {
+    soilRaw: 600,
+    soilMoisture: 45,
+    temperature: 24,
+    humidity: 60,
+    light: 1,
+    pumpOn: false,
+    isPumpActive: false,
+    rssi: -60,
+    ts: Date.now(),
   },
-  {
-    id: 'log-3',
-    ts: Date.now() - 86400000,
-    trigger: 'auto',
-    durationSec: 5,
-    moistureBefore: 28,
-    moistureAfter: 52,
-    note: 'Delayed earlier due to coastal humidity',
+  status: {
+    online: true,
+    lastSeen: Date.now(),
+    firmware: 'leaflink-esp8266',
   },
-];
+  control: {
+    pumpState: false,
+    manualOverride: false,
+    timestamp: Date.now(),
+  },
+});
 
 export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   devices: {},
-  activeDeviceId: '',
-  waterLogs: initialWaterLogs,
+  activeDeviceId: 'leaf-node-01',
+  waterLogs: [],
   isWateringActive: false,
   wateringSecondsLeft: 0,
 
@@ -195,20 +230,29 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
 
   triggerWaterNow: (durationSec = 5) => {
     const { activeDeviceId, devices } = get();
-    const active = devices[activeDeviceId];
-    if (!active) return;
+    const targetId = activeDeviceId || 'leaf-node-01';
+    const active = devices[targetId] || createDefaultDeviceRecord(targetId);
 
-    // Start simulation of command execution
+    // Optimistic activation of pump state locally
     set({
+      activeDeviceId: targetId,
       isWateringActive: true,
       wateringSecondsLeft: durationSec,
       devices: {
         ...devices,
-        [activeDeviceId]: {
+        [targetId]: {
           ...active,
+          control: {
+            ...active.control,
+            pumpState: true,
+            manualOverride: true,
+            timestamp: Date.now(),
+            durationSec,
+          },
           telemetry: {
             ...active.telemetry,
             pumpOn: true,
+            isPumpActive: true,
           },
           command: {
             id: `cmd-${Date.now()}`,
@@ -419,16 +463,21 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
 
   updateTelemetry: (telemetry) => {
     const { activeDeviceId, devices } = get();
-    const active = devices[activeDeviceId];
-    if (!active) return;
+    const targetId = activeDeviceId || 'leaf-node-01';
+    const active = devices[targetId] || createDefaultDeviceRecord(targetId);
+    const isPump = telemetry.isPumpActive ?? telemetry.pumpOn ?? active.telemetry.isPumpActive ?? false;
+
     set({
+      activeDeviceId: targetId,
       devices: {
         ...devices,
-        [activeDeviceId]: {
+        [targetId]: {
           ...active,
           telemetry: {
             ...active.telemetry,
             ...telemetry,
+            isPumpActive: isPump,
+            pumpOn: isPump,
             ts: Date.now(),
           },
         },
@@ -438,12 +487,13 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
 
   updateConfig: (configPartial) => {
     const { activeDeviceId, devices } = get();
-    const active = devices[activeDeviceId];
-    if (!active) return;
+    const targetId = activeDeviceId || 'leaf-node-01';
+    const active = devices[targetId] || createDefaultDeviceRecord(targetId);
     set({
+      activeDeviceId: targetId,
       devices: {
         ...devices,
-        [activeDeviceId]: {
+        [targetId]: {
           ...active,
           config: {
             ...active.config,
@@ -456,12 +506,13 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
 
   updateCalibration: (calibration) => {
     const { activeDeviceId, devices } = get();
-    const active = devices[activeDeviceId];
-    if (!active) return;
+    const targetId = activeDeviceId || 'leaf-node-01';
+    const active = devices[targetId] || createDefaultDeviceRecord(targetId);
     set({
+      activeDeviceId: targetId,
       devices: {
         ...devices,
-        [activeDeviceId]: {
+        [targetId]: {
           ...active,
           config: {
             ...active.config,

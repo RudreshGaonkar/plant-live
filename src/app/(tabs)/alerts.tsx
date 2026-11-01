@@ -6,7 +6,7 @@
  * - Info: lime
  * uiLayout.md Section 6
  */
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -54,6 +54,8 @@ const SEVERITY_COLORS: Record<
   },
 };
 
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
 export default function AlertsScreen() {
   const { colors, radii, spacing } = useAppTheme();
   const {
@@ -69,8 +71,36 @@ export default function AlertsScreen() {
     isCloudSynced,
   } = useAlertEngine();
 
-  const readAlerts = alerts.filter((a) => a.status !== 'unread');
-  const isEmpty = alerts.length === 0 || unreadAlerts.length === 0;
+  // Enforce 7-day retention filter on all fetched alerts
+  const [mountTime, setMountTime] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setMountTime(Date.now()), 60000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const retainedAlerts = alerts.filter((a) => {
+    const ts = a.createdAt ?? a.ts ?? a.timestamp;
+    return typeof ts === 'number' && ts >= mountTime - SEVEN_DAYS_MS;
+  });
+  const retainedUnread = unreadAlerts.filter((a) => {
+    const ts = a.createdAt ?? a.ts ?? a.timestamp;
+    return typeof ts === 'number' && ts >= mountTime - SEVEN_DAYS_MS;
+  });
+  const retainedCritical = criticalAlerts.filter((a) => {
+    const ts = a.createdAt ?? a.ts ?? a.timestamp;
+    return typeof ts === 'number' && ts >= mountTime - SEVEN_DAYS_MS;
+  });
+  const retainedWarning = warningAlerts.filter((a) => {
+    const ts = a.createdAt ?? a.ts ?? a.timestamp;
+    return typeof ts === 'number' && ts >= mountTime - SEVEN_DAYS_MS;
+  });
+  const retainedInfo = infoAlerts.filter((a) => {
+    const ts = a.createdAt ?? a.ts ?? a.timestamp;
+    return typeof ts === 'number' && ts >= mountTime - SEVEN_DAYS_MS;
+  });
+
+  const readAlerts = retainedAlerts.filter((a) => a.status === 'resolved' || a.status === 'read' || a.status === 'snoozed');
+  const isEmpty = retainedAlerts.length === 0 || retainedUnread.length === 0;
 
   return (
     <SafeAreaView
@@ -110,7 +140,7 @@ export default function AlertsScreen() {
                 {isCloudSynced ? 'Cloud Synced' : 'Local Engine'}
               </Text>
             </View>
-            {unreadAlerts.length > 0 && (
+            {retainedUnread.length > 0 && (
               <TouchableOpacity onPress={markAllRead}>
                 <Text style={{ fontSize: 12, fontWeight: '700', color: colors.palette.forest }}>
                   Mark all read
@@ -120,8 +150,8 @@ export default function AlertsScreen() {
           </View>
         </View>
         <Text style={[styles.subtitle, { color: colors.textMuted }]}>
-          {unreadAlerts.length > 0
-            ? `${unreadAlerts.length} item${unreadAlerts.length > 1 ? 's' : ''} need your attention`
+          {retainedUnread.length > 0
+            ? `${retainedUnread.length} item${retainedUnread.length > 1 ? 's' : ''} need your attention`
             : 'All caught up'}
         </Text>
 
@@ -153,7 +183,7 @@ export default function AlertsScreen() {
         )}
 
         {/* Pinned critical banner */}
-        {criticalAlerts.length > 0 && (
+        {retainedCritical.length > 0 && (
           <View
             style={[
               styles.criticalBanner,
@@ -171,13 +201,16 @@ export default function AlertsScreen() {
             />
             <View style={{ flex: 1 }}>
               <Text style={[styles.bannerTitle, { color: colors.palette.critical }]}>
-                {criticalAlerts[0].title}
+                {retainedCritical[0].title?.trim() || 'System Notice'}
               </Text>
               <Text style={[styles.bannerBody, { color: '#8B3040' }]}>
-                {criticalAlerts[0].body}
+                {retainedCritical[0].message?.trim() ||
+                  retainedCritical[0].description?.trim() ||
+                  retainedCritical[0].body?.trim() ||
+                  'Critical system notice.'}
               </Text>
             </View>
-            {criticalAlerts[0].actionLabel && (
+            {retainedCritical[0].actionLabel && (
               <TouchableOpacity
                 style={[
                   styles.bannerAction,
@@ -186,10 +219,10 @@ export default function AlertsScreen() {
                     borderRadius: radii.md,
                   },
                 ]}
-                onPress={() => handleAction(criticalAlerts[0])}
+                onPress={() => handleAction(retainedCritical[0])}
               >
                 <Text style={styles.bannerActionText}>
-                  {criticalAlerts[0].actionLabel}
+                  {retainedCritical[0].actionLabel}
                 </Text>
               </TouchableOpacity>
             )}
@@ -198,9 +231,9 @@ export default function AlertsScreen() {
 
         {/* Severity groups */}
         {[
-          { label: 'Critical', alerts: criticalAlerts, severity: 'critical' as AlertSeverity },
-          { label: 'Warning', alerts: warningAlerts, severity: 'warning' as AlertSeverity },
-          { label: 'Info', alerts: infoAlerts, severity: 'info' as AlertSeverity },
+          { label: 'Critical', alerts: retainedCritical, severity: 'critical' as AlertSeverity },
+          { label: 'Warning', alerts: retainedWarning, severity: 'warning' as AlertSeverity },
+          { label: 'Info', alerts: retainedInfo, severity: 'info' as AlertSeverity },
         ].map(({ label, alerts: groupAlerts, severity }) =>
           groupAlerts.length > 0 ? (
             <View key={severity} style={styles.group}>
@@ -247,10 +280,10 @@ export default function AlertsScreen() {
                 />
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.cardTitle, { color: colors.textMuted }]}>
-                    {alert.title}
+                    {alert.title?.trim() || 'System Notice'}
                   </Text>
                   <Text style={[styles.cardTime, { color: colors.textMuted }]}>
-                    {formatTime(alert.ts)}
+                    {formatTime(alert.ts ?? alert.timestamp)}
                   </Text>
                 </View>
               </View>
@@ -316,6 +349,20 @@ function SwipeableAlertCard({
     opacity: opacity.value,
   }));
 
+  const displayTitle = (alert.title && alert.title.trim().length > 0)
+    ? alert.title.trim()
+    : 'System Notice';
+
+  const displayBody = (alert.message && alert.message.trim().length > 0)
+    ? alert.message.trim()
+    : (alert.description && alert.description.trim().length > 0)
+    ? alert.description.trim()
+    : (alert.body && alert.body.trim().length > 0)
+    ? alert.body.trim()
+    : '';
+
+  const timestamp = alert.createdAt ?? alert.ts ?? alert.timestamp;
+
   return (
     <GestureDetector gesture={panGesture}>
       <Animated.View
@@ -352,14 +399,14 @@ function SwipeableAlertCard({
           <View style={{ flex: 1 }}>
             <View style={styles.cardTitleRow}>
               <Text style={[styles.cardTitle, { color: sev.text }]}>
-                {alert.title}
+                {displayTitle}
               </Text>
               <Text style={[styles.cardTime, { color: `${sev.text}80` }]}>
-                {formatTime(alert.ts)}
+                {formatTime(timestamp)}
               </Text>
             </View>
             <Text style={[styles.cardBody, { color: `${sev.text}CC` }]}>
-              {alert.body}
+              {displayBody}
             </Text>
             {alert.actionLabel && (
               <TouchableOpacity
@@ -382,10 +429,17 @@ function SwipeableAlertCard({
   );
 }
 
-function formatTime(ts: number): string {
-  const diffMs = Date.now() - ts;
+function formatTime(ts: number | undefined): string {
+  const parsed = typeof ts === 'number' ? ts : Number(ts);
+  if (!ts || !isFinite(parsed) || parsed <= 0) return 'Just now';
+  const diffMs = Date.now() - parsed;
+  if (diffMs < 0) return 'Just now';
   const diffH = Math.floor(diffMs / 3600000);
   const diffMin = Math.floor((diffMs % 3600000) / 60000);
+  if (diffH >= 24) {
+    const diffD = Math.floor(diffH / 24);
+    return `${diffD}d ago`;
+  }
   if (diffH > 0) return `${diffH}h ago`;
   if (diffMin > 0) return `${diffMin}m ago`;
   return 'just now';

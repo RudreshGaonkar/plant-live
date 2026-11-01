@@ -8,8 +8,6 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice, WaterLog, DeviceRecord } from '@/store/useLiveDevice';
-import { useSession } from '@/store/useSession';
-import { useAlertEngine } from '@/hooks/useAlertEngine';
 import { listenToDeviceHistory, DeviceHistoryRecord } from '@/services/devices';
 import { DayRibbon, TimeWindow } from '@/components/DayRibbon';
 import {
@@ -272,23 +270,20 @@ export default function HistoryScreen() {
   const { colors, spacing } = useAppTheme();
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
   const waterLogs = useLiveDevice((s) => s.waterLogs);
-  const user = useSession((s) => s.user);
-  const isDemoMode = useSession((s) => s.isDemoMode);
-  const { alerts } = useAlertEngine();
 
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('24h');
   const [activeMetric, setActiveMetric] = useState<ChartMetricKey>('moisture');
   const [scrubFraction, setScrubFraction] = useState<number>(1.0); // 1.0 = newest
   const [realHistory, setRealHistory] = useState<DeviceHistoryRecord[]>([]);
 
-  // Listen to RTDB history for the active device if in cloud mode
+  // Persistent live listener to RTDB history for the active device
   useEffect(() => {
-    if (!device || isDemoMode || !user) return;
+    if (!device?.id) return;
     const unsubscribe = listenToDeviceHistory(device.id, (records) => {
       setRealHistory(records);
     });
     return () => unsubscribe();
-  }, [device?.id, isDemoMode, user]);
+  }, [device?.id]);
 
   // Available metrics based on sensors config — hoisted ABOVE early return to satisfy Rules of Hooks
   const availableMetrics: ChartMetricKey[] = useMemo(() => {
@@ -412,8 +407,11 @@ export default function HistoryScreen() {
         {/* ── Plain-Language Insights Carousel ─────────────────── */}
         <InsightCardCarousel insights={insights} />
 
-        {/* ── "What Happened" Vertical Timeline ────────────────── */}
-        <EventTimeline waterLogs={waterLogs} alerts={alerts} />
+        {/* ── Vertical Timeline (Watering & Telemetry Activity) ─────── */}
+        <EventTimeline
+          waterLogs={waterLogs.slice(0, 8)}
+          telemetryHistory={realHistory.slice(0, 8)}
+        />
       </ScrollView>
     </View>
   );

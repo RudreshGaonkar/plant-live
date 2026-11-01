@@ -12,16 +12,13 @@ import { View, Text, StyleSheet } from 'react-native';
 import Animated, {
   useSharedValue,
   useAnimatedProps,
-  useAnimatedStyle,
   withTiming,
   Easing,
-  useDerivedValue,
 } from 'react-native-reanimated';
 import Svg, {
   Circle,
   G,
   Line,
-  Text as SvgText,
 } from 'react-native-svg';
 import { useAppTheme } from '@/theme';
 
@@ -35,7 +32,8 @@ interface MoistureRingProps {
 }
 
 const STROKE_WIDTH = 14;
-const GAP_DEGREES = 50; // degrees of gap at the bottom
+const SWEEP_DEGREES = 240;
+const GAP_DEGREES = 360 - SWEEP_DEGREES; // 120 degrees of gap at the bottom
 
 export function MoistureRing({
   soilMoisture,
@@ -45,32 +43,29 @@ export function MoistureRing({
 }: MoistureRingProps) {
   const { colors } = useAppTheme();
 
-  const radius = (size - STROKE_WIDTH * 2) / 2;
+  const RADIUS = (size - STROKE_WIDTH * 2) / 2;
+  const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+  const VISIBLE_ARC_LENGTH = (2 * Math.PI * RADIUS) * (240 / 360);
   const cx = size / 2;
   const cy = size / 2;
-  const circumference = 2 * Math.PI * radius;
 
-  // Arc spans (360 - GAP) degrees
-  const arcRatio = (360 - GAP_DEGREES) / 360;
-  const arcLength = circumference * arcRatio;
+  // Rotation offset so the 120° gap sits symmetrically at the bottom
+  const rotationDeg = 90 + GAP_DEGREES / 2; // 150°
 
-  // Rotation offset so the gap sits at the bottom
-  const rotationDeg = 90 + GAP_DEGREES / 2;
-
-  // Animated fill progress
+  // Animated fill progress (0 to 100)
   const progress = useSharedValue(0);
   useEffect(() => {
-    progress.value = withTiming(soilMoisture / 100, {
+    progress.value = withTiming(Math.min(100, Math.max(0, soilMoisture)), {
       duration: 900,
       easing: Easing.out(Easing.cubic),
     });
   }, [soilMoisture, progress]);
 
-  // StrokeDashoffset: 0 = fully filled, arcLength = empty
+  // StrokeDashoffset: maps 0%–100% across the visible 240° sweep arc
   const fillAnimProps = useAnimatedProps(() => {
-    const fillOffset = arcLength * (1 - progress.value * arcRatio);
+    const strokeDashoffset = CIRCUMFERENCE - (VISIBLE_ARC_LENGTH * (progress.value / 100));
     return {
-      strokeDashoffset: fillOffset,
+      strokeDashoffset,
     };
   });
 
@@ -83,53 +78,47 @@ export function MoistureRing({
     ? colors.palette.sage
     : colors.palette.mint;
 
-  // Tick mark positions (min and max threshold marks)
+  // Tick mark positions along the 240° visible arc (min and max threshold marks)
   const degreesToXY = (percent: number) => {
-    const pct = percent / 100;
-    const clampedArc = arcRatio;
+    const pct = Math.min(100, Math.max(0, percent)) / 100;
     const angleRad =
-      ((rotationDeg + pct * (360 - GAP_DEGREES)) * Math.PI) / 180;
+      ((rotationDeg + pct * SWEEP_DEGREES) * Math.PI) / 180;
     return {
-      x: cx + radius * Math.cos(angleRad),
-      y: cy + radius * Math.sin(angleRad),
+      x: cx + RADIUS * Math.cos(angleRad),
+      y: cy + RADIUS * Math.sin(angleRad),
     };
   };
 
   const minTick = degreesToXY(moistureMin);
   const maxTick = degreesToXY(moistureMax);
 
-  // Animated count-up label
-  const displayValue = useDerivedValue(() =>
-    Math.round(progress.value * 100)
-  );
-
   return (
     <View style={{ width: size, height: size }}>
       <Svg width={size} height={size}>
-        {/* Background track */}
+        {/* Background track (240° visible sweep arc) */}
         <Circle
           cx={cx}
           cy={cy}
-          r={radius}
+          r={RADIUS}
           stroke={`${colors.palette.sage}40`}
           strokeWidth={STROKE_WIDTH}
           fill="none"
-          strokeDasharray={`${arcLength} ${circumference}`}
+          strokeDasharray={`${VISIBLE_ARC_LENGTH} ${CIRCUMFERENCE}`}
           strokeDashoffset={0}
           strokeLinecap="round"
           rotation={rotationDeg}
           origin={`${cx}, ${cy}`}
         />
 
-        {/* Animated fill arc */}
+        {/* Animated fill arc (maps 0%–100% across 240° arc rather than 360°) */}
         <AnimatedCircle
           cx={cx}
           cy={cy}
-          r={radius}
+          r={RADIUS}
           stroke={fillColor}
           strokeWidth={STROKE_WIDTH}
           fill="none"
-          strokeDasharray={`${arcLength} ${circumference}`}
+          strokeDasharray={`${CIRCUMFERENCE} ${CIRCUMFERENCE}`}
           animatedProps={fillAnimProps}
           strokeLinecap="round"
           rotation={rotationDeg}

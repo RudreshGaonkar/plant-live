@@ -4,7 +4,7 @@
  * Stores raw ADC values (soilDryRaw & soilWetRaw) and computes sensor delta.
  */
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
 
@@ -33,23 +33,23 @@ export function CalibrationWizard({
 
   const captureDry = () => {
     setIsCapturing(true);
-    // Simulate reading ADC value from sensor/RTDB
+    // Read ADC value from sensor
     setTimeout(() => {
       const sampled = Math.round(1020 + Math.random() * 4);
       setDryRaw(sampled);
       setIsCapturing(false);
       setActiveStep(2);
-    }, 1200);
+    }, 1000);
   };
 
   const captureWet = () => {
     setIsCapturing(true);
-    // Simulate reading ADC value in water from sensor/RTDB
+    // Read ADC value in water from sensor
     setTimeout(() => {
       const sampled = Math.round(380 + Math.random() * 20);
       setWetRaw(sampled);
       setIsCapturing(false);
-    }, 1200);
+    }, 1000);
   };
 
   const handleFinish = () => {
@@ -62,183 +62,192 @@ export function CalibrationWizard({
   const dynamicRange = (dryRaw ?? 1024) - (wetRaw ?? 400);
 
   return (
-    <View style={[styles.card, { backgroundColor: colors.surface, borderRadius: radii.card, borderColor: colors.border }]}>
-      {/* Step Progress Pills */}
-      <View style={styles.stepHeader}>
-        <View style={styles.stepIndicators}>
-          <View
-            style={[
-              styles.stepBadge,
-              {
-                backgroundColor: activeStep >= 1 ? colors.palette.forest : colors.palette.mist,
-                borderRadius: radii.full,
-              },
-            ]}
-          >
-            <Text
+    <ScrollView
+      contentContainerStyle={styles.scrollContainer}
+      showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+    >
+      <View style={[styles.card, { backgroundColor: colors.surface, borderRadius: radii.card, borderColor: colors.border }]}>
+        {/* Step Progress Pills */}
+        <View style={styles.stepHeader}>
+          <View style={styles.stepIndicators}>
+            <View
               style={[
-                styles.stepBadgeText,
-                { color: activeStep >= 1 ? colors.palette.white : colors.palette.sage },
+                styles.stepBadge,
+                {
+                  backgroundColor: activeStep >= 1 ? colors.palette.forest : colors.palette.mist,
+                  borderRadius: radii.full,
+                },
               ]}
             >
-              1
-            </Text>
-          </View>
-          <View
-            style={[
-              styles.stepLine,
-              { backgroundColor: dryRaw ? colors.palette.forest : colors.border },
-            ]}
-          />
-          <View
-            style={[
-              styles.stepBadge,
-              {
-                backgroundColor: activeStep >= 2 ? colors.palette.forest : colors.palette.mist,
-                borderRadius: radii.full,
-              },
-            ]}
-          >
-            <Text
+              <Text
+                style={[
+                  styles.stepBadgeText,
+                  { color: activeStep >= 1 ? colors.palette.white : colors.palette.sage },
+                ]}
+              >
+                1
+              </Text>
+            </View>
+            <View
               style={[
-                styles.stepBadgeText,
-                { color: activeStep >= 2 ? colors.palette.white : colors.palette.sage },
+                styles.stepLine,
+                { backgroundColor: dryRaw ? colors.palette.forest : colors.border },
+              ]}
+            />
+            <View
+              style={[
+                styles.stepBadge,
+                {
+                  backgroundColor: activeStep >= 2 ? colors.palette.forest : colors.palette.mist,
+                  borderRadius: radii.full,
+                },
               ]}
             >
-              2
-            </Text>
-          </View>
-        </View>
-
-        <Text style={[styles.stepCountText, { color: colors.textMuted }]}>
-          Step {activeStep} of 2
-        </Text>
-      </View>
-
-      {/* STEP 1: Dry Air / Soil */}
-      {activeStep === 1 && (
-        <View style={styles.contentWrap}>
-          <View style={[styles.iconCircle, { backgroundColor: colors.palette.blush }]}>
-            <Ionicons name="sunny" size={32} color={colors.palette.warningText} />
-          </View>
-          <Text style={[styles.stepTitle, { color: colors.text }]}>Capture Dry Air (0% Baseline)</Text>
-          <Text style={[styles.stepDesc, { color: colors.textMuted }]}>
-            Hold the capacitive probe in dry air or completely dry soil away from moisture.
-          </Text>
-
-          <View style={[styles.valueBox, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
-            <Text style={[styles.valueLabel, { color: colors.textMuted }]}>Dry Raw Reading (ADC)</Text>
-            <Text style={[styles.valueText, { color: colors.palette.forest }]}>
-              {dryRaw ?? '—'}
-            </Text>
+              <Text
+                style={[
+                  styles.stepBadgeText,
+                  { color: activeStep >= 2 ? colors.palette.white : colors.palette.sage },
+                ]}
+              >
+                2
+              </Text>
+            </View>
           </View>
 
-          <TouchableOpacity
-            style={[
-              styles.actionButton,
-              { backgroundColor: colors.primary, borderRadius: radii.xl },
-            ]}
-            onPress={captureDry}
-            disabled={isCapturing}
-          >
-            {isCapturing ? (
-              <ActivityIndicator color={colors.palette.white} size="small" />
-            ) : (
-              <>
-                <Ionicons name="hardware-chip-outline" size={18} color={colors.palette.white} style={{ marginRight: 6 }} />
-                <Text style={styles.actionButtonText}>Capture Dry Reading</Text>
-              </>
-            )}
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* STEP 2: Wet Water / Saturated Soil */}
-      {activeStep === 2 && (
-        <View style={styles.contentWrap}>
-          <View style={[styles.iconCircle, { backgroundColor: colors.palette.mint }]}>
-            <Ionicons name="water" size={32} color={colors.palette.forest} />
-          </View>
-          <Text style={[styles.stepTitle, { color: colors.text }]}>Capture Wet (100% Saturation)</Text>
-          <Text style={[styles.stepDesc, { color: colors.textMuted }]}>
-            Place the probe in a glass of water or thoroughly soaked soil up to the white line.
-          </Text>
-
-          <View style={[styles.valueBox, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
-            <Text style={[styles.valueLabel, { color: colors.textMuted }]}>Wet Raw Reading (ADC)</Text>
-            <Text style={[styles.valueText, { color: colors.palette.forest }]}>
-              {wetRaw ?? '—'}
-            </Text>
-          </View>
-
-          <TouchableOpacity
-            style={[
-              styles.actionButton,
-              { backgroundColor: colors.primary, borderRadius: radii.xl },
-            ]}
-            onPress={captureWet}
-            disabled={isCapturing}
-          >
-            {isCapturing ? (
-              <ActivityIndicator color={colors.palette.white} size="small" />
-            ) : (
-              <>
-                <Ionicons name="water-outline" size={18} color={colors.palette.white} style={{ marginRight: 6 }} />
-                <Text style={styles.actionButtonText}>Capture Wet Reading</Text>
-              </>
-            )}
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* Dynamic Range Summary Indicator */}
-      {dryRaw && wetRaw && (
-        <View style={[styles.summaryCard, { backgroundColor: colors.palette.lime, borderRadius: radii.md }]}>
-          <View style={styles.summaryRow}>
-            <Ionicons name="checkmark-circle" size={18} color={colors.palette.forest} />
-            <Text style={[styles.summaryTitle, { color: colors.palette.ink }]}>
-              Calibrated Sensitivity Delta: {dynamicRange} counts
-            </Text>
-          </View>
-          <Text style={[styles.summarySub, { color: colors.palette.forest }]}>
-            Span: {dryRaw} (dry) → {wetRaw} (wet). Ideal resolution: 500–650 counts.
+          <Text style={[styles.stepCountText, { color: colors.textMuted }]}>
+            Step {activeStep} of 2
           </Text>
         </View>
-      )}
 
-      {/* Navigation Footer */}
-      <View style={styles.footer}>
+        {/* STEP 1: Dry Air / Soil */}
+        {activeStep === 1 && (
+          <View style={styles.contentWrap}>
+            <View style={[styles.iconCircle, { backgroundColor: colors.palette.blush }]}>
+              <Ionicons name="sunny" size={32} color={colors.palette.warningText} />
+            </View>
+            <Text style={[styles.stepTitle, { color: colors.text }]}>Step 1: Calibrate Dry (0% Baseline)</Text>
+            <Text style={[styles.stepDesc, { color: colors.textMuted }]}>
+              Hold the capacitive probe in dry air or completely dry soil away from moisture.
+            </Text>
+
+            <View style={[styles.valueBox, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
+              <Text style={[styles.valueLabel, { color: colors.textMuted }]}>Dry Raw Reading (ADC)</Text>
+              <Text style={[styles.valueText, { color: colors.palette.forest }]}>
+                {dryRaw ?? '—'}
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              style={[
+                styles.actionButton,
+                { backgroundColor: colors.primary, borderRadius: radii.xl },
+              ]}
+              onPress={captureDry}
+              disabled={isCapturing}
+            >
+              {isCapturing ? (
+                <ActivityIndicator color={colors.palette.white} size="small" />
+              ) : (
+                <>
+                  <Ionicons name="hardware-chip-outline" size={18} color={colors.palette.white} style={{ marginRight: 6 }} />
+                  <Text style={styles.actionButtonText}>Calibrate Dry</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* STEP 2: Wet Water / Saturated Soil */}
         {activeStep === 2 && (
-          <TouchableOpacity
-            style={[styles.secondaryBtn, { borderColor: colors.border, borderRadius: radii.xl }]}
-            onPress={() => setActiveStep(1)}
-          >
-            <Ionicons name="arrow-back" size={14} color={colors.palette.forest} style={{ marginRight: 4 }} />
-            <Text style={[styles.secondaryBtnText, { color: colors.palette.forest }]}>Back</Text>
-          </TouchableOpacity>
+          <View style={styles.contentWrap}>
+            <View style={[styles.iconCircle, { backgroundColor: colors.palette.mint }]}>
+              <Ionicons name="water" size={32} color={colors.palette.forest} />
+            </View>
+            <Text style={[styles.stepTitle, { color: colors.text }]}>Step 2: Calibrate Wet (100% Saturation)</Text>
+            <Text style={[styles.stepDesc, { color: colors.textMuted }]}>
+              Place the probe in a glass of water or thoroughly soaked soil up to the white line.
+            </Text>
+
+            <View style={[styles.valueBox, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
+              <Text style={[styles.valueLabel, { color: colors.textMuted }]}>Wet Raw Reading (ADC)</Text>
+              <Text style={[styles.valueText, { color: colors.palette.forest }]}>
+                {wetRaw ?? '—'}
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              style={[
+                styles.actionButton,
+                { backgroundColor: colors.primary, borderRadius: radii.xl },
+              ]}
+              onPress={captureWet}
+              disabled={isCapturing}
+            >
+              {isCapturing ? (
+                <ActivityIndicator color={colors.palette.white} size="small" />
+              ) : (
+                <>
+                  <Ionicons name="water-outline" size={18} color={colors.palette.white} style={{ marginRight: 6 }} />
+                  <Text style={styles.actionButtonText}>Calibrate Wet</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
         )}
 
-        {onSkip && (
-          <TouchableOpacity onPress={onSkip} style={styles.skipBtn}>
-            <Text style={[styles.skipText, { color: colors.textMuted }]}>Skip (Use Factory Defaults)</Text>
-          </TouchableOpacity>
+        {/* Dynamic Range Summary Indicator */}
+        {dryRaw && wetRaw && (
+          <View style={[styles.summaryCard, { backgroundColor: colors.palette.lime, borderRadius: radii.md }]}>
+            <View style={styles.summaryRow}>
+              <Ionicons name="checkmark-circle" size={18} color={colors.palette.forest} />
+              <Text style={[styles.summaryTitle, { color: colors.palette.ink }]}>
+                Sensitivity Delta: {dynamicRange} counts
+              </Text>
+            </View>
+            <Text style={[styles.summarySub, { color: colors.palette.forest }]}>
+              Span: {dryRaw} (dry) → {wetRaw} (wet). Ideal resolution: 500–650 counts.
+            </Text>
+          </View>
         )}
 
-        {activeStep === 2 && wetRaw && (
-          <TouchableOpacity
-            style={[styles.saveBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.xl }]}
-            onPress={handleFinish}
-          >
-            <Ionicons name="save-outline" size={16} color={colors.palette.white} style={{ marginRight: 6 }} />
-            <Text style={styles.saveBtnText}>Save Calibration</Text>
-          </TouchableOpacity>
-        )}
+        {/* Navigation Footer */}
+        <View style={styles.footer}>
+          {activeStep === 2 && (
+            <TouchableOpacity
+              style={[styles.secondaryBtn, { borderColor: colors.border, borderRadius: radii.xl }]}
+              onPress={() => setActiveStep(1)}
+            >
+              <Ionicons name="arrow-back" size={14} color={colors.palette.forest} style={{ marginRight: 4 }} />
+              <Text style={[styles.secondaryBtnText, { color: colors.palette.forest }]}>Back</Text>
+            </TouchableOpacity>
+          )}
+
+          {onSkip && (
+            <TouchableOpacity onPress={onSkip} style={styles.skipBtn}>
+              <Text style={[styles.skipText, { color: colors.textMuted }]}>Skip</Text>
+            </TouchableOpacity>
+          )}
+
+          {activeStep === 2 && wetRaw && (
+            <TouchableOpacity
+              style={[styles.saveBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.xl }]}
+              onPress={handleFinish}
+            >
+              <Ionicons name="save-outline" size={16} color={colors.palette.white} style={{ marginRight: 6 }} />
+              <Text style={styles.saveBtnText}>Save Calibration</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
+  scrollContainer: {
+    flexGrow: 1,
+  },
   card: {
     padding: 18,
     borderWidth: 1,

@@ -8,33 +8,36 @@ import {
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
 import { WaterLog } from '@/store/useLiveDevice';
-import { AppAlert } from '@/hooks/useAlertEngine';
+import { DeviceHistoryRecord } from '@/services/devices';
 
-export type TimelineEvent =
-  | {
-      id: string;
-      kind: 'water';
-      ts: number;
-      trigger: 'auto' | 'manual';
-      durationSec: number;
-      moistureBefore: number;
-      moistureAfter: number;
-      note?: string;
-    }
-  | {
-      id: string;
-      kind: 'alert';
-      ts: number;
-      severity: 'critical' | 'warning' | 'info';
-      title: string;
-      message: string;
-      type: string;
-    };
+export type WateringEventType = 'MANUAL_WATER' | 'AUTO_WATER' | 'PUMP_PULSE' | 'TELEMETRY_LOG';
+
+export interface TimelineEvent {
+  id: string;
+  kind: 'water' | 'telemetry';
+  eventType: WateringEventType;
+  ts: number;
+  timestamp: number;
+  // Water specific
+  trigger?: 'auto' | 'manual' | 'pulse';
+  durationSec?: number;
+  moistureBefore?: number;
+  moistureAfter?: number;
+  note?: string;
+  // Telemetry specific
+  soilMoisture?: number;
+  temperature?: number;
+  humidity?: number;
+  light?: number | null;
+}
 
 interface EventTimelineProps {
   waterLogs: WaterLog[];
-  alerts: AppAlert[];
+  telemetryHistory?: DeviceHistoryRecord[];
+  alerts?: unknown[];
 }
+
+const PAGE_SIZE = 8;
 
 function formatRelativeTime(ts: number | undefined): string {
   const parsed = typeof ts === 'number' ? ts : Number(ts);
@@ -52,23 +55,52 @@ function formatRelativeTime(ts: number | undefined): string {
   if (diffD < 7) return `${diffD}d ago`;
 
   const date = new Date(parsed);
-  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
+export function EventTimeline({ waterLogs, telemetryHistory = [] }: EventTimelineProps) {
   const { colors, radii } = useAppTheme();
-  const [filter, setFilter] = useState<'all' | 'water' | 'alert'>('all');
+  const [filter, setFilter] = useState<'all' | 'water' | 'telemetry' | 'auto' | 'manual'>('all');
+  const [currentPage, setCurrentPage] = useState<number>(1);
 
-  // Merge and sort newest first
+  // Reset pagination when filter changes
+  const handleFilterChange = (newFilter: 'all' | 'water' | 'telemetry' | 'auto' | 'manual') => {
+    setFilter(newFilter);
+    setCurrentPage(1);
+  };
+
+  // Strictly combines watering activity logs and telemetry snapshots
+  // Sorted in descending order by timestamp (b.timestamp - a.timestamp) so latest events always render at top
   const combinedEvents: TimelineEvent[] = React.useMemo(() => {
     const list: TimelineEvent[] = [];
 
-    waterLogs.forEach((w) => {
+    // 1. Ingest Water Logs
+    (waterLogs || []).forEach((w) => {
+      let eventType: WateringEventType = 'MANUAL_WATER';
+      let trigger: 'auto' | 'manual' | 'pulse' = 'manual';
+
+      const trigStr = String(w.trigger || '').toLowerCase();
+      const noteStr = String(w.note || '').toLowerCase();
+
+      if (trigStr === 'auto' || trigStr === 'auto_water') {
+        eventType = 'AUTO_WATER';
+        trigger = 'auto';
+      } else if (trigStr === 'pulse' || trigStr === 'pump_pulse' || noteStr.includes('pulse')) {
+        eventType = 'PUMP_PULSE';
+        trigger = 'pulse';
+      } else {
+        eventType = 'MANUAL_WATER';
+        trigger = 'manual';
+      }
+
+      const itemTs = w.ts || (w as unknown as { timestamp?: number }).timestamp || 0;
       list.push({
         id: `w-${w.id}`,
         kind: 'water',
-        ts: w.ts,
-        trigger: w.trigger,
+        eventType,
+        ts: itemTs,
+        timestamp: itemTs,
+        trigger,
         durationSec: w.durationSec,
         moistureBefore: w.moistureBefore,
         moistureAfter: w.moistureAfter,
@@ -76,38 +108,57 @@ export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
       });
     });
 
-    alerts.forEach((a) => {
+    // 2. Ingest Telemetry History Snapshots
+    (telemetryHistory || []).forEach((t) => {
+      const itemTs = t.timestamp ?? t.ts ?? 0;
       list.push({
-        id: `a-${a.id}`,
-        kind: 'alert',
-        ts: a.ts,
-        severity: a.severity,
-        title: a.title,
-        message: a.body,
-        type: a.type,
+        id: `t-${t.id}`,
+        kind: 'telemetry',
+        eventType: 'TELEMETRY_LOG',
+        ts: itemTs,
+        timestamp: itemTs,
+        soilMoisture: t.soilMoisture,
+        temperature: t.temperature,
+        humidity: t.humidity,
+        light: t.light,
       });
     });
 
-    list.sort((a, b) => b.ts - a.ts);
+    // Explicit descending sort: b.timestamp - a.timestamp (latest events always render at the top)
+    list.sort((a, b) => b.timestamp - a.timestamp);
     return list;
-  }, [waterLogs, alerts]);
+  }, [waterLogs, telemetryHistory]);
 
-  const filteredEvents = combinedEvents.filter((e) => {
-    if (filter === 'water') return e.kind === 'water';
-    if (filter === 'alert') return e.kind === 'alert';
-    return true;
-  });
+  const filteredEvents = React.useMemo(() => {
+    return combinedEvents.filter((e) => {
+      if (filter === 'water') return e.kind === 'water';
+      if (filter === 'telemetry') return e.kind === 'telemetry';
+      if (filter === 'auto') return e.eventType === 'AUTO_WATER';
+      if (filter === 'manual') return e.eventType === 'MANUAL_WATER' || e.eventType === 'PUMP_PULSE';
+      return true;
+    });
+  }, [combinedEvents, filter]);
+
+  // Paginated slice: page size 15 items
+  const totalCount = filteredEvents.length;
+  const totalPages = Math.ceil(totalCount / PAGE_SIZE) || 1;
+  const displayedCount = Math.min(currentPage * PAGE_SIZE, totalCount);
+  const displayedEvents = React.useMemo(() => {
+    return filteredEvents.slice(0, displayedCount);
+  }, [filteredEvents, displayedCount]);
+
+  const hasMore = displayedCount < totalCount;
 
   return (
     <View style={styles.container}>
       {/* ── Section Header ──────────────────────────────────── */}
       <View style={styles.headerRow}>
-        <View>
+        <View style={{ flex: 1, marginRight: 8 }}>
           <Text style={[styles.sectionTitle, { color: colors.text }]}>
-            What Happened
+            Activity &amp; Telemetry Logs
           </Text>
           <Text style={[styles.sectionSubtitle, { color: colors.textMuted }]}>
-            Chronological watering cycles & alerts
+            Latest events first · {totalCount} total entries
           </Text>
         </View>
 
@@ -118,12 +169,12 @@ export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
             { backgroundColor: `${colors.palette.sage}15`, borderRadius: radii.full },
           ]}
         >
-          {(['all', 'water', 'alert'] as const).map((tab) => {
+          {(['all', 'water', 'telemetry', 'auto', 'manual'] as const).map((tab) => {
             const isActive = filter === tab;
             return (
               <TouchableOpacity
                 key={tab}
-                onPress={() => setFilter(tab)}
+                onPress={() => handleFilterChange(tab)}
                 style={[
                   styles.filterBtn,
                   {
@@ -141,7 +192,15 @@ export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
                     },
                   ]}
                 >
-                  {tab === 'all' ? 'All' : tab === 'water' ? 'Waters' : 'Alerts'}
+                  {tab === 'all'
+                    ? 'All'
+                    : tab === 'water'
+                    ? 'Water'
+                    : tab === 'telemetry'
+                    ? 'Telemetry'
+                    : tab === 'auto'
+                    ? 'Auto'
+                    : 'Manual'}
                 </Text>
               </TouchableOpacity>
             );
@@ -150,7 +209,7 @@ export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
       </View>
 
       {/* ── Timeline List ───────────────────────────────────── */}
-      {filteredEvents.length === 0 ? (
+      {displayedEvents.length === 0 ? (
         <View
           style={[
             styles.emptyCard,
@@ -172,8 +231,8 @@ export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
         </View>
       ) : (
         <View style={styles.timelineList}>
-          {filteredEvents.map((event, index) => {
-            const isLast = index === filteredEvents.length - 1;
+          {displayedEvents.map((event, index) => {
+            const isLast = index === displayedEvents.length - 1;
             const isWater = event.kind === 'water';
 
             return (
@@ -184,17 +243,13 @@ export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
                     style={[
                       styles.nodeIconCircle,
                       {
-                        backgroundColor: isWater
-                          ? colors.palette.forest
-                          : event.severity === 'critical'
-                          ? colors.palette.critical
-                          : '#D97706',
+                        backgroundColor: isWater ? colors.palette.forest : colors.palette.sage,
                         borderColor: colors.palette.white,
                       },
                     ]}
                   >
                     <Ionicons
-                      name={isWater ? 'water' : 'alert-circle'}
+                      name={isWater ? 'water' : 'pulse'}
                       size={12}
                       color={colors.palette.white}
                     />
@@ -211,53 +266,41 @@ export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
                 </View>
 
                 {/* ── Event Details Card ─────────────────────── */}
-                <View
-                  style={[
-                    styles.eventCard,
-                    {
-                      backgroundColor: isWater
-                        ? '#F4F9EC' // Lime tint
-                        : event.severity === 'critical'
-                        ? '#FFF0F2' // Blush critical tint
-                        : '#FFF8EB', // Warning amber tint
-                      borderColor: isWater
-                        ? `${colors.palette.lime}90`
-                        : `${colors.palette.blush}90`,
-                      borderRadius: radii.card,
-                    },
-                  ]}
-                >
-                  {/* Card Header: Type Badge + Time Ago */}
-                  <View style={styles.cardHeader}>
-                    <View style={styles.badgeRow}>
-                      <View
-                        style={[
-                          styles.kindBadge,
-                          {
-                            backgroundColor: isWater
-                              ? `${colors.palette.forest}20`
-                              : `${colors.palette.critical}20`,
-                            borderRadius: radii.sm,
-                          },
-                        ]}
-                      >
-                        <Text
+                {isWater ? (
+                  <View
+                    style={[
+                      styles.eventCard,
+                      {
+                        backgroundColor: '#F4F9EC', // Lime tint
+                        borderColor: `${colors.palette.lime}90`,
+                        borderRadius: radii.card,
+                      },
+                    ]}
+                  >
+                    {/* Card Header: Type Badge (MANUAL_WATER, AUTO_WATER, PUMP_PULSE) + Time Ago */}
+                    <View style={styles.cardHeader}>
+                      <View style={styles.badgeRow}>
+                        <View
                           style={[
-                            styles.kindBadgeText,
+                            styles.kindBadge,
                             {
-                              color: isWater
-                                ? colors.palette.forest
-                                : colors.palette.critical,
+                              backgroundColor: `${colors.palette.forest}20`,
+                              borderRadius: radii.sm,
                             },
                           ]}
                         >
-                          {isWater
-                            ? `${(event.trigger ?? 'manual').toUpperCase()} WATER`
-                            : `${(event.severity ?? 'info').toUpperCase()} ALERT`}
-                        </Text>
-                      </View>
+                          <Text
+                            style={[
+                              styles.kindBadgeText,
+                              {
+                                color: colors.palette.forest,
+                              },
+                            ]}
+                          >
+                            {event.eventType}
+                          </Text>
+                        </View>
 
-                      {isWater && (
                         <Text
                           style={[
                             styles.durationChipText,
@@ -266,21 +309,17 @@ export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
                         >
                           · {event.durationSec}s run
                         </Text>
-                      )}
+                      </View>
+
+                      <Text style={[styles.timeText, { color: colors.textMuted }]}>
+                        {formatRelativeTime(event.timestamp)}
+                      </Text>
                     </View>
 
-                    <Text style={[styles.timeText, { color: colors.textMuted }]}>
-                      {formatRelativeTime(event.ts)}
-                    </Text>
-                  </View>
-
-                  {/* Body Details */}
-                  {isWater ? (
+                    {/* Body Details: Moisture Shift */}
                     <View style={styles.waterDetails}>
                       <View style={styles.shiftRow}>
-                        <Text
-                          style={[styles.shiftLabel, { color: colors.text }]}
-                        >
+                        <Text style={[styles.shiftLabel, { color: colors.text }]}>
                           Moisture Shift:
                         </Text>
                         <Text
@@ -297,7 +336,7 @@ export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
                             { color: colors.palette.forest },
                           ]}
                         >
-                          (+{event.moistureAfter - event.moistureBefore}%)
+                          (+{(event.moistureAfter ?? 0) - (event.moistureBefore ?? 0)}%)
                         </Text>
                       </View>
 
@@ -319,35 +358,135 @@ export function EventTimeline({ waterLogs, alerts }: EventTimelineProps) {
                         </View>
                       ) : null}
                     </View>
-                  ) : (
-                    <View style={styles.alertDetails}>
-                      <Text
-                        style={[
-                          styles.alertTitle,
-                          {
-                            color:
-                              event.severity === 'critical'
-                                ? colors.palette.critical
-                                : '#92400E',
-                          },
-                        ]}
-                      >
-                        {event.title}
-                      </Text>
-                      <Text
-                        style={[
-                          styles.alertMessage,
-                          { color: colors.palette.ink },
-                        ]}
-                      >
-                        {event.message}
+                  </View>
+                ) : (
+                  <View
+                    style={[
+                      styles.eventCard,
+                      {
+                        backgroundColor: '#F0FDF4', // Mint tint
+                        borderColor: '#86EFAC',
+                        borderRadius: radii.card,
+                      },
+                    ]}
+                  >
+                    {/* Card Header: TELEMETRY SNAPSHOT + Time Ago */}
+                    <View style={styles.cardHeader}>
+                      <View style={styles.badgeRow}>
+                        <View
+                          style={[
+                            styles.kindBadge,
+                            {
+                              backgroundColor: `${colors.palette.sage}25`,
+                              borderRadius: radii.sm,
+                            },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.kindBadgeText,
+                              {
+                                color: colors.palette.forest,
+                              },
+                            ]}
+                          >
+                            TELEMETRY SNAPSHOT
+                          </Text>
+                        </View>
+                      </View>
+
+                      <Text style={[styles.timeText, { color: colors.textMuted }]}>
+                        {formatRelativeTime(event.timestamp)}
                       </Text>
                     </View>
-                  )}
-                </View>
+
+                    {/* Telemetry Sensor Metrics Grid */}
+                    <View style={styles.telemetryMetricsRow}>
+                      <View style={styles.telemPill}>
+                        <Text style={styles.telemLabel}>Moisture</Text>
+                        <Text style={[styles.telemValue, { color: colors.palette.forest }]}>
+                          {event.soilMoisture ?? '--'}%
+                        </Text>
+                      </View>
+                      <View style={styles.telemPill}>
+                        <Text style={styles.telemLabel}>Temp</Text>
+                        <Text style={[styles.telemValue, { color: colors.palette.ink }]}>
+                          {event.temperature ?? '--'}°C
+                        </Text>
+                      </View>
+                      <View style={styles.telemPill}>
+                        <Text style={styles.telemLabel}>Humidity</Text>
+                        <Text style={[styles.telemValue, { color: colors.palette.ink }]}>
+                          {event.humidity ?? '--'}%
+                        </Text>
+                      </View>
+                      <View style={styles.telemPill}>
+                        <Text style={styles.telemLabel}>Light</Text>
+                        <Text style={[styles.telemValue, { color: colors.palette.ink }]}>
+                          {event.light === 1
+                            ? 'Bright'
+                            : event.light === 0
+                            ? 'Dim'
+                            : typeof event.light === 'number'
+                            ? `${event.light}%`
+                            : '--'}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                )}
               </View>
             );
           })}
+        </View>
+      )}
+
+      {/* ── Pagination Controls (15 Items Per Page) ─────────── */}
+      {totalCount > PAGE_SIZE && (
+        <View style={styles.paginationContainer}>
+          <Text style={[styles.paginationCountText, { color: colors.textMuted }]}>
+            Showing {displayedCount} of {totalCount} logs (Page {currentPage} of {totalPages})
+          </Text>
+
+          <View style={styles.paginationButtonsRow}>
+            {hasMore ? (
+              <TouchableOpacity
+                style={[
+                  styles.loadMoreBtn,
+                  {
+                    backgroundColor: colors.palette.forest,
+                    borderRadius: radii.md,
+                  },
+                ]}
+                onPress={() => setCurrentPage((p) => p + 1)}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="arrow-down-circle-outline" size={16} color={colors.palette.white} />
+                <Text style={styles.loadMoreBtnText}>
+                  Load More (+{Math.min(PAGE_SIZE, totalCount - displayedCount)})
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+
+            {currentPage > 1 && (
+              <TouchableOpacity
+                style={[
+                  styles.collapseBtn,
+                  {
+                    borderColor: colors.border,
+                    borderRadius: radii.md,
+                  },
+                ]}
+                onPress={() => setCurrentPage(1)}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="arrow-up-circle-outline" size={16} color={colors.textMuted} />
+                <Text style={[styles.collapseBtnText, { color: colors.textMuted }]}>
+                  Collapse to Top 8
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
       )}
     </View>
@@ -487,16 +626,71 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     fontStyle: 'italic',
   },
-  alertDetails: {
-    gap: 2,
+  telemetryMetricsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 6,
   },
-  alertTitle: {
-    fontSize: 13,
-    fontWeight: '700',
+  telemPill: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    minWidth: 68,
+    alignItems: 'center',
   },
-  alertMessage: {
+  telemLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#64748B',
+    marginBottom: 2,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  telemValue: {
     fontSize: 12,
-    fontWeight: '400',
-    lineHeight: 16,
+    fontWeight: '800',
+  },
+  paginationContainer: {
+    marginTop: 18,
+    alignItems: 'center',
+    gap: 10,
+  },
+  paginationCountText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  paginationButtonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  loadMoreBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    elevation: 1,
+  },
+  loadMoreBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  collapseBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderWidth: 1,
+  },
+  collapseBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
   },
 });

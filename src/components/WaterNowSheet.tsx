@@ -306,11 +306,13 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
             </View>
           )}
 
-          {/* Primary Action Button */}
+          {/* Primary Action Button - Never disabled when moisture is 100% */}
           <TouchableOpacity
+            testID="manual-water-now-btn"
+            accessibilityLabel="Water Now"
             activeOpacity={0.85}
             onPress={stage === 'done' ? handleClose : handleStartWatering}
-            disabled={!canWater && stage === 'idle'}
+            disabled={!canWater && telemetry.soilMoisture < 100 && stage === 'idle'}
             style={[
               styles.primaryBtn,
               {
@@ -319,7 +321,7 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
                     ? colors.palette.sage
                     : stage === 'done'
                     ? colors.palette.forest
-                    : !canWater
+                    : (!canWater && telemetry.soilMoisture < 100)
                     ? colors.palette.sage
                     : colors.primary,
                 borderRadius: radii.xl,

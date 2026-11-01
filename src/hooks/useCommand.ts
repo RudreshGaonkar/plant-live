@@ -13,14 +13,13 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Alert } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { useLiveDevice, DeviceCommandAckStatus } from '@/store/useLiveDevice';
-import { useSession } from '@/store/useSession';
 import {
   sendDeviceCommand,
+  sendDeviceControl,
   listenToDeviceCommand,
   appendWaterLogInRTDB,
   updateDeviceConfigInRTDB,
 } from '@/services/devices';
-import { simulatedDevice } from '@/services/simulator';
 
 export type CommandLifecycleStage =
   | 'idle'
@@ -53,7 +52,6 @@ export function useCommand(): UseCommandReturn {
   const isWateringActive = useLiveDevice((s) => s.isWateringActive);
   const wateringSecondsLeft = useLiveDevice((s) => s.wateringSecondsLeft);
   const storeRefillBottle = useLiveDevice((s) => s.refillBottle);
-  const isDemoMode = useSession((s) => s.isDemoMode);
 
   const [stage, setStage] = useState<CommandLifecycleStage>('idle');
   const [activeDuration, setActiveDuration] = useState<number>(5);
@@ -65,7 +63,7 @@ export function useCommand(): UseCommandReturn {
   const cooldownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastMoistureBeforeRef = useRef<number>(50);
 
-  const deviceId = device?.id ?? 'demo-leaf-01';
+  const deviceId = device?.id ?? 'leaf-node-01';
 
   // Cooldown countdown timer
   useEffect(() => {
@@ -90,7 +88,7 @@ export function useCommand(): UseCommandReturn {
 
   // Listen to remote RTDB command ack if online device
   useEffect(() => {
-    if (isDemoMode || !device) return;
+    if (!deviceId) return;
 
     const unsubscribe = listenToDeviceCommand(deviceId, (cmd) => {
       if (!cmd || !activeCmdIdRef.current || cmd.id !== activeCmdIdRef.current) {
@@ -117,7 +115,7 @@ export function useCommand(): UseCommandReturn {
         activeCmdIdRef.current = null;
       } else if (ackStatus === 'rejected') {
         setStage('rejected');
-        setErrorMessage('Device rejected watering command (coastal guard or safe lock).');
+        setErrorMessage('Device rejected watering command (safety lock).');
         activeCmdIdRef.current = null;
       }
     });
@@ -126,7 +124,7 @@ export function useCommand(): UseCommandReturn {
       unsubscribe();
       if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
     };
-  }, [deviceId, isDemoMode, device]);
+  }, [deviceId]);
 
   // Reset command lifecycle state
   const resetCommandState = useCallback(() => {
@@ -142,43 +140,28 @@ export function useCommand(): UseCommandReturn {
     cooldownSecondsLeft === 0 &&
     (device ? device.config.bottle.remainingMl > 20 : true);
 
-  // Core command dispatcher
+  // Core command dispatcher with Optimistic UI feedback
   const dispatchWaterCommand = useCallback(
     async (clampedDuration: number, currentMoisture: number): Promise<boolean> => {
-      if (!device) return false;
-
-      // Start lifecycle
+      // 1. Optimistic UI: Immediately show pump state as active & watering locally
       setErrorMessage(null);
-      setStage('sent');
+      setStage('running');
       lastMoistureBeforeRef.current = currentMoisture;
+      useLiveDevice.getState().triggerWaterNow(clampedDuration);
 
       // Haptic pulse on command initiation
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => null);
 
-      // Mode A: Demo Simulator execution
-      if (isDemoMode) {
-        const cmdId = `cmd-sim-${Date.now()}`;
-        activeCmdIdRef.current = cmdId;
-
-        // Transition: sent -> received -> running
-        setTimeout(() => setStage('received'), 300);
-        setTimeout(() => {
-          setStage('running');
-          simulatedDevice.runWaterCycle('manual', clampedDuration);
-        }, 800);
-
-        // Completion transition
-        setTimeout(() => {
-          setStage('done');
-          setCooldownSecondsLeft(COOLDOWN_DURATION_SEC);
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => null);
-        }, clampedDuration * 1000 + 1000);
-
-        return true;
-      }
-
-      // Mode B: Hardware RTDB dispatch
       try {
+        // 2. Dispatch manual pump control command to /devices/{deviceId}/control (Test Mode / manual override)
+        await sendDeviceControl(deviceId, {
+          pumpState: true,
+          manualOverride: true,
+          timestamp: Date.now(),
+          durationSec: clampedDuration,
+        });
+
+        // 3. Dispatch command node for legacy ACK tracking
         const cmdId = await sendDeviceCommand(deviceId, {
           type: 'waterNow',
           durationSec: clampedDuration,
@@ -194,16 +177,18 @@ export function useCommand(): UseCommandReturn {
         }, 15000);
 
         // Deduct water volume and record log
-        const flowRate = device.config.bottle.flowMlPerSec || 15;
-        const deducted = flowRate * clampedDuration;
-        const newRemaining = Math.max(0, device.config.bottle.remainingMl - deducted);
+        if (device) {
+          const flowRate = device.config.bottle.flowMlPerSec || 15;
+          const deducted = flowRate * clampedDuration;
+          const newRemaining = Math.max(0, device.config.bottle.remainingMl - deducted);
 
-        updateDeviceConfigInRTDB(deviceId, {
-          bottle: {
-            ...device.config.bottle,
-            remainingMl: newRemaining,
-          },
-        }).catch(() => null);
+          updateDeviceConfigInRTDB(deviceId, {
+            bottle: {
+              ...device.config.bottle,
+              remainingMl: newRemaining,
+            },
+          }).catch(() => null);
+        }
 
         // Append log to RTDB
         appendWaterLogInRTDB(deviceId, {
@@ -222,12 +207,12 @@ export function useCommand(): UseCommandReturn {
         return false;
       }
     },
-    [device, isDemoMode, deviceId, stage]
+    [device, deviceId, stage]
   );
 
-  // Execute Water Now with safety checks
+  // Execute Water Now with safety checks (manual watering explicitly bypasses soil moisture checks)
   const executeWaterNow = useCallback(
-    async (requestedDuration: number = 5, forceIfWet: boolean = false): Promise<boolean> => {
+    async (requestedDuration: number = 5, forceIfWet: boolean = true): Promise<boolean> => {
       if (!device) {
         Alert.alert('No Device Connected', 'Please pair or select a plant device first.');
         return false;
@@ -259,25 +244,8 @@ export function useCommand(): UseCommandReturn {
         return false;
       }
 
-      // Safety Guard 4: Saturated soil warning
+      // Manual Watering explicitly bypasses high-moisture safety locks (e.g. moisture at 100%)
       const currentMoisture = device.telemetry.soilMoisture;
-      if (!forceIfWet && currentMoisture > device.config.thresholds.moistureMax) {
-        Alert.alert(
-          'Soil Already Wet',
-          `Soil moisture is currently ${currentMoisture}% (above recommended ${device.config.thresholds.moistureMax}%). Water anyway?`,
-          [
-            { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'Water Anyway',
-              onPress: () => {
-                dispatchWaterCommand(clampedDuration, currentMoisture);
-              },
-            },
-          ]
-        );
-        return false;
-      }
-
       return dispatchWaterCommand(clampedDuration, currentMoisture);
     },
     [device, cooldownSecondsLeft, storeRefillBottle, dispatchWaterCommand]

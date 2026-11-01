@@ -21,6 +21,9 @@
         "command": {
           ".write": "auth != null"
         },
+        "control": {
+          ".write": "auth != null"
+        },
         "telemetry": {
           ".write": "auth != null"
         },

@@ -47,7 +47,14 @@ export default function ControlScreen() {
   const { config, telemetry, status } = device;
   const isAuto = config.mode === 'auto';
   const durationOptions = [3, 5, 10, 15];
-  const isDispensing = stage === 'running' || secondsRemaining > 0;
+  const isPumpActive = Boolean(
+    telemetry.isPumpActive ||
+    telemetry.pumpOn ||
+    device.control?.pumpState ||
+    stage === 'running' ||
+    secondsRemaining > 0
+  );
+  const isDispensing = isPumpActive;
   const isReservoirLow = config.bottle.remainingMl <= 20;
 
   const handleWaterPress = async () => {
@@ -279,11 +286,13 @@ export default function ControlScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Primary Water Button */}
+          {/* Primary Water Button - Never disabled when moisture is 100% */}
           <TouchableOpacity
+            testID="control-water-btn"
+            accessibilityLabel="Water Now"
             activeOpacity={0.85}
             onPress={stage === 'done' ? resetCommandState : handleWaterPress}
-            disabled={(!canWater && stage === 'idle') || isDispensing}
+            disabled={(!canWater && telemetry.soilMoisture < 100 && stage === 'idle') || isDispensing}
             style={[
               styles.waterNowBtn,
               {
@@ -291,7 +300,7 @@ export default function ControlScreen() {
                   ? colors.palette.sage
                   : stage === 'done'
                   ? colors.palette.forest
-                  : !canWater
+                  : (!canWater && telemetry.soilMoisture < 100)
                   ? colors.palette.sage
                   : colors.primary,
                 borderRadius: radii.xl,
@@ -442,8 +451,8 @@ export default function ControlScreen() {
             />
             <Text style={[styles.streamStatus, { color: colors.text }]}>
               {isDispensing
-                ? `Relay Pin D6: HIGH (Active watering)`
-                : `Listening on /devices/${device.id}/command`}
+                ? `Relay Pin D6: ACTIVE (Watering)`
+                : `Listening on /devices/${device.id}/control`}
             </Text>
           </View>
 

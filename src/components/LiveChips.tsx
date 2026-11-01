@@ -37,6 +37,7 @@ interface LiveChipsProps {
   mode: DeviceMode;
   pumpOn: boolean;
   onModeToggle: () => void;
+  onWaterPress?: () => void;
 }
 
 export function LiveChips({
@@ -44,8 +45,9 @@ export function LiveChips({
   mode,
   pumpOn,
   onModeToggle,
+  onWaterPress,
 }: LiveChipsProps) {
-  const { colors, radii } = useAppTheme();
+  const { colors } = useAppTheme();
 
   // Pump pulse animation
   const pumpScale = useSharedValue(1);
@@ -105,6 +107,7 @@ export function LiveChips({
         : `${colors.palette.white}CC`,
       iconColor: pumpOn ? colors.palette.white : colors.palette.sage,
       animStyle: pumpStyle,
+      onPress: onWaterPress,
     },
   ];
 

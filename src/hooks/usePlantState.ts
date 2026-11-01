@@ -1,6 +1,10 @@
 import { useEffect } from 'react';
-import { useLiveDevice, computePlantHealthState, DeviceRecord } from '@/hooks/useLiveDevice';
-import { useSession } from '@/store/useSession';
+import {
+  useLiveDevice,
+  computePlantHealthState,
+  DeviceRecord,
+  createDefaultDeviceRecord,
+} from '@/hooks/useLiveDevice';
 import {
   listenToDeviceTelemetry,
   listenToDeviceConfig,
@@ -17,40 +21,26 @@ export function usePlantState(device?: DeviceRecord) {
   const isOnline = active?.status?.online ?? false;
   const isWatering = useLiveDevice((s) => s.isWateringActive);
   const secondsLeft = useLiveDevice((s) => s.wateringSecondsLeft);
-  const isDemoMode = useSession((s) => s.isDemoMode);
 
-  // When not in Demo Mode, listen to live Firebase RTDB updates
+  // Persistent live Firebase RTDB updates
   useEffect(() => {
-    if (isDemoMode || !activeDeviceId) return;
+    const targetId = activeDeviceId || 'leaf-node-01';
 
-    const unsubTelemetry = listenToDeviceTelemetry(activeDeviceId, (telemetry) => {
+    const unsubTelemetry = listenToDeviceTelemetry(targetId, (telemetry) => {
       useLiveDevice.getState().updateTelemetry(telemetry);
     });
 
-    const unsubConfig = listenToDeviceConfig(activeDeviceId, (config) => {
-      useLiveDevice.setState((prev) => {
-        const cur = prev.devices[activeDeviceId];
-        if (!cur) return prev;
-        return {
-          devices: {
-            ...prev.devices,
-            [activeDeviceId]: {
-              ...cur,
-              config: { ...cur.config, ...config },
-            },
-          },
-        };
-      });
+    const unsubConfig = listenToDeviceConfig(targetId, (config) => {
+      useLiveDevice.getState().updateConfig(config);
     });
 
-    const unsubStatus = listenToDeviceStatus(activeDeviceId, (status) => {
+    const unsubStatus = listenToDeviceStatus(targetId, (status) => {
       useLiveDevice.setState((prev) => {
-        const cur = prev.devices[activeDeviceId];
-        if (!cur) return prev;
+        const cur = prev.devices[targetId] || createDefaultDeviceRecord(targetId);
         return {
           devices: {
             ...prev.devices,
-            [activeDeviceId]: {
+            [targetId]: {
               ...cur,
               status: { ...cur.status, ...status },
             },
@@ -59,7 +49,7 @@ export function usePlantState(device?: DeviceRecord) {
       });
     });
 
-    const unsubLogs = listenToWaterLogs(activeDeviceId, (logs) => {
+    const unsubLogs = listenToWaterLogs(targetId, (logs) => {
       if (logs && logs.length > 0) {
         useLiveDevice.setState({ waterLogs: logs });
       }
@@ -71,7 +61,7 @@ export function usePlantState(device?: DeviceRecord) {
       unsubStatus();
       unsubLogs();
     };
-  }, [activeDeviceId, isDemoMode]);
+  }, [activeDeviceId]);
 
   return {
     device: active,

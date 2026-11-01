@@ -6,7 +6,6 @@ import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { LeafThemeProvider } from '@/theme';
 import { useSession } from '@/store/useSession';
-import { simulatedDevice } from '@/services/simulator';
 
 (globalThis as unknown as { Buffer: typeof Buffer }).Buffer =
   (globalThis as unknown as { Buffer: typeof Buffer }).Buffer || Buffer;
@@ -14,7 +13,7 @@ import { simulatedDevice } from '@/services/simulator';
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
 function RootNavigator() {
-  const { user, isDemoMode, initializeAuthListener } = useSession();
+  const { user, initializeAuthListener } = useSession();
 
   useEffect(() => {
     const unsubscribe = initializeAuthListener();
@@ -24,7 +23,7 @@ function RootNavigator() {
 
   // Register push notifications when authenticated
   useEffect(() => {
-    if (user && !isDemoMode) {
+    if (user?.uid) {
       import('@/services/notifications').then(({ registerForPushNotificationsAsync, savePushTokenToRTDB }) => {
         registerForPushNotificationsAsync().then((token) => {
           if (token && user.uid) {
@@ -33,19 +32,7 @@ function RootNavigator() {
         });
       });
     }
-  }, [user, isDemoMode]);
-
-  // Start or stop simulator based on Demo Mode
-  useEffect(() => {
-    if (isDemoMode) {
-      simulatedDevice.start();
-    } else {
-      simulatedDevice.stop();
-    }
-    return () => {
-      simulatedDevice.stop();
-    };
-  }, [isDemoMode]);
+  }, [user]);
 
   return (
     <>

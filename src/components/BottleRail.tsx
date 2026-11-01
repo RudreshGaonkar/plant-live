@@ -1,11 +1,15 @@
 /**
- * BottleRail
- * Slim vertical pill on the left edge showing estimated water bottle level.
- * - Animated SVG fill from sage to mint; turns blush/critical under 20%
- * - Tap expands to a small popover with capacity, remaining ml, and "I refilled" button
+ * BottleRail / WaterCapsule / ReservoirPill
+ * Slim vertical reservoir pill component showing water bottle level.
+ * - Smooth animated wave filling effect for water height level with dual-layer liquid undulation
+ * - Dynamic Color Rules:
+ *   - > 30%: Theme Green fill
+ *   - 15% to 30%: Warning Yellow / Orange fill
+ *   - < 15%: Danger Red fill
+ * - Tap expands to a popover with capacity, remaining ml, flow rate, and "I refilled" button
  * uiLayout.md Section 3 – Layer 3
  */
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -19,40 +23,137 @@ import Animated, {
   useAnimatedStyle,
   withSpring,
   withTiming,
+  withRepeat,
+  Easing,
 } from 'react-native-reanimated';
-import Svg, { Defs, LinearGradient, Stop, Rect, ClipPath } from 'react-native-svg';
+import Svg, { Defs, LinearGradient, Stop, Path } from 'react-native-svg';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
 
-interface BottleRailProps {
+export interface BottleRailProps {
   remainingMl: number;
   capacityMl: number;
-  flowMlPerSec: number;
+  flowMlPerSec?: number;
   onRefill: () => void;
 }
+
+export type WaterLevelState = 'normal' | 'warning' | 'danger';
+
+export const getWaterLevelState = (percent: number): WaterLevelState => {
+  if (percent > 30) return 'normal';
+  if (percent >= 15) return 'warning';
+  return 'danger';
+};
+
+const STATE_COLORS: Record<
+  WaterLevelState,
+  {
+    gradientStart: string;
+    gradientEnd: string;
+    backWaveStart: string;
+    backWaveEnd: string;
+    border: string;
+    accent: string;
+    badgeBg: string;
+    icon: keyof typeof Ionicons.glyphMap;
+    statusLabel: string;
+  }
+> = {
+  normal: {
+    gradientStart: '#5A8A5C', // Theme Green (spec forest)
+    gradientEnd: '#335E35',   // Deep Forest Green
+    backWaveStart: '#AEE09A', // Spec Mint
+    backWaveEnd: '#5A8A5C',
+    border: 'rgba(90, 138, 92, 0.40)',
+    accent: '#264E29',
+    badgeBg: 'rgba(255, 255, 255, 0.90)',
+    icon: 'water',
+    statusLabel: 'Adequate',
+  },
+  warning: {
+    gradientStart: '#F59E0B', // Warning Yellow/Orange (amber-500)
+    gradientEnd: '#D97706',   // Warning Orange (amber-600)
+    backWaveStart: '#FDE68A', // Soft Amber (amber-200)
+    backWaveEnd: '#F59E0B',
+    border: 'rgba(245, 158, 11, 0.60)',
+    accent: '#B45309',
+    badgeBg: 'rgba(255, 255, 255, 0.92)',
+    icon: 'warning-outline',
+    statusLabel: 'Low (15% - 30%)',
+  },
+  danger: {
+    gradientStart: '#EF4444', // Danger Red (red-500)
+    gradientEnd: '#B91C1C',   // Deep Danger Red (red-700)
+    backWaveStart: '#FCA5A5', // Soft Red (red-300)
+    backWaveEnd: '#DC2626',
+    border: 'rgba(220, 38, 38, 0.65)',
+    accent: '#DC2626',
+    badgeBg: 'rgba(255, 255, 255, 0.92)',
+    icon: 'alert-circle',
+    statusLabel: 'Critically Low (<15%)',
+  },
+};
 
 export function BottleRail({
   remainingMl,
   capacityMl,
-  flowMlPerSec,
+  flowMlPerSec = 15,
   onRefill,
 }: BottleRailProps) {
   const { colors, radii } = useAppTheme();
   const [popoverOpen, setPopoverOpen] = useState(false);
 
-  const fillRatio = Math.max(0, Math.min(1, remainingMl / capacityMl));
+  const fillRatio = Math.max(0, Math.min(1, capacityMl > 0 ? remainingMl / capacityMl : 0));
   const fillPercent = Math.round(fillRatio * 100);
-  const isCritical = fillPercent < 20;
-  const estimatedWaterings = Math.floor(remainingMl / (flowMlPerSec * 5)); // 5s default
+  const levelState = getWaterLevelState(fillPercent);
+  const stateConfig = STATE_COLORS[levelState];
+
+  const estimatedWaterings = Math.floor(remainingMl / (flowMlPerSec * 5)); // 5s default run
 
   const RAIL_HEIGHT = 180;
   const RAIL_WIDTH = 44;
+  const targetHeight = fillRatio * RAIL_HEIGHT;
 
-  // Determine colors based on level
-  const fillColor = isCritical ? colors.palette.warningBorder : colors.palette.sage;
-  const fillColorEnd = isCritical ? colors.palette.critical : colors.palette.mint;
-
+  // Reanimated shared values
+  const waterHeightAnim = useSharedValue(0);
+  const waveAnim1 = useSharedValue(0);
+  const waveAnim2 = useSharedValue(0);
   const popoverScale = useSharedValue(0);
+
+  // Smooth wave filling effect for water height changes
+  useEffect(() => {
+    waterHeightAnim.value = withTiming(targetHeight, {
+      duration: 850,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [targetHeight, waterHeightAnim]);
+
+  // Continuous horizontal wave ripple animation
+  useEffect(() => {
+    waveAnim1.value = withRepeat(
+      withTiming(-44, { duration: 2400, easing: Easing.linear }),
+      -1,
+      false
+    );
+    waveAnim2.value = withRepeat(
+      withTiming(-44, { duration: 3800, easing: Easing.linear }),
+      -1,
+      false
+    );
+  }, [waveAnim1, waveAnim2]);
+
+  const waterContainerStyle = useAnimatedStyle(() => ({
+    height: waterHeightAnim.value,
+  }));
+
+  const waveStyle1 = useAnimatedStyle(() => ({
+    transform: [{ translateX: waveAnim1.value }],
+  }));
+
+  const waveStyle2 = useAnimatedStyle(() => ({
+    transform: [{ translateX: waveAnim2.value }],
+  }));
+
   const popoverStyle = useAnimatedStyle(() => ({
     transform: [{ scale: popoverScale.value }],
     opacity: popoverScale.value,
@@ -75,77 +176,83 @@ export function BottleRail({
     closePopover();
   };
 
-  const fillHeight = fillRatio * RAIL_HEIGHT;
-
   return (
     <>
       <TouchableOpacity
         onPress={openPopover}
+        activeOpacity={0.85}
         style={[
           styles.rail,
           {
             width: RAIL_WIDTH,
             height: RAIL_HEIGHT,
-            backgroundColor: `${colors.palette.white}CC`,
+            backgroundColor: `${colors.palette.white}D5`,
             borderRadius: RAIL_WIDTH / 2,
-            borderColor: isCritical
-              ? colors.palette.warningBorder
-              : colors.border,
+            borderColor: stateConfig.border,
             shadowColor: colors.palette.ink,
             shadowOffset: { width: 0, height: 4 },
-            shadowOpacity: 0.1,
+            shadowOpacity: 0.12,
             shadowRadius: 12,
             elevation: 8,
           },
         ]}
-        accessibilityLabel={`Water bottle ${fillPercent}% full. Tap for details.`}
+        accessibilityLabel={`Water reservoir capsule ${fillPercent}% full (${levelState} state). Tap for refill options.`}
       >
-        {/* Animated fill using SVG */}
-        <Svg
-          width={RAIL_WIDTH}
-          height={RAIL_HEIGHT}
-          style={StyleSheet.absoluteFill}
-        >
-          <Defs>
-            <LinearGradient id="bottleFill" x1="0" y1="1" x2="0" y2="0">
-              <Stop offset="0" stopColor={fillColor} stopOpacity="0.9" />
-              <Stop offset="1" stopColor={fillColorEnd} stopOpacity="0.85" />
-            </LinearGradient>
-            <ClipPath id="railClip">
-              <Rect
-                x={0}
-                y={RAIL_HEIGHT - fillHeight}
-                width={RAIL_WIDTH}
-                height={fillHeight}
-                rx={RAIL_WIDTH / 2}
+        {/* Animated Liquid Reservoir Container */}
+        <Animated.View style={[styles.waterContainer, waterContainerStyle]}>
+          {/* Secondary / Back Wave Layer for fluid depth */}
+          <Animated.View style={[styles.waveLayer, waveStyle2, { opacity: 0.45 }]}>
+            <Svg width={132} height={200} style={StyleSheet.absoluteFill}>
+              <Defs>
+                <LinearGradient id="backWaveGrad" x1="0" y1="0" x2="0" y2="1">
+                  <Stop offset="0" stopColor={stateConfig.backWaveStart} stopOpacity="0.95" />
+                  <Stop offset="1" stopColor={stateConfig.backWaveEnd} stopOpacity="0.75" />
+                </LinearGradient>
+              </Defs>
+              <Path
+                d="M 0 5 Q 11 8.5, 22 5 Q 33 1.5, 44 5 Q 55 8.5, 66 5 Q 77 1.5, 88 5 Q 99 8.5, 110 5 Q 121 1.5, 132 5 L 132 200 L 0 200 Z"
+                fill="url(#backWaveGrad)"
               />
-            </ClipPath>
-          </Defs>
-          <Rect
-            x={0}
-            y={0}
-            width={RAIL_WIDTH}
-            height={RAIL_HEIGHT}
-            fill="url(#bottleFill)"
-            clipPath="url(#railClip)"
-            rx={RAIL_WIDTH / 2}
-          />
-        </Svg>
+            </Svg>
+          </Animated.View>
 
-        {/* Percent label */}
-        <View style={styles.railLabel}>
+          {/* Primary / Front Animated Wave Layer */}
+          <Animated.View style={[styles.waveLayer, waveStyle1, { opacity: 0.92 }]}>
+            <Svg width={132} height={200} style={StyleSheet.absoluteFill}>
+              <Defs>
+                <LinearGradient id="frontWaveGrad" x1="0" y1="0" x2="0" y2="1">
+                  <Stop offset="0" stopColor={stateConfig.gradientStart} stopOpacity="1" />
+                  <Stop offset="1" stopColor={stateConfig.gradientEnd} stopOpacity="0.95" />
+                </LinearGradient>
+              </Defs>
+              <Path
+                d="M 0 5 Q 11 1.5, 22 5 Q 33 8.5, 44 5 Q 55 1.5, 66 5 Q 77 8.5, 88 5 Q 99 1.5, 110 5 Q 121 8.5, 132 5 L 132 200 L 0 200 Z"
+                fill="url(#frontWaveGrad)"
+              />
+            </Svg>
+          </Animated.View>
+        </Animated.View>
+
+        {/* Centered Frosted Badge (Readable over any wave level) */}
+        <View
+          style={[
+            styles.railLabelBadge,
+            {
+              backgroundColor: stateConfig.badgeBg,
+              borderColor: stateConfig.border,
+            },
+          ]}
+        >
           <Ionicons
-            name={isCritical ? 'alert-circle' : 'water'}
-            size={12}
-            color={isCritical ? colors.palette.critical : colors.palette.forest}
+            name={stateConfig.icon}
+            size={11}
+            color={stateConfig.accent}
           />
           <Text
             style={[
               styles.railPercent,
               {
-                color: isCritical
-                  ? colors.palette.critical
-                  : colors.palette.forest,
+                color: stateConfig.accent,
               },
             ]}
           >
@@ -157,7 +264,7 @@ export function BottleRail({
       {/* "Est. waterings" caption below rail */}
       <View style={styles.railCaption}>
         <Text
-          style={[styles.captionText, { color: `${colors.palette.ink}70` }]}
+          style={[styles.captionText, { color: `${colors.palette.ink}80` }]}
         >
           ~{estimatedWaterings}
         </Text>
@@ -190,13 +297,13 @@ export function BottleRail({
               <View style={styles.popoverHeader}>
                 <Ionicons
                   name="water"
-                  size={18}
-                  color={colors.palette.forest}
+                  size={20}
+                  color={stateConfig.accent}
                 />
                 <Text
                   style={[styles.popoverTitle, { color: colors.palette.ink }]}
                 >
-                  Water Bottle
+                  Water Reservoir
                 </Text>
               </View>
 
@@ -208,6 +315,7 @@ export function BottleRail({
                   {capacityMl} ml
                 </Text>
               </View>
+
               <View style={styles.popoverRow}>
                 <Text style={[styles.popoverKey, { color: colors.palette.sage }]}>
                   Remaining
@@ -216,16 +324,15 @@ export function BottleRail({
                   style={[
                     styles.popoverVal,
                     {
-                      color: isCritical
-                        ? colors.palette.critical
-                        : colors.palette.ink,
+                      color: stateConfig.accent,
                       fontWeight: '800',
                     },
                   ]}
                 >
-                  {remainingMl} ml
+                  {remainingMl} ml ({fillPercent}%)
                 </Text>
               </View>
+
               <View style={styles.popoverRow}>
                 <Text style={[styles.popoverKey, { color: colors.palette.sage }]}>
                   Flow rate
@@ -234,34 +341,82 @@ export function BottleRail({
                   {flowMlPerSec} ml/s
                 </Text>
               </View>
+
               <View style={styles.popoverRow}>
                 <Text style={[styles.popoverKey, { color: colors.palette.sage }]}>
                   Est. waterings
                 </Text>
                 <Text style={[styles.popoverVal, { color: colors.palette.ink }]}>
-                  ~{estimatedWaterings}
+                  ~{estimatedWaterings} cycles
                 </Text>
               </View>
 
-              {isCritical && (
+              {/* Responsive status banner */}
+              {levelState === 'danger' && (
                 <View
                   style={[
-                    styles.lowWarning,
-                    { backgroundColor: colors.palette.blush },
+                    styles.statusAlertBanner,
+                    { backgroundColor: `${colors.palette.blush}CC`, borderColor: colors.palette.critical },
                   ]}
                 >
                   <Ionicons
-                    name="alert-circle-outline"
-                    size={14}
+                    name="alert-circle"
+                    size={15}
                     color={colors.palette.critical}
                   />
                   <Text
                     style={[
-                      styles.lowWarningText,
+                      styles.statusAlertText,
                       { color: colors.palette.critical },
                     ]}
                   >
-                    Bottle nearly empty — pump disabled
+                    Danger: Reservoir critically low (&lt;15%). Auto-watering paused.
+                  </Text>
+                </View>
+              )}
+
+              {levelState === 'warning' && (
+                <View
+                  style={[
+                    styles.statusAlertBanner,
+                    { backgroundColor: '#FEF3C7', borderColor: '#F59E0B' },
+                  ]}
+                >
+                  <Ionicons
+                    name="warning-outline"
+                    size={15}
+                    color="#D97706"
+                  />
+                  <Text
+                    style={[
+                      styles.statusAlertText,
+                      { color: '#B45309' },
+                    ]}
+                  >
+                    Warning: Reservoir level is between 15% and 30%. Refill soon.
+                  </Text>
+                </View>
+              )}
+
+              {levelState === 'normal' && (
+                <View
+                  style={[
+                    styles.statusAlertBanner,
+                    { backgroundColor: '#ECFDF5', borderColor: '#10B981' },
+                  ]}
+                >
+                  <Ionicons
+                    name="checkmark-circle-outline"
+                    size={15}
+                    color="#059669"
+                  />
+                  <Text
+                    style={[
+                      styles.statusAlertText,
+                      { color: '#047857' },
+                    ]}
+                  >
+                    Reservoir level is optimal (&gt;30%).
                   </Text>
                 </View>
               )}
@@ -275,7 +430,7 @@ export function BottleRail({
                     borderRadius: radii.xl,
                   },
                 ]}
-                accessibilityLabel="I refilled the bottle"
+                accessibilityLabel="I refilled the reservoir"
               >
                 <Ionicons
                   name="refresh"
@@ -283,7 +438,7 @@ export function BottleRail({
                   color={colors.palette.white}
                   style={{ marginRight: 6 }}
                 />
-                <Text style={styles.refillBtnText}>I Refilled</Text>
+                <Text style={styles.refillBtnText}>I Refilled Reservoir</Text>
               </TouchableOpacity>
             </Animated.View>
           </Pressable>
@@ -293,17 +448,47 @@ export function BottleRail({
   );
 }
 
+// Aliases for vertical water reservoir pill component
+export const WaterCapsule = BottleRail;
+export const ReservoirPill = BottleRail;
+
 const styles = StyleSheet.create({
   rail: {
     borderWidth: 1.5,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
+    position: 'relative',
   },
-  railLabel: {
+  waterContainer: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    overflow: 'hidden',
+  },
+  waveLayer: {
+    position: 'absolute',
+    top: -5,
+    left: 0,
+    width: 132,
+    height: 200,
+  },
+  railLabelBadge: {
+    zIndex: 10,
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 2,
+    gap: 1,
+    paddingHorizontal: 5,
+    paddingVertical: 3,
+    borderRadius: 12,
+    borderWidth: 1,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
   },
   railPercent: {
     fontSize: 10,
@@ -323,22 +508,22 @@ const styles = StyleSheet.create({
   },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.35)',
+    backgroundColor: 'rgba(0,0,0,0.38)',
     justifyContent: 'center',
     paddingHorizontal: 32,
   },
   popover: {
-    padding: 20,
-    gap: 10,
+    padding: 22,
+    gap: 12,
   },
   popoverHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 4,
+    marginBottom: 2,
   },
   popoverTitle: {
-    fontSize: 17,
+    fontSize: 18,
     fontWeight: '800',
   },
   popoverRow: {
@@ -354,15 +539,16 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
-  lowWarning: {
+  statusAlertBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
     padding: 10,
     borderRadius: 12,
+    borderWidth: 1,
     marginTop: 4,
   },
-  lowWarningText: {
+  statusAlertText: {
     fontSize: 12,
     fontWeight: '600',
     flex: 1,
@@ -371,7 +557,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 13,
+    paddingVertical: 14,
     marginTop: 6,
   },
   refillBtnText: {

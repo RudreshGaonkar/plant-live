@@ -19,17 +19,19 @@ export const BottleGauge: React.FC<BottleGaugeProps> = ({
   const { colors, radii, spacing } = useAppTheme();
 
   const percentage = Math.max(0, Math.min(100, Math.round((remainingMl / capacityMl) * 100)));
-  const isLow = percentage <= 20;
-  const isCritical = percentage <= 5;
+  const isDanger = percentage < 15;
+  const isCritical = isDanger;
+  const isWarning = percentage >= 15 && percentage <= 30;
+  const isLow = percentage <= 30;
   const wateringsLeft = Math.floor(remainingMl / (flowMlPerSec * 5));
 
   const totalHeight = 90;
   const fillHeight = (percentage / 100) * totalHeight;
 
   const getFillColor = () => {
-    if (isCritical) return colors.palette.warningBorder;
-    if (isLow) return colors.palette.warningText;
-    return colors.palette.forest;
+    if (isDanger) return '#DC2626'; // Danger Red (< 15%)
+    if (isWarning) return '#D97706'; // Warning Yellow / Orange (15% to 30%)
+    return colors.palette.forest; // Theme Green (> 30%)
   };
 
   return (

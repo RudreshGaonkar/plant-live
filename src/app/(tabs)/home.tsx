@@ -35,6 +35,7 @@ import Animated, {
 import { useAppTheme } from '@/theme';
 import { useLiveDevice } from '@/hooks/useLiveDevice';
 import { usePlantState } from '@/hooks/usePlantState';
+import { sendDeviceControl } from '@/services/devices';
 import { Plant3DHero } from '@/components/Plant3D';
 import { MoodBubble } from '@/components/MoodBubble';
 import { BottleRail } from '@/components/BottleRail';
@@ -42,7 +43,7 @@ import { LiveChips } from '@/components/LiveChips';
 import { VitalsSheet } from '@/components/VitalsSheet';
 import { GardenStrip } from '@/components/GardenStrip';
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 // Full-bleed gradient colors per health state
 const STAGE_GRADIENTS: Record<string, [string, string, string]> = {
@@ -65,6 +66,7 @@ export default function HomeScreen() {
   const toggleMode = useLiveDevice((s) => s.toggleMode);
   const refillBottle = useLiveDevice((s) => s.refillBottle);
   const waterLogs = useLiveDevice((s) => s.waterLogs);
+  const triggerWaterNow = useLiveDevice((s) => s.triggerWaterNow);
 
   const [gardenStripOpen, setGardenStripOpen] = useState(false);
 
@@ -145,6 +147,53 @@ export default function HomeScreen() {
   const isOffline = !status.online;
   const deviceList = Object.values(devices);
 
+  // Dynamic plant location & name binding (replaces fallback string "Terrace Tulsi Pot")
+  const locationMeta: Record<string, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
+    indoor: { label: 'Indoor', icon: 'home-outline' },
+    balcony: { label: 'Balcony', icon: 'leaf-outline' },
+    terrace: { label: 'Terrace', icon: 'sunny-outline' },
+  };
+
+  const activeLocation = config.location && config.plantName !== 'Terrace Tulsi Pot' ? config.location : 'indoor';
+  const currentLocation = locationMeta[activeLocation] ?? {
+    label: activeLocation.charAt(0).toUpperCase() + activeLocation.slice(1),
+    icon: 'home-outline',
+  };
+
+  const plantDisplayName =
+    config.plantName && config.plantName !== 'Terrace Tulsi Pot'
+      ? config.plantName
+      : config.name && config.name !== 'Terrace Tulsi Pot'
+      ? config.name
+      : 'Monstera Deliciosa';
+
+  // Real-time pump active state bound to telemetry.isPumpActive and control.pumpState
+  const isPumpActive = Boolean(
+    telemetry.isPumpActive ||
+    telemetry.pumpOn ||
+    device?.control?.pumpState ||
+    isWatering
+  );
+
+  // Manual watering trigger with immediate optimistic feedback & Firebase RTDB dispatch
+  const handleManualWatering = async () => {
+    // 1. Immediate optimistic UI feedback
+    triggerWaterNow(5);
+
+    // 2. Write { pumpState: true, manualOverride: true, timestamp: Date.now() } to Firebase
+    try {
+      const targetDeviceId = device?.id || activeDeviceId || 'leaf-node-01';
+      await sendDeviceControl(targetDeviceId, {
+        pumpState: true,
+        manualOverride: true,
+        timestamp: Date.now(),
+        durationSec: 5,
+      });
+    } catch (err) {
+      console.warn('[HomeScreen] Manual water send error:', err);
+    }
+  };
+
   return (
     <View style={styles.stage}>
       <StatusBar style="dark" />
@@ -171,11 +220,11 @@ export default function HomeScreen() {
       <View style={styles.plant3DContainer}>
         <Plant3DHero
           health={health}
-          isWatering={isWatering}
+          isWatering={isPumpActive}
           secondsLeft={secondsLeft}
-          location={config.location}
+          location={activeLocation}
           mode={config.mode}
-          plantName={config.plantName}
+          plantName={plantDisplayName}
           plantSpecies={config.plantSpecies}
           lastSeen={status.lastSeen}
         />
@@ -206,7 +255,7 @@ export default function HomeScreen() {
           />
         </TouchableOpacity>
 
-        {/* Center: Plant switcher pill */}
+        {/* Center: Plant switcher pill (Dynamically shows location and plant name) */}
         <TouchableOpacity
           style={[
             styles.switcherPill,
@@ -219,12 +268,12 @@ export default function HomeScreen() {
           onPress={() => setGardenStripOpen((v) => !v)}
           accessibilityLabel="Switch plant device"
         >
-          <Ionicons name="leaf" size={14} color={colors.palette.forest} />
+          <Ionicons name={currentLocation.icon} size={14} color={colors.palette.forest} />
           <Text
             style={[styles.switcherText, { color: colors.palette.ink }]}
             numberOfLines={1}
           >
-            {config.plantName}
+            {currentLocation.label} · {plantDisplayName}
           </Text>
           <Ionicons
             name={gardenStripOpen ? 'chevron-up' : 'chevron-down'}
@@ -233,7 +282,7 @@ export default function HomeScreen() {
           />
         </TouchableOpacity>
 
-        {/* Right: Alerts bell + online dot */}
+        {/* Right: Manual Water + Online dot + Alerts bell */}
         <View style={styles.topRightActions}>
           {/* Online indicator */}
           <View
@@ -259,6 +308,30 @@ export default function HomeScreen() {
             />
           </View>
 
+          {/* Manual Watering Button - NEVER disabled when moisture is 100% */}
+          <TouchableOpacity
+            testID="manual-watering-btn"
+            accessibilityLabel="Manual watering"
+            activeOpacity={0.8}
+            disabled={isWatering}
+            onPress={handleManualWatering}
+            style={[
+              styles.iconPill,
+              {
+                backgroundColor: isWatering
+                  ? colors.palette.forest
+                  : `${colors.palette.white}CC`,
+                borderRadius: radii.full,
+              },
+            ]}
+          >
+            <Ionicons
+              name={isWatering ? 'water' : 'water-outline'}
+              size={18}
+              color={isWatering ? colors.palette.white : colors.palette.forest}
+            />
+          </TouchableOpacity>
+
           {/* Alerts bell */}
           <TouchableOpacity
             style={[
@@ -268,6 +341,7 @@ export default function HomeScreen() {
                 borderRadius: radii.full,
               },
             ]}
+            onPress={() => router.navigate('/(tabs)/alerts')}
             accessibilityLabel="View alerts"
           >
             <Ionicons
@@ -355,10 +429,11 @@ export default function HomeScreen() {
         ]}
       >
         <LiveChips
-          location={config.location}
+          location={activeLocation}
           mode={config.mode}
-          pumpOn={telemetry.pumpOn}
+          pumpOn={isPumpActive}
           onModeToggle={toggleMode}
+          onWaterPress={handleManualWatering}
         />
       </Animated.View>
 

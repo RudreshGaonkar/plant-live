@@ -19,6 +19,9 @@ import {
   Alert,
   ActivityIndicator,
   Platform,
+  Linking,
+  Vibration,
+  ToastAndroid,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -59,7 +62,6 @@ export default function AddDeviceScreen() {
   const { colors, radii, spacing } = useAppTheme();
   const addDevice = useLiveDevice((s) => s.addDevice);
   const setActiveDeviceId = useSession((s) => s.setActiveDeviceId);
-  const isDemoMode = useSession((s) => s.isDemoMode);
   const user = useSession((s) => s.user);
 
   const [step, setStep] = useState<number>(1);
@@ -69,13 +71,18 @@ export default function AddDeviceScreen() {
   const [deviceIdInput, setDeviceIdInput] = useState<string>('');
   const [isVerifyingOnline, setIsVerifyingOnline] = useState<boolean>(false);
   const [isDeviceOnline, setIsDeviceOnline] = useState<boolean>(false);
+  const [isAutoDetecting, setIsAutoDetecting] = useState<boolean>(false);
+  const [autoDetectBanner, setAutoDetectBanner] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   // STEP 2 State: Plant Details & Location
-  const [plantName, setPlantName] = useState<string>('Terrace Tulsi Pot');
-  const [selectedSpecies, setSelectedSpecies] = useState<string>('Tulsi');
+  const [plantName, setPlantName] = useState<string>('Indoor Monstera');
+  const [selectedSpecies, setSelectedSpecies] = useState<string>('Monstera');
   const [customSpecies, setCustomSpecies] = useState<string>('');
   const [speciesSearch, setSpeciesSearch] = useState<string>('');
-  const [selectedLocation, setSelectedLocation] = useState<PlantLocation>('terrace');
+  const [selectedLocation, setSelectedLocation] = useState<PlantLocation>('indoor');
 
   // STEP 3 State: Sensors & Calibration
   const [hasLightSensor, setHasLightSensor] = useState<boolean>(true);
@@ -140,6 +147,91 @@ export default function AddDeviceScreen() {
       setIsVerifyingOnline(false);
       setIsDeviceOnline(true);
     }, 800);
+  };
+
+  const handleOpenWifiSettings = async () => {
+    try {
+      if (Platform.OS === 'android') {
+        try {
+          await Linking.sendIntent('android.settings.WIFI_SETTINGS');
+          return;
+        } catch {
+          // Fallback to general settings
+        }
+      } else if (Platform.OS === 'ios') {
+        try {
+          const canOpen = await Linking.canOpenURL('App-Prefs:WIFI');
+          if (canOpen) {
+            await Linking.openURL('App-Prefs:WIFI');
+            return;
+          }
+        } catch {
+          // Fallback to general settings
+        }
+      }
+      await Linking.openSettings();
+    } catch {
+      Alert.alert('Open Settings', 'Please open your phone Settings and turn on Wi-Fi to connect to LeafLink.');
+    }
+  };
+
+  // Step 1: Auto-Detect Hardware from ESP8266 Access Point (192.168.4.1)
+  const handleAutoDetect = async () => {
+    setIsAutoDetecting(true);
+    setAutoDetectBanner(null);
+
+    let signal: AbortSignal;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal) {
+      signal = AbortSignal.timeout(3500);
+    } else {
+      const controller = new AbortController();
+      timer = setTimeout(() => controller.abort(), 3500);
+      signal = controller.signal;
+    }
+
+    try {
+      const response = await fetch('http://192.168.4.1/api/info', {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal,
+      });
+
+      if (timer) clearTimeout(timer);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      const detectedId: string = data?.deviceId || (data?.chipId ? `LeafLink-${data.chipId}` : '');
+
+      if (detectedId) {
+        setDeviceIdInput(detectedId);
+        Vibration.vibrate(100);
+        setAutoDetectBanner({
+          type: 'success',
+          message: `Detected device: ${detectedId}`,
+        });
+        if (Platform.OS === 'android') {
+          ToastAndroid.show(`Detected device: ${detectedId}`, ToastAndroid.SHORT);
+        }
+      } else {
+        throw new Error('No device ID returned');
+      }
+    } catch {
+      if (timer) clearTimeout(timer);
+      const errorMsg = 'Could not reach 192.168.4.1. Ensure your phone is connected to the LeafLink-xxxxxx Wi-Fi hotspot.';
+      setAutoDetectBanner({
+        type: 'error',
+        message: errorMsg,
+      });
+      if (Platform.OS === 'android') {
+        ToastAndroid.show(errorMsg, ToastAndroid.LONG);
+      }
+    } finally {
+      setIsAutoDetecting(false);
+    }
   };
 
   // Step 4: Run 10-second pump test
@@ -222,16 +314,14 @@ export default function AddDeviceScreen() {
     addDevice(newRecord);
     setActiveDeviceId(devId);
 
-    // Sync to RTDB if not in demo mode
-    if (!isDemoMode) {
-      try {
-        await updateDeviceConfigInRTDB(devId, newRecord.config);
-        if (user?.uid) {
-          await set(ref(db, `users/${user.uid}/devices/${devId}`), true);
-          await set(ref(db, `owners/${devId}`), user.uid);
-        }
-      } catch {
+    // Sync to RTDB
+    try {
+      await updateDeviceConfigInRTDB(devId, newRecord.config);
+      if (user?.uid) {
+        await set(ref(db, `users/${user.uid}/devices/${devId}`), true);
+        await set(ref(db, `owners/${devId}`), user.uid);
       }
+    } catch {
     }
 
     Alert.alert('Plant Ready!', `${plantName} has been paired and calibrated successfully.`, [
@@ -353,6 +443,76 @@ export default function AddDeviceScreen() {
 
               {showWifiGuide && (
                 <View style={styles.wifiGuideBody}>
+                  {/* Prominent First-Time Setup Callout */}
+                  <View
+                    style={[
+                      styles.onboardingCallout,
+                      {
+                        backgroundColor: colors.palette.mist,
+                        borderColor: colors.palette.forest,
+                        borderRadius: radii.md,
+                      },
+                    ]}
+                  >
+                    <View style={styles.calloutHeaderRow}>
+                      <View
+                        style={[
+                          styles.calloutIconBadge,
+                          { backgroundColor: colors.palette.forest },
+                        ]}
+                      >
+                        <Ionicons name="wifi" size={13} color="#FFFFFF" />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.calloutTitle, { color: colors.palette.forest }]}>
+                          First-Time Wi-Fi Setup
+                        </Text>
+                        <Text style={[styles.calloutSub, { color: colors.textMuted }]}>
+                          Connect directly to your hardware to configure Wi-Fi
+                        </Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.calloutStepsList}>
+                      <View style={styles.calloutStepItem}>
+                        <View style={[styles.calloutDot, { backgroundColor: colors.palette.forest }]} />
+                        <Text style={[styles.calloutStepText, { color: colors.text }]}>
+                          <Text style={styles.calloutStepBold}>Step 1: Turn ON phone Wi-Fi</Text>
+                        </Text>
+                      </View>
+
+                      <View style={styles.calloutStepItem}>
+                        <View style={[styles.calloutDot, { backgroundColor: colors.palette.forest }]} />
+                        <Text style={[styles.calloutStepText, { color: colors.text }]}>
+                          <Text style={styles.calloutStepBold}>Step 2: Connect to your device hotspot </Text>
+                          <Text style={styles.stepCode}>LeafLink-&lt;chipId&gt;</Text>
+                          <Text> (Password: </Text>
+                          <Text style={styles.stepCode}>leafsetup</Text>
+                          <Text>)</Text>
+                        </Text>
+                      </View>
+                    </View>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.openWifiSettingsBtn,
+                        {
+                          backgroundColor: colors.palette.forest,
+                          borderRadius: radii.md,
+                        },
+                      ]}
+                      onPress={handleOpenWifiSettings}
+                      activeOpacity={0.8}
+                    >
+                      <Ionicons
+                        name="settings-outline"
+                        size={15}
+                        color="#FFFFFF"
+                        style={{ marginRight: 6 }}
+                      />
+                      <Text style={styles.openWifiSettingsBtnText}>Open Wi-Fi Settings</Text>
+                    </TouchableOpacity>
+                  </View>
                   <View style={styles.wifiStepItem}>
                     <View
                       style={[
@@ -543,10 +703,77 @@ export default function AddDeviceScreen() {
             {/* Manual Input Mode */}
             {connectTab === 'manual' && (
               <View style={[styles.card, { backgroundColor: colors.surface, borderRadius: radii.card, borderColor: colors.border }]}>
+                {/* Auto-Detect Hardware Button */}
+                <TouchableOpacity
+                  style={[
+                    styles.autoDetectBtn,
+                    {
+                      backgroundColor: colors.palette.mist,
+                      borderColor: colors.palette.forest,
+                      borderRadius: radii.md,
+                    },
+                  ]}
+                  onPress={handleAutoDetect}
+                  disabled={isAutoDetecting}
+                  activeOpacity={0.8}
+                >
+                  <View style={styles.autoDetectBtnContent}>
+                    {isAutoDetecting ? (
+                      <ActivityIndicator size="small" color={colors.palette.forest} style={{ marginRight: 8 }} />
+                    ) : (
+                      <Ionicons name="radio-outline" size={18} color={colors.palette.forest} style={{ marginRight: 8 }} />
+                    )}
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.autoDetectBtnText, { color: colors.palette.forest }]}>
+                        {isAutoDetecting ? 'Querying 192.168.4.1...' : 'Auto-Detect Connected Hardware'}
+                      </Text>
+                      <Text style={[styles.autoDetectBtnSub, { color: colors.textMuted }]}>
+                        Reads Device ID directly via LeafLink hotspot
+                      </Text>
+                    </View>
+                    <Ionicons name="flash" size={16} color={colors.palette.forest} />
+                  </View>
+                </TouchableOpacity>
+
+                {/* Green/Red Auto-Detect Feedback Toast/Banner */}
+                {autoDetectBanner && (
+                  <View
+                    style={[
+                      styles.autoDetectBanner,
+                      {
+                        backgroundColor: autoDetectBanner.type === 'success' ? '#E8F5E9' : '#FFEBEE',
+                        borderColor: autoDetectBanner.type === 'success' ? '#2E7D32' : '#C62828',
+                        borderRadius: radii.md,
+                      },
+                    ]}
+                  >
+                    <Ionicons
+                      name={autoDetectBanner.type === 'success' ? 'checkmark-circle' : 'alert-circle'}
+                      size={18}
+                      color={autoDetectBanner.type === 'success' ? '#2E7D32' : '#C62828'}
+                      style={{ marginRight: 8, marginTop: 1 }}
+                    />
+                    <Text
+                      style={[
+                        styles.autoDetectBannerText,
+                        { color: autoDetectBanner.type === 'success' ? '#1B5E20' : '#B71C1C' },
+                      ]}
+                    >
+                      {autoDetectBanner.message}
+                    </Text>
+                  </View>
+                )}
+
+                <View style={styles.inputDividerRow}>
+                  <View style={[styles.inputDividerLine, { backgroundColor: colors.border }]} />
+                  <Text style={[styles.inputDividerText, { color: colors.textMuted }]}>OR ENTER MANUALLY</Text>
+                  <View style={[styles.inputDividerLine, { backgroundColor: colors.border }]} />
+                </View>
+
                 <Text style={[styles.label, { color: colors.text }]}>Device Serial ID</Text>
                 <TextInput
                   style={[styles.input, { borderColor: colors.border, borderRadius: radii.md, color: colors.text }]}
-                  placeholder="e.g. esp8266-9b4f"
+                  placeholder="e.g. LeafLink-A6A61A"
                   placeholderTextColor={colors.textMuted}
                   value={deviceIdInput}
                   onChangeText={setDeviceIdInput}
@@ -1363,5 +1590,114 @@ const styles = StyleSheet.create({
   stepCode: {
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  onboardingCallout: {
+    padding: 14,
+    borderWidth: 1.5,
+    marginBottom: 14,
+  },
+  calloutHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  calloutIconBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  calloutTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: -0.2,
+  },
+  calloutSub: {
+    fontSize: 11,
+    marginTop: 1,
+  },
+  calloutStepsList: {
+    gap: 8,
+    marginBottom: 12,
+  },
+  calloutStepItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  calloutDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginTop: 6,
+  },
+  calloutStepText: {
+    fontSize: 12,
+    lineHeight: 18,
+    flex: 1,
+  },
+  calloutStepBold: {
+    fontWeight: '800',
+  },
+  openWifiSettingsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+  },
+  openWifiSettingsBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
+  autoDetectBtn: {
+    padding: 12,
+    borderWidth: 1.5,
+    marginBottom: 12,
+  },
+  autoDetectBtnContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  autoDetectBtnText: {
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: -0.2,
+  },
+  autoDetectBtnSub: {
+    fontSize: 11,
+    marginTop: 1,
+  },
+  autoDetectBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    padding: 10,
+    borderWidth: 1,
+    marginBottom: 12,
+  },
+  autoDetectBannerText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '700',
+  },
+  inputDividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+    gap: 8,
+  },
+  inputDividerLine: {
+    flex: 1,
+    height: 1,
+  },
+  inputDividerText: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
   },
 });

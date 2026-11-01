@@ -74,15 +74,15 @@ export class SimulatedDevice {
       const initialDev: DeviceRecord = {
         id: targetId,
         config: {
-          name: 'Balcony Hub Plant',
+          name: 'Indoor Monstera',
           plantName: 'Monstera Deliciosa',
           plantSpecies: 'Swiss Cheese Plant',
           hubId: 'hub-demo-1',
-          location: 'balcony',
+          location: 'indoor',
           mode: 'auto',
           thresholds: {
-            moistureMin: 30,
-            moistureMax: 60,
+            moistureMin: 35,
+            moistureMax: 65,
             tempMax: 35,
             humidityMax: 80,
             pumpDurationSec: 5,
@@ -445,7 +445,6 @@ export class SimulatedDevice {
     if (
       device.config.mode === 'auto' &&
       !store.isWateringActive &&
-      remainingMl > 20 &&
       currentMoisture < device.config.thresholds.moistureMin
     ) {
       // High humidity guard

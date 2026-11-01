@@ -2,13 +2,13 @@ import { useEffect } from 'react';
 import { ref, onValue, off } from 'firebase/database';
 import { db } from '@/services/firebase';
 import { useSession } from '@/store/useSession';
-import { simulatedDevice } from '@/services/simulator';
 import {
   useLiveDevice as useLiveDeviceStore,
   LiveDeviceStore,
   DeviceConfig,
   DeviceTelemetry,
   DeviceStatus,
+  createDefaultDeviceRecord,
 } from '@/store/useLiveDevice';
 
 export type {
@@ -25,22 +25,18 @@ export type {
   DeviceRecord,
   LiveDeviceStore,
 } from '@/store/useLiveDevice';
-export { computePlantHealthState, mockDevice } from '@/store/useLiveDevice';
+export { computePlantHealthState, mockDevice, createDefaultDeviceRecord } from '@/store/useLiveDevice';
 
 export const useLiveDevice: typeof useLiveDeviceStore = Object.assign(
   function useLiveDeviceHook<U = LiveDeviceStore>(
     selector?: (state: LiveDeviceStore) => U
   ): U {
-    const isDemoMode = useSession((s) => s.isDemoMode);
     const user = useSession((s) => s.user);
     const activeDeviceId = useLiveDeviceStore((s) => s.activeDeviceId);
     const setActiveDeviceId = useLiveDeviceStore((s) => s.setActiveDeviceId);
 
+    // 1. Sync User Device List
     useEffect(() => {
-      if (isDemoMode) return;
-
-      simulatedDevice.stop();
-
       if (!user?.uid) return;
 
       const userDevicesRef = ref(db, `users/${user.uid}/devices`);
@@ -57,29 +53,21 @@ export const useLiveDevice: typeof useLiveDeviceStore = Object.assign(
             if (!current || !deviceIds.includes(current)) {
               setActiveDeviceId(deviceIds[0]);
             }
-          } else {
-            setActiveDeviceId('');
-            useLiveDeviceStore.setState({ devices: {} });
           }
-        } else {
-          setActiveDeviceId('');
-          useLiveDeviceStore.setState({ devices: {} });
         }
       });
 
       return () => {
         off(userDevicesRef, 'value', unsubUserDevices);
       };
-    }, [isDemoMode, user?.uid, setActiveDeviceId]);
+    }, [user?.uid, setActiveDeviceId]);
 
+    // 2. Persistent Realtime Sync for Active Device (telemetry, status, config, control)
     useEffect(() => {
-      if (isDemoMode) return;
+      const targetId = activeDeviceId || 'leaf-node-01';
 
-      simulatedDevice.stop();
-
-      if (!activeDeviceId) return;
-
-      const telemetryRef = ref(db, `devices/${activeDeviceId}/telemetry`);
+      // Telemetry listener
+      const telemetryRef = ref(db, `devices/${targetId}/telemetry`);
       const unsubTelemetry = onValue(telemetryRef, (snapshot) => {
         if (snapshot.exists()) {
           const telemetry = snapshot.val() as DeviceTelemetry;
@@ -87,34 +75,60 @@ export const useLiveDevice: typeof useLiveDeviceStore = Object.assign(
         }
       });
 
-      const statusRef = ref(db, `devices/${activeDeviceId}/status`);
+      // Status listener
+      const statusRef = ref(db, `devices/${targetId}/status`);
       const unsubStatus = onValue(statusRef, (snapshot) => {
         if (snapshot.exists()) {
           const status = snapshot.val() as DeviceStatus;
           useLiveDeviceStore.setState((prev) => {
-            const cur = prev.devices[activeDeviceId];
-            if (!cur) return prev;
+            const cur = prev.devices[targetId] || createDefaultDeviceRecord(targetId);
             return {
               devices: {
                 ...prev.devices,
-                [activeDeviceId]: { ...cur, status: { ...cur.status, ...status } },
+                [targetId]: { ...cur, status: { ...cur.status, ...status } },
               },
             };
           });
         }
       });
 
-      const configRef = ref(db, `devices/${activeDeviceId}/config`);
+      // Config listener
+      const configRef = ref(db, `devices/${targetId}/config`);
       const unsubConfig = onValue(configRef, (snapshot) => {
         if (snapshot.exists()) {
           const config = snapshot.val() as DeviceConfig;
           useLiveDeviceStore.setState((prev) => {
-            const cur = prev.devices[activeDeviceId];
-            if (!cur) return prev;
+            const cur = prev.devices[targetId] || createDefaultDeviceRecord(targetId);
             return {
               devices: {
                 ...prev.devices,
-                [activeDeviceId]: { ...cur, config: { ...cur.config, ...config } },
+                [targetId]: { ...cur, config: { ...cur.config, ...config } },
+              },
+            };
+          });
+        }
+      });
+
+      // Control listener (for real-time pump status & optimistic override sync)
+      const controlRef = ref(db, `devices/${targetId}/control`);
+      const unsubControl = onValue(controlRef, (snapshot) => {
+        if (snapshot.exists()) {
+          const control = snapshot.val();
+          useLiveDeviceStore.setState((prev) => {
+            const cur = prev.devices[targetId] || createDefaultDeviceRecord(targetId);
+            const isPump = Boolean(control?.pumpState || cur.telemetry.isPumpActive || cur.telemetry.pumpOn);
+            return {
+              devices: {
+                ...prev.devices,
+                [targetId]: {
+                  ...cur,
+                  control: { ...cur.control, ...control },
+                  telemetry: {
+                    ...cur.telemetry,
+                    isPumpActive: isPump,
+                    pumpOn: isPump,
+                  },
+                },
               },
             };
           });
@@ -125,8 +139,9 @@ export const useLiveDevice: typeof useLiveDeviceStore = Object.assign(
         off(telemetryRef, 'value', unsubTelemetry);
         off(statusRef, 'value', unsubStatus);
         off(configRef, 'value', unsubConfig);
+        off(controlRef, 'value', unsubControl);
       };
-    }, [isDemoMode, activeDeviceId]);
+    }, [activeDeviceId]);
 
     return useLiveDeviceStore(
       selector ?? ((s: LiveDeviceStore) => s as unknown as U)
