@@ -1,8 +1,7 @@
 import { create } from 'zustand';
-import { ref, set as fbSet, onValue } from 'firebase/database';
+import { ref, set as fbSet, onValue, update } from 'firebase/database';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db, auth } from '@/services/firebase';
-import { updateDeviceConfigInRTDB } from '@/services/devices';
 
 export type PlantLocation = 'balcony' | 'terrace' | 'indoor';
 export type DeviceMode = 'auto' | 'manual';
@@ -142,8 +141,9 @@ export interface LiveDeviceStore {
   updateThresholds: (thresholds: Partial<DeviceConfig['thresholds']>) => void;
   updateSensors: (sensors: Partial<DeviceConfig['sensors']>) => void;
   updateTelemetry: (telemetry: Partial<DeviceTelemetry>, targetDeviceId?: string) => void;
+  clearTelemetry: (deviceId: string) => void;
   updateConfig: (config: Partial<DeviceConfig>, targetDeviceId?: string) => void;
-  updateCalibration: (calibration: DeviceConfig['calibration']) => void;
+  updateCalibration: (calibration: DeviceConfig['calibration'], targetDeviceId?: string) => void;
   removeDevice: (id: string) => void;
   addDevice: (device: DeviceRecord) => void;
   setOnlineStatus: (online: boolean) => void;
@@ -240,11 +240,11 @@ export const createDefaultDeviceRecord = (id: string = 'leaf-node-01'): DeviceRe
     pumpOn: false,
     isPumpActive: false,
     rssi: -60,
-    ts: Date.now(),
+    ts: 0,
   },
   status: {
-    online: true,
-    lastSeen: Date.now(),
+    online: false,
+    lastSeen: 0,
     firmware: 'leaflink-esp8266',
   },
   control: {
@@ -457,7 +457,7 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     });
 
     try {
-      await updateDeviceConfigInRTDB(targetId, { mode: nextMode });
+      await update(ref(db, `devices/${targetId}/config`), { mode: nextMode });
     } catch (err: any) {
       // Revert local state with an error toast if the write fails
       const currentDevices = get().devices;
@@ -766,7 +766,8 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     }
 
     // Immediately cancel pending local watering interval and reset flags if pump transitions to false
-    if (!isPump || incomingOn === false || incomingActive === false) {
+    const isActiveDevice = targetId === activeDeviceId;
+    if (isActiveDevice && (!isPump || incomingOn === false || incomingActive === false)) {
       if (activeWateringTimer) {
         clearInterval(activeWateringTimer);
         activeWateringTimer = null;
@@ -774,10 +775,12 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     }
 
     set({
-      isWateringActive: isPump,
-      isWatering: isPump,
-      isCommandPending: isPump ? get().isCommandPending : false,
-      wateringSecondsLeft: isPump ? get().wateringSecondsLeft : 0,
+      ...(isActiveDevice && {
+        isWateringActive: isPump,
+        isWatering: isPump,
+        isCommandPending: isPump ? get().isCommandPending : false,
+        wateringSecondsLeft: isPump ? get().wateringSecondsLeft : 0,
+      }),
       devices: {
         ...devices,
         [targetId]: {
@@ -791,11 +794,16 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
             ...telemetry,
             isPumpActive: isPump,
             pumpOn: isPump,
-            ts: Date.now(),
+            ts: Number.isFinite(telemetry.soilMoisture) ? telemetry.ts ?? 0 : 0,
           },
         },
       },
     });
+  },
+
+  clearTelemetry: (deviceId) => {
+    const device = get().devices[deviceId];
+    if (device) get().updateTelemetry({ pumpOn: false, isPumpActive: false }, deviceId);
   },
 
   updateConfig: (configPartial, targetDeviceId?: string) => {
@@ -927,8 +935,19 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   setWeatherLoading: (weatherLoading) => set({ weatherLoading }),
 }));
 
+export const TELEMETRY_MAX_AGE_MS = 3 * 60 * 1000;
+
+export const hasFreshSoilTelemetry = (telemetry?: DeviceTelemetry, now = Date.now()): boolean =>
+  !!telemetry &&
+  Number.isFinite(telemetry.ts) &&
+  telemetry.ts > 0 &&
+  now - telemetry.ts < TELEMETRY_MAX_AGE_MS &&
+  Number.isFinite(telemetry.soilMoisture) &&
+  telemetry.soilMoisture >= 0 &&
+  telemetry.soilMoisture <= 100;
+
 export const computePlantHealthState = (device?: DeviceRecord): PlantHealthState => {
-  if (!device || !device.status.online) return 'unknown';
+  if (!device || !device.status.online || !hasFreshSoilTelemetry(device.telemetry)) return 'unknown';
   const { soilMoisture } = device.telemetry;
   const { moistureMin, moistureMax } = device.config.thresholds;
 

@@ -256,7 +256,7 @@ export default function AlertsScreen() {
         All calm
       </Text>
       <Text style={[styles.emptyBody, { color: colors.textMuted }]}>
-        Your plant is happy and healthy. No alerts to review.
+        No alerts to review.
       </Text>
     </Animated.View>
   );

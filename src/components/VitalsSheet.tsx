@@ -79,7 +79,7 @@ const STATUS_HEADLINES: Record<PlantHealthState, string> = {
   healthy: 'Healthy',
   thirsty: 'Needs Water',
   overwatered: 'Too Wet',
-  unknown: 'Offline',
+  unknown: 'Soil reading unavailable',
 };
 
 const STATUS_COLORS: Record<PlantHealthState, string> = {
@@ -232,7 +232,7 @@ export function VitalsSheet({
         <View style={styles.peekRow}>
           {/* Left: Moisture ring */}
           <MoistureRing
-            soilMoisture={telemetry.soilMoisture}
+            soilMoisture={health === 'unknown' ? null : telemetry.soilMoisture}
             moistureMin={config.thresholds.moistureMin}
             moistureMax={config.thresholds.moistureMax}
             size={130}

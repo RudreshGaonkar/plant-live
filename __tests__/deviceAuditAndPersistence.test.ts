@@ -163,5 +163,64 @@ describe('Device Audit Logging & Persistence Suite', () => {
       );
     });
   });
+
+  describe('3. Database Security Rules & Ownership Claim Invariants', () => {
+    const rules = require('../database.rules.json');
+
+    test('enforces strict ownership check on /devices/$deviceId core paths', () => {
+      const devRules = rules.rules.devices['$deviceId'];
+      const owner = "root.child('devices').child($deviceId).child('meta').child('ownerUid')";
+      const legacyOwner = "root.child('owners').child($deviceId)";
+      const paired = "root.child('users').child(auth.uid).child('devices').child($deviceId)";
+      const ownershipExpr =
+        `auth != null && ((${owner}.val() === auth.uid || (!${owner}.exists() && (${legacyOwner}.val() === auth.uid || (!${legacyOwner}.exists() && ${paired}.val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')`;
+
+      expect(devRules.config['.read']).toBe(ownershipExpr);
+      expect(devRules.config['.write']).toBe(ownershipExpr);
+      expect(devRules.command['.read']).toBe(ownershipExpr);
+      expect(devRules.command['.write']).toBe(ownershipExpr);
+      expect(devRules.control['.read']).toBe(ownershipExpr);
+      expect(devRules.control['.write']).toBe(ownershipExpr);
+      expect(devRules.telemetry['.read']).toBe(ownershipExpr);
+      expect(devRules.telemetry['.write']).toBe(ownershipExpr);
+      expect(devRules.status['.read']).toBe(ownershipExpr);
+      expect(devRules.status['.write']).toBe(ownershipExpr);
+      expect(devRules.alerts['.read']).toBe(ownershipExpr);
+      expect(devRules.alerts['.write']).toBe(ownershipExpr);
+    });
+
+    test('enforces atomic meta ownership claim rule', () => {
+      const metaRules = rules.rules.devices['$deviceId'].meta;
+      expect(metaRules['.write']).toBeUndefined();
+      expect(metaRules.ownerUid['.write']).toContain('!newData.exists() || newData.val() === auth.uid');
+      expect(metaRules.ownerUid['.write']).toContain("root.child('owners').child($deviceId).val() === auth.uid");
+    });
+
+    test('enforces payload validation rules on command and config/mode', () => {
+      const cmdRules = rules.rules.devices['$deviceId'].command;
+      expect(cmdRules['.validate']).toContain("newData.hasChildren(['id', 'type'])");
+      expect(cmdRules.id['.validate']).toBe('newData.isString()');
+      expect(cmdRules.type['.validate']).toContain('waterNow');
+      expect(cmdRules.type['.validate']).toContain('refilled');
+      expect(cmdRules.type['.validate']).toContain('calibrateDry');
+      expect(cmdRules.type['.validate']).toContain('calibrateWet');
+      expect(cmdRules.durationSec['.validate']).toBe('newData.isNumber() && newData.val() >= 1 && newData.val() <= 15');
+
+      const configRules = rules.rules.devices['$deviceId'].config;
+      expect(configRules.mode['.validate']).toBe("newData.val() === 'auto' || newData.val() === 'manual'");
+    });
+
+    test('enforces immutable audit log rules on /auditLogs/$deviceId', () => {
+      const auditRules = rules.rules.auditLogs['$deviceId'];
+      expect(auditRules['.write']).toBe('auth != null && !data.exists()');
+      expect(auditRules['$logId']['.write']).toBe('auth != null && !data.exists()');
+    });
+
+    test('enforces user sandboxing on /users/$uid', () => {
+      const userRules = rules.rules.users['$uid'];
+      expect(userRules['.read']).toBe('auth != null && auth.uid === $uid');
+      expect(userRules['.write']).toBe('auth != null && auth.uid === $uid');
+    });
+  });
 });
 

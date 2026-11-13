@@ -60,7 +60,7 @@ const getMoodConfig = (
       return {
         text: lastSeenMinutes !== undefined
           ? `Last seen ${lastSeenMinutes} min ago`
-          : 'Offline',
+          : 'Waiting for soil telemetry',
         bg: '#B0BEC5',
         textColor: '#37474F',
         borderColor: '#90A4AE',
@@ -79,7 +79,7 @@ export function MoodBubble({ health, lastSeen }: MoodBubbleProps) {
   const [now] = React.useState(() => Date.now());
 
   const lastSeenMinutes = lastSeen
-    ? Math.round((now - lastSeen) / 60000)
+    ? Math.max(0, Math.round((now - lastSeen) / 60000))
     : undefined;
 
   const mood = getMoodConfig(health, colors.palette, lastSeenMinutes);

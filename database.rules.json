@@ -9,32 +9,54 @@
     "owners": {
       "$deviceId": {
         ".read": "auth != null",
-        ".write": "auth != null && (!data.exists() || data.val() === auth.uid)"
+        ".write": "auth != null && (!data.exists() || data.val() === auth.uid) && (!newData.exists() || newData.val() === auth.uid)"
       }
     },
     "devices": {
       "$deviceId": {
-        ".read": "auth != null",
         "meta": {
-          ".write": "auth != null"
-        },
-        "alerts": {
-          ".write": "auth != null"
+          ".read": "auth != null",
+          "ownerUid": {
+            ".read": "auth != null",
+            ".write": "auth != null && (!data.exists() || data.val() === auth.uid) && (!newData.exists() || newData.val() === auth.uid) && (data.exists() || !root.child('owners').child($deviceId).exists() || root.child('owners').child($deviceId).val() === auth.uid)"
+          }
         },
         "config": {
-          ".write": "auth != null"
+          ".read": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')",
+          ".write": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')",
+          "mode": {
+            ".validate": "newData.val() === 'auto' || newData.val() === 'manual'"
+          }
         },
         "command": {
-          ".write": "auth != null"
+          ".read": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')",
+          ".write": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')",
+          ".validate": "newData.hasChildren(['id', 'type'])",
+          "id": {
+            ".validate": "newData.isString()"
+          },
+          "type": {
+            ".validate": "newData.val() === 'waterNow' || newData.val() === 'refilled' || newData.val() === 'calibrateDry' || newData.val() === 'calibrateWet'"
+          },
+          "durationSec": {
+            ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 15"
+          }
         },
         "control": {
-          ".write": "auth != null"
+          ".read": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')",
+          ".write": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')"
         },
         "telemetry": {
-          ".write": "auth != null"
+          ".read": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')",
+          ".write": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')"
         },
         "status": {
-          ".write": "auth != null"
+          ".read": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')",
+          ".write": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')"
+        },
+        "alerts": {
+          ".read": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')",
+          ".write": "auth != null && ((root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || (!root.child('devices').child($deviceId).child('meta').child('ownerUid').exists() && (root.child('owners').child($deviceId).val() === auth.uid || (!root.child('owners').child($deviceId).exists() && root.child('users').child(auth.uid).child('devices').child($deviceId).val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')"
         }
       }
     },

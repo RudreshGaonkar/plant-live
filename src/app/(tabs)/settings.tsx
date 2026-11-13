@@ -237,8 +237,15 @@ export default function SettingsScreen() {
     );
   };
 
-  const handleCalibrationComplete = (values: CalibrationValues) => {
-    updateCalibration(values);
+  const handleCalibrationComplete = async (values: CalibrationValues) => {
+    if (!device) return;
+    try {
+      await updateDeviceConfigInRTDB(device.id, { calibration: values });
+    } catch (error) {
+      Alert.alert('Calibration could not be saved', error instanceof Error ? error.message : 'Try again.');
+      return;
+    }
+    updateCalibration(values, device.id);
     setCalibrationModalOpen(false);
     Alert.alert(
       'Calibration Saved',
@@ -1265,6 +1272,7 @@ export default function SettingsScreen() {
             </View>
 
             <CalibrationWizard
+              deviceId={device.id}
               initialValues={config.calibration}
               onCalibrationComplete={handleCalibrationComplete}
               onSkip={() => setCalibrationModalOpen(false)}

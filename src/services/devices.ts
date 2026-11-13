@@ -12,14 +12,14 @@ import {
 } from 'firebase/database';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db, auth } from './firebase';
-import {
+import type {
   DeviceConfig,
   DeviceTelemetry,
   DeviceStatus,
   DeviceCommand,
   WaterLog,
-  useLiveDevice,
 } from '@/store/useLiveDevice';
+import { useLiveDevice } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
 
 /**

@@ -8,7 +8,7 @@ import { View } from 'react-native';
 import { Tabs, router, useSegments, Redirect } from 'expo-router';
 import { FloatingDock } from '@/components/FloatingDock';
 import { WaterNowSheet } from '@/components/WaterNowSheet';
-import { useLiveDevice } from '@/hooks/useLiveDevice';
+import { useLiveDevice, useLiveDeviceSync } from '@/hooks/useLiveDevice';
 import { useAlertEngine } from '@/hooks/useAlertEngine';
 import { useSession } from '@/store/useSession';
 
@@ -19,6 +19,7 @@ export default function TabLayout() {
   const user = useSession((s) => s.user);
   const isAuthReady = useSession((s) => s.isAuthReady);
 
+  useLiveDeviceSync();
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
   const { unreadCount } = useAlertEngine();
 

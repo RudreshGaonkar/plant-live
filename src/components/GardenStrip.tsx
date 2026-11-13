@@ -17,7 +17,7 @@ import Animated, { FadeInDown, FadeOutUp } from 'react-native-reanimated';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { router } from 'expo-router';
 import { useAppTheme } from '@/theme';
-import { DeviceRecord, PlantHealthState } from '@/store/useLiveDevice';
+import { DeviceRecord, PlantHealthState, computePlantHealthState } from '@/store/useLiveDevice';
 
 const STATUS_DOTS: Record<PlantHealthState, string> = {
   healthy: '#AEE09A',
@@ -85,13 +85,7 @@ export function GardenStrip({
         {devices.map((device) => {
           const isActive = device.id === activeDeviceId;
           const moisture = device.telemetry.soilMoisture;
-          const health: PlantHealthState = device.status.online
-            ? moisture < device.config.thresholds.moistureMin
-              ? 'thirsty'
-              : moisture > device.config.thresholds.moistureMax
-              ? 'overwatered'
-              : 'healthy'
-            : 'unknown';
+          const health = computePlantHealthState(device);
 
           return (
             <TouchableOpacity
@@ -174,7 +168,7 @@ export function GardenStrip({
                   },
                 ]}
               >
-                {moisture}%
+                {health === 'unknown' ? '—' : `${moisture}%`}
               </Text>
               {isActive && (
                 <Ionicons

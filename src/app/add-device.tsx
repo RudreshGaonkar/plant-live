@@ -35,15 +35,15 @@ import Animated, {
   FadeIn,
   FadeOut,
 } from 'react-native-reanimated';
-import { ref, set } from 'firebase/database';
+import { ref, set, update } from 'firebase/database';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db } from '@/services/firebase';
 import { useAppTheme } from '@/theme';
-import { useLiveDevice, PlantLocation, DeviceRecord } from '@/store/useLiveDevice';
+import { useLiveDevice, PlantLocation, DeviceRecord, createDefaultDeviceRecord } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
 import { LocationCard } from '@/components/LocationCard';
 import { DeviceQRScanner } from '@/components/DeviceQRScanner';
-import { CalibrationWizard, CalibrationValues } from '@/components/CalibrationWizard';
+import { DEFAULT_CALIBRATION } from '@/services/calibration';
 import { PlantScene3D } from '@/components/Plant3D/PlantScene3D';
 import { updateDeviceConfigInRTDB } from '@/services/devices';
 
@@ -87,10 +87,7 @@ export default function AddDeviceScreen() {
 
   // STEP 3 State: Sensors & Calibration
   const [hasLightSensor, setHasLightSensor] = useState<boolean>(true);
-  const [calibration, setCalibration] = useState<CalibrationValues>({
-    soilDryRaw: 1024,
-    soilWetRaw: 400,
-  });
+  const calibration = DEFAULT_CALIBRATION;
 
   // STEP 4 State: Bottle & Pump Test
   const [bottleCapacity, setBottleCapacity] = useState<string>('500');
@@ -275,7 +272,7 @@ export default function AddDeviceScreen() {
     const capacityNum = parseInt(bottleCapacity, 10) || 500;
 
     const newRecord: DeviceRecord = {
-      id: devId,
+      ...createDefaultDeviceRecord(devId),
       config: {
         name: plantName,
         plantName,
@@ -294,25 +291,44 @@ export default function AddDeviceScreen() {
         },
         pairedAt: Date.now(),
       },
-      telemetry: {
-        soilRaw: Math.round((calibration.soilDryRaw + calibration.soilWetRaw) / 2),
-        soilMoisture: Math.round((thresholds.moistureMin + thresholds.moistureMax) / 2),
-        temperature: 28,
-        humidity: 60,
-        light: hasLightSensor ? 1 : null,
-        pumpOn: false,
-        rssi: -58,
-        ts: Date.now(),
-      },
-      status: {
-        online: true,
-        lastSeen: Date.now(),
-        firmware: 'v1.0.4-esp8266',
-      },
     };
 
-    // Commit to local store & persistence
-    addDevice(newRecord);
+    // Claim ownership before writing protected configuration.
+    if (user?.uid) {
+      try {
+        const metaOwnerRef = ref(db, `devices/${devId}/meta/ownerUid`);
+        await set(metaOwnerRef, user.uid);
+
+        await updateDeviceConfigInRTDB(devId, newRecord.config);
+        await update(ref(db), {
+          [`users/${user.uid}/devices/${devId}`]: true,
+          [`owners/${devId}`]: user.uid,
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Could not claim device ownership.';
+        console.error('[AddDevice] Ownership claim or config sync failed:', message);
+        Alert.alert(
+          'Pairing Failed',
+          message || 'Could not claim device ownership. Ensure the device is available and try again.'
+        );
+        return;
+      }
+    } else {
+      // Local/simulator fallback if unauthenticated
+      try {
+        await updateDeviceConfigInRTDB(devId, newRecord.config);
+      } catch {
+        // Local-only mode
+      }
+    }
+
+    // 2. Commit to local store & persistence only after claim and sync success
+    const liveRecord = useLiveDevice.getState().devices[devId];
+    addDevice({ ...newRecord, ...(liveRecord && {
+      telemetry: liveRecord.telemetry,
+      status: liveRecord.status,
+      isConfigHydrated: liveRecord.isConfigHydrated,
+    }) });
     useLiveDevice.getState().setActiveDeviceId(devId);
     setActiveDeviceId(devId);
     if (user?.uid) {
@@ -321,17 +337,7 @@ export default function AddDeviceScreen() {
       });
     }
 
-    // Sync to RTDB
-    try {
-      await updateDeviceConfigInRTDB(devId, newRecord.config);
-      if (user?.uid) {
-        await set(ref(db, `users/${user.uid}/devices/${devId}`), true);
-        await set(ref(db, `owners/${devId}`), user.uid);
-      }
-    } catch {
-    }
-
-    Alert.alert('Plant Ready!', `${plantName} has been paired and calibrated successfully.`, [
+    Alert.alert('Plant Ready!', `${plantName} has been paired successfully.`, [
       {
         text: 'Open Dashboard',
         onPress: () => router.replace('/(tabs)/home'),
@@ -1021,17 +1027,12 @@ export default function AddDeviceScreen() {
             {/* Guided Soil Sensor Calibration Wizard */}
             <Text style={[styles.sectionHeading, { color: colors.text }]}>Soil Moisture Calibration</Text>
             <Text style={[styles.sectionSub, { color: colors.textMuted }]}>
-              Calibrates raw voltage levels for maximum accuracy across different soil types.
+              Pair the controller to enable live probe calibration in Settings.
             </Text>
 
-            <CalibrationWizard
-              initialValues={calibration}
-              onCalibrationComplete={(vals) => {
-                setCalibration(vals);
-                setStep(4);
-              }}
-              onSkip={() => setStep(4)}
-            />
+            <TouchableOpacity onPress={() => setStep(4)} style={[styles.continueBtn, { backgroundColor: colors.primary }]}>
+              <Text style={styles.continueBtnText}>Continue to reservoir setup</Text>
+            </TouchableOpacity>
           </View>
         )}
 

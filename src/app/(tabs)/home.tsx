@@ -81,7 +81,7 @@ export default function HomeScreen() {
   const currentPlantLocation = device?.config?.location || 'indoor';
   const { weather, loading: weatherLoading, isRainDelayActive } = useWeather(
     device ? currentPlantLocation : undefined,
-    device?.telemetry?.soilMoisture
+    health !== 'unknown' ? device?.telemetry.soilMoisture : undefined
   );
 
   // Shared value that tracks VitalsSheet's translateY to drive overlay fades
@@ -461,14 +461,14 @@ export default function HomeScreen() {
             color={colors.palette.critical}
           />
           <Text style={[styles.offlineText, { color: colors.palette.critical }]}>
-            Offline · Showing last data ({lastSeenMinutes}m ago)
+            {status.lastSeen ? `Offline · Last seen ${lastSeenMinutes}m ago` : 'Waiting for device connection'}
           </Text>
         </View>
       )}
 
       {/* ── Layer 2: Mood bubble (fades when sheet rises) ────────── */}
       <Animated.View style={[styles.moodBubbleContainer, overlayAnimStyle]}>
-        <MoodBubble health={health} lastSeen={status.lastSeen} />
+        <MoodBubble health={health} lastSeen={isOffline ? status.lastSeen : undefined} />
       </Animated.View>
 
       {/* ── Layer 3: Left-edge BottleRail (fades when sheet rises) ── */}

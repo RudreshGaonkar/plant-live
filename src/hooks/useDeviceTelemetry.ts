@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { ref, onValue, off } from 'firebase/database';
+import { ref, onValue } from 'firebase/database';
 import { db } from '@/services/firebase';
 import { useLiveDevice, DeviceTelemetry, createDefaultDeviceRecord } from '@/store/useLiveDevice';
 
@@ -38,7 +38,7 @@ export function useDeviceTelemetry(customDeviceId?: string): UseDeviceTelemetryR
     const unsubTelemetry = onValue(telemetryRef, (snapshot) => {
       if (snapshot.exists()) {
         const data = snapshot.val() as DeviceTelemetry;
-        useLiveDevice.getState().updateTelemetry(data);
+        useLiveDevice.getState().updateTelemetry(data, targetId);
       }
     });
 
@@ -63,12 +63,12 @@ export function useDeviceTelemetry(customDeviceId?: string): UseDeviceTelemetryR
     });
 
     return () => {
-      off(telemetryRef, 'value', unsubTelemetry);
-      off(controlRef, 'value', unsubControl);
+      unsubTelemetry();
+      unsubControl();
     };
   }, [targetId]);
 
-  const [initialTs] = useState(() => Date.now());
+  const [initialTs] = useState(0);
 
   const defaultTelemetry = useMemo<DeviceTelemetry>(() => ({
     soilRaw: 600,
@@ -104,6 +104,6 @@ export function useDeviceTelemetry(customDeviceId?: string): UseDeviceTelemetryR
     light: telemetry.light ?? null,
     rssi: telemetry.rssi ?? -60,
     ts: telemetry.ts ?? initialTs,
-    isOnline: device?.status?.online ?? true,
+    isOnline: device?.status?.online ?? false,
   };
 }

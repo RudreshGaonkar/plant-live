@@ -1,4 +1,4 @@
-import { computePlantHealthState, DeviceRecord } from '../src/store/useLiveDevice';
+import { computePlantHealthState, createDefaultDeviceRecord, DeviceRecord, useLiveDevice } from '../src/store/useLiveDevice';
 import {
   rawToMoisturePercent,
   evaluateAutoWaterDecision,
@@ -51,6 +51,40 @@ describe('Unit Tests: Plant Health State Mapping', () => {
       status: { ...baseDevice.status, online: false },
     };
     expect(computePlantHealthState(offlineDevice)).toBe('unknown');
+  });
+
+  test('never treats a default, stale, or invalid soil reading as healthy', () => {
+    const pending = { ...createDefaultDeviceRecord(), status: baseDevice.status };
+    expect(computePlantHealthState(pending)).toBe('unknown');
+    expect(computePlantHealthState({
+      ...baseDevice, telemetry: { ...baseDevice.telemetry, ts: Date.now() - 180000 },
+    })).toBe('unknown');
+    expect(computePlantHealthState({
+      ...baseDevice, telemetry: { ...baseDevice.telemetry, soilMoisture: NaN },
+    })).toBe('unknown');
+  });
+
+  test('stores fresh 0% on the publishing device and preserves its server timestamp', () => {
+    const original = useLiveDevice.getState();
+    const other = { ...baseDevice, id: 'other-device' };
+    useLiveDevice.setState({
+      devices: { [baseDevice.id]: baseDevice, [other.id]: other },
+      activeDeviceId: baseDevice.id,
+      isWateringActive: true,
+    });
+    try {
+      const ts = Date.now() - 500;
+      useLiveDevice.getState().updateTelemetry({ soilMoisture: 0, ts, pumpOn: false }, other.id);
+      const updated = useLiveDevice.getState();
+      expect(updated.devices[other.id].telemetry.ts).toBe(ts);
+      expect(computePlantHealthState(updated.devices[other.id])).toBe('thirsty');
+      expect(computePlantHealthState(updated.devices[baseDevice.id])).toBe('healthy');
+      expect(updated.isWateringActive).toBe(true);
+      updated.clearTelemetry(other.id);
+      expect(computePlantHealthState(useLiveDevice.getState().devices[other.id])).toBe('unknown');
+    } finally {
+      useLiveDevice.setState(original, true);
+    }
   });
 
   test('returns "thirsty" when soilMoisture is strictly below moistureMin', () => {

@@ -3,10 +3,11 @@
  * Guided 2-step soil moisture sensor calibration (Dry Air & Wet Water).
  * Stores raw ADC values (soilDryRaw & soilWetRaw) and computes sensor delta.
  */
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, ScrollView } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
+import { useLiveDevice } from '@/store/useLiveDevice';
 
 export interface CalibrationValues {
   soilDryRaw: number;
@@ -14,12 +15,14 @@ export interface CalibrationValues {
 }
 
 export interface CalibrationWizardProps {
+  deviceId: string;
   initialValues?: CalibrationValues;
   onCalibrationComplete: (values: CalibrationValues) => void;
   onSkip?: () => void;
 }
 
 export function CalibrationWizard({
+  deviceId,
   initialValues = { soilDryRaw: 1024, soilWetRaw: 400 },
   onCalibrationComplete,
   onSkip,
@@ -27,39 +30,51 @@ export function CalibrationWizard({
   const { colors, radii } = useAppTheme();
 
   const [activeStep, setActiveStep] = useState<1 | 2>(1);
-  const [isCapturing, setIsCapturing] = useState<boolean>(false);
-  const [dryRaw, setDryRaw] = useState<number | null>(initialValues.soilDryRaw);
-  const [wetRaw, setWetRaw] = useState<number | null>(initialValues.soilWetRaw);
+  const [captureAfter, setCaptureAfter] = useState<number | null>(null);
+  const [dryRaw, setDryRaw] = useState<number | null>(null);
+  const [wetRaw, setWetRaw] = useState<number | null>(null);
+  const isCapturing = captureAfter !== null;
 
-  const captureDry = () => {
-    setIsCapturing(true);
-    // Read ADC value from sensor
-    setTimeout(() => {
-      const sampled = Math.round(1020 + Math.random() * 4);
-      setDryRaw(sampled);
-      setIsCapturing(false);
-      setActiveStep(2);
-    }, 1000);
-  };
+  useEffect(() => {
+    if (captureAfter === null) return;
+    const unsubscribe = useLiveDevice.subscribe((state) => {
+      const telemetry = state.devices[deviceId]?.telemetry;
+      if (!telemetry || telemetry.ts <= captureAfter || telemetry.pumpOn ||
+          !Number.isInteger(telemetry.soilRaw) || telemetry.soilRaw < 0 || telemetry.soilRaw > 1023) return;
 
-  const captureWet = () => {
-    setIsCapturing(true);
-    // Read ADC value in water from sensor
-    setTimeout(() => {
-      const sampled = Math.round(380 + Math.random() * 20);
-      setWetRaw(sampled);
-      setIsCapturing(false);
-    }, 1000);
-  };
+      unsubscribe();
+      clearTimeout(timer);
+      if (activeStep === 1) {
+        setDryRaw(telemetry.soilRaw);
+        setWetRaw(null);
+        setActiveStep(2);
+      } else {
+        setWetRaw(telemetry.soilRaw);
+      }
+      setCaptureAfter(null);
+    });
+
+    const timer = setTimeout(() => {
+      unsubscribe();
+      setCaptureAfter(null);
+      Alert.alert('Soil reading unavailable', 'Wait for the controller to reconnect and try again.');
+    }, Math.max(0, captureAfter + 25000 - Date.now()));
+    return () => {
+      unsubscribe();
+      clearTimeout(timer);
+    };
+  }, [activeStep, captureAfter, deviceId]);
 
   const handleFinish = () => {
-    onCalibrationComplete({
-      soilDryRaw: dryRaw ?? 1024,
-      soilWetRaw: wetRaw ?? 400,
-    });
+    if (dryRaw === null || wetRaw === null) return;
+    if (dryRaw === wetRaw) {
+      Alert.alert('Calibration needs two distinct readings', 'Check the probe and capture both readings again.');
+      return;
+    }
+    onCalibrationComplete({ soilDryRaw: dryRaw, soilWetRaw: wetRaw });
   };
 
-  const dynamicRange = (dryRaw ?? 1024) - (wetRaw ?? 400);
+  const dynamicRange = Math.abs((dryRaw ?? 0) - (wetRaw ?? 0));
 
   return (
     <ScrollView
@@ -134,7 +149,7 @@ export function CalibrationWizard({
             <View style={[styles.valueBox, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
               <Text style={[styles.valueLabel, { color: colors.textMuted }]}>Dry Raw Reading (ADC)</Text>
               <Text style={[styles.valueText, { color: colors.palette.forest }]}>
-                {dryRaw ?? '—'}
+                {dryRaw ?? initialValues.soilDryRaw}
               </Text>
             </View>
 
@@ -143,7 +158,7 @@ export function CalibrationWizard({
                 styles.actionButton,
                 { backgroundColor: colors.primary, borderRadius: radii.xl },
               ]}
-              onPress={captureDry}
+              onPress={() => setCaptureAfter(Date.now())}
               disabled={isCapturing}
             >
               {isCapturing ? (
@@ -172,7 +187,7 @@ export function CalibrationWizard({
             <View style={[styles.valueBox, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
               <Text style={[styles.valueLabel, { color: colors.textMuted }]}>Wet Raw Reading (ADC)</Text>
               <Text style={[styles.valueText, { color: colors.palette.forest }]}>
-                {wetRaw ?? '—'}
+                {wetRaw ?? initialValues.soilWetRaw}
               </Text>
             </View>
 
@@ -181,7 +196,7 @@ export function CalibrationWizard({
                 styles.actionButton,
                 { backgroundColor: colors.primary, borderRadius: radii.xl },
               ]}
-              onPress={captureWet}
+              onPress={() => setCaptureAfter(Date.now())}
               disabled={isCapturing}
             >
               {isCapturing ? (
@@ -197,7 +212,7 @@ export function CalibrationWizard({
         )}
 
         {/* Dynamic Range Summary Indicator */}
-        {dryRaw && wetRaw && (
+        {dryRaw !== null && wetRaw !== null && (
           <View style={[styles.summaryCard, { backgroundColor: colors.palette.lime, borderRadius: radii.md }]}>
             <View style={styles.summaryRow}>
               <Ionicons name="checkmark-circle" size={18} color={colors.palette.forest} />
@@ -216,7 +231,7 @@ export function CalibrationWizard({
           {activeStep === 2 && (
             <TouchableOpacity
               style={[styles.secondaryBtn, { borderColor: colors.border, borderRadius: radii.xl }]}
-              onPress={() => setActiveStep(1)}
+              onPress={() => { setCaptureAfter(null); setActiveStep(1); }}
             >
               <Ionicons name="arrow-back" size={14} color={colors.palette.forest} style={{ marginRight: 4 }} />
               <Text style={[styles.secondaryBtnText, { color: colors.palette.forest }]}>Back</Text>
@@ -229,7 +244,7 @@ export function CalibrationWizard({
             </TouchableOpacity>
           )}
 
-          {activeStep === 2 && wetRaw && (
+          {activeStep === 2 && wetRaw !== null && !isCapturing && (
             <TouchableOpacity
               style={[styles.saveBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.xl }]}
               onPress={handleFinish}

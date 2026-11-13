@@ -25,7 +25,7 @@ import { useAppTheme } from '@/theme';
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 
 interface MoistureRingProps {
-  soilMoisture: number; // 0–100
+  soilMoisture: number | null; // 0–100
   moistureMin: number;
   moistureMax: number;
   size?: number;
@@ -55,7 +55,7 @@ export function MoistureRing({
   // Animated fill progress (0 to 100)
   const progress = useSharedValue(0);
   useEffect(() => {
-    progress.value = withTiming(Math.min(100, Math.max(0, soilMoisture)), {
+    progress.value = withTiming(Math.min(100, Math.max(0, soilMoisture ?? 0)), {
       duration: 900,
       easing: Easing.out(Easing.cubic),
     });
@@ -70,8 +70,8 @@ export function MoistureRing({
   });
 
   // Determine fill color based on thresholds
-  const isBelowMin = soilMoisture < moistureMin;
-  const isAboveMax = soilMoisture > moistureMax;
+  const isBelowMin = soilMoisture !== null && soilMoisture < moistureMin;
+  const isAboveMax = soilMoisture !== null && soilMoisture > moistureMax;
   const fillColor = isBelowMin
     ? colors.palette.warningBorder
     : isAboveMax
@@ -155,7 +155,7 @@ export function MoistureRing({
       {/* Center value */}
       <View style={[styles.centerLabel, { width: size, height: size }]}>
         <Text style={[styles.mainValue, { color: colors.palette.ink }]}>
-          {soilMoisture}
+          {soilMoisture ?? '—'}
         </Text>
         <Text style={[styles.unit, { color: colors.palette.sage }]}>%</Text>
         <Text style={[styles.subLabel, { color: colors.palette.sage }]}>

@@ -1,66 +1,43 @@
-import { useEffect } from 'react';
+import { useEffect, useReducer } from 'react';
 import {
   useLiveDevice,
   computePlantHealthState,
   DeviceRecord,
-  createDefaultDeviceRecord,
-} from '@/hooks/useLiveDevice';
-import {
-  listenToDeviceTelemetry,
-  listenToDeviceStatus,
-  listenToWaterLogs,
-} from '@/services/devices';
+  TELEMETRY_MAX_AGE_MS,
+} from '@/store/useLiveDevice';
+import { listenToWaterLogs } from '@/services/devices';
 
 export function usePlantState(device?: DeviceRecord) {
   const activeDeviceId = useLiveDevice((s) => s.activeDeviceId);
   const storeActiveDevice = useLiveDevice((s) => s.devices[s.activeDeviceId]);
   const active = device || storeActiveDevice;
-  const health = computePlantHealthState(active);
-
-  const isOnline = active?.status?.online ?? false;
   const isWatering = useLiveDevice((s) => s.isWateringActive);
   const secondsLeft = useLiveDevice((s) => s.wateringSecondsLeft);
+  const [, refreshHealth] = useReducer((revision: number) => revision + 1, 0);
+  const sampleTime = active?.telemetry.ts;
 
-  // Persistent live Firebase RTDB updates
   useEffect(() => {
-    const targetId = activeDeviceId || 'leaf-node-01';
+    if (!sampleTime) return;
+    const remainingMs = sampleTime + TELEMETRY_MAX_AGE_MS - Date.now();
+    if (remainingMs <= 0) return;
+    const timer = setTimeout(refreshHealth, remainingMs);
+    return () => clearTimeout(timer);
+  }, [sampleTime]);
 
-    const unsubTelemetry = listenToDeviceTelemetry(targetId, (telemetry) => {
-      useLiveDevice.getState().updateTelemetry(telemetry);
-    });
-
-    const unsubStatus = listenToDeviceStatus(targetId, (status) => {
-      useLiveDevice.setState((prev) => {
-        const cur = prev.devices[targetId] || createDefaultDeviceRecord(targetId);
-        return {
-          devices: {
-            ...prev.devices,
-            [targetId]: {
-              ...cur,
-              status: { ...cur.status, ...status },
-            },
-          },
-        };
-      });
-    });
-
-    const unsubLogs = listenToWaterLogs(targetId, (logs) => {
-      if (logs && logs.length > 0) {
-        useLiveDevice.setState({ waterLogs: logs });
+  useEffect(() => {
+    useLiveDevice.setState({ waterLogs: [] });
+    if (!activeDeviceId) return;
+    return listenToWaterLogs(activeDeviceId, (waterLogs) => {
+      if (useLiveDevice.getState().activeDeviceId === activeDeviceId) {
+        useLiveDevice.setState({ waterLogs });
       }
     });
-
-    return () => {
-      unsubTelemetry();
-      unsubStatus();
-      unsubLogs();
-    };
   }, [activeDeviceId]);
 
   return {
     device: active,
-    health,
-    isOnline,
+    health: computePlantHealthState(active),
+    isOnline: active?.status.online ?? false,
     isWatering,
     secondsLeft,
   };
