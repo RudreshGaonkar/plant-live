@@ -71,7 +71,7 @@ export const useLiveDevice: typeof useLiveDeviceStore = Object.assign(
       const unsubTelemetry = onValue(telemetryRef, (snapshot) => {
         if (snapshot.exists()) {
           const telemetry = snapshot.val() as DeviceTelemetry;
-          useLiveDeviceStore.getState().updateTelemetry(telemetry);
+          useLiveDeviceStore.getState().updateTelemetry(telemetry, targetId);
         }
       });
 
@@ -97,15 +97,7 @@ export const useLiveDevice: typeof useLiveDeviceStore = Object.assign(
       const unsubConfig = onValue(configRef, (snapshot) => {
         if (snapshot.exists()) {
           const config = snapshot.val() as DeviceConfig;
-          useLiveDeviceStore.setState((prev) => {
-            const cur = prev.devices[targetId] || createDefaultDeviceRecord(targetId);
-            return {
-              devices: {
-                ...prev.devices,
-                [targetId]: { ...cur, config: { ...cur.config, ...config } },
-              },
-            };
-          });
+          useLiveDeviceStore.getState().updateConfig(config, targetId);
         }
       });
 

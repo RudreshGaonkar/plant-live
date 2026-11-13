@@ -44,6 +44,12 @@
         {
           "locationAlwaysAndWhenInUsePermission": "Allow LeafLink to use your location for accurate outdoor weather."
         }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow LeafLink to access your photos to set your profile avatar."
+        }
       ]
     ],
     "experiments": {

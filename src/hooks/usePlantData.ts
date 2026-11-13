@@ -27,6 +27,7 @@ export interface UsePlantDataReturn {
   isWatering: boolean;
   isPumpActive: boolean;
   activeDeviceId: string;
+  isConfigHydrated: boolean;
 }
 
 /**
@@ -52,7 +53,7 @@ export function usePlantData(customDeviceId?: string): UsePlantDataReturn {
     const telemetryRef = ref(db, `devices/${targetId}/telemetry`);
     const unsubTelemetry = onValue(telemetryRef, (snapshot) => {
       if (snapshot.exists()) {
-        useLiveDevice.getState().updateTelemetry(snapshot.val() as DeviceTelemetry);
+        useLiveDevice.getState().updateTelemetry(snapshot.val() as DeviceTelemetry, targetId);
       }
     });
 
@@ -60,7 +61,7 @@ export function usePlantData(customDeviceId?: string): UsePlantDataReturn {
     const configRef = ref(db, `devices/${targetId}/config`);
     const unsubConfig = onValue(configRef, (snapshot) => {
       if (snapshot.exists()) {
-        useLiveDevice.getState().updateConfig(snapshot.val() as DeviceConfig);
+        useLiveDevice.getState().updateConfig(snapshot.val() as DeviceConfig, targetId);
       }
     });
 
@@ -152,6 +153,8 @@ export function usePlantData(customDeviceId?: string): UsePlantDataReturn {
     [storeDevice, targetId]
   );
 
+  const isConfigHydrated = Boolean(storeDevice?.isConfigHydrated);
+
   const isPumpActive = Boolean(
     device.telemetry.isPumpActive ||
     device.telemetry.pumpOn ||
@@ -174,5 +177,6 @@ export function usePlantData(customDeviceId?: string): UsePlantDataReturn {
     isWatering: isWateringActive,
     isPumpActive,
     activeDeviceId: targetId,
+    isConfigHydrated,
   };
 }

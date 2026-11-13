@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { ref, set as fbSet } from 'firebase/database';
+import { db } from '@/services/firebase';
 
 export type PlantLocation = 'balcony' | 'terrace' | 'indoor';
 export type DeviceMode = 'auto' | 'manual';
@@ -31,6 +33,8 @@ export interface DeviceConfig {
     flowMlPerSec: number;
     remainingMl: number;
   };
+  bottleCapacityMl?: number;
+  remainingMl?: number;
   pairedAt: number;
 }
 
@@ -94,6 +98,7 @@ export interface DeviceRecord {
     durationSec?: number;
     [key: string]: any;
   };
+  isConfigHydrated?: boolean;
 }
 
 export interface WeatherData {
@@ -123,12 +128,12 @@ export interface LiveDeviceStore {
   setActiveDeviceId: (id: string) => void;
   triggerWaterNow: (durationSec?: number) => void;
   toggleMode: () => void;
-  refillBottle: () => void;
+  refillBottle: (deviceId?: string) => void;
   updateLocation: (location: PlantLocation) => void;
   updateThresholds: (thresholds: Partial<DeviceConfig['thresholds']>) => void;
   updateSensors: (sensors: Partial<DeviceConfig['sensors']>) => void;
-  updateTelemetry: (telemetry: Partial<DeviceTelemetry>) => void;
-  updateConfig: (config: Partial<DeviceConfig>) => void;
+  updateTelemetry: (telemetry: Partial<DeviceTelemetry>, targetDeviceId?: string) => void;
+  updateConfig: (config: Partial<DeviceConfig>, targetDeviceId?: string) => void;
   updateCalibration: (calibration: DeviceConfig['calibration']) => void;
   removeDevice: (id: string) => void;
   addDevice: (device: DeviceRecord) => void;
@@ -186,6 +191,7 @@ export const mockDevice: DeviceRecord = {
 
 export const createDefaultDeviceRecord = (id: string = 'leaf-node-01'): DeviceRecord => ({
   id,
+  isConfigHydrated: false,
   config: {
     name: 'LeafLink Node',
     plantName: 'Monstera Deliciosa',
@@ -208,10 +214,12 @@ export const createDefaultDeviceRecord = (id: string = 'leaf-node-01'): DeviceRe
       soilWetRaw: 400,
     },
     bottle: {
-      capacityMl: 500,
+      capacityMl: 0,
       flowMlPerSec: 15,
-      remainingMl: 500,
+      remainingMl: 0,
     },
+    bottleCapacityMl: 0,
+    remainingMl: 0,
     pairedAt: Date.now(),
   },
   telemetry: {
@@ -295,11 +303,9 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
         clearInterval(interval);
         
         const stateNow = get();
-        const dev = stateNow.devices[activeDeviceId];
-        const newRemaining = Math.max(
-          0,
-          dev.config.bottle.remainingMl - dev.config.bottle.flowMlPerSec * durationSec
-        );
+        const dev = stateNow.devices[targetId];
+        if (!dev) return;
+
         const newMoisture = Math.min(100, dev.telemetry.soilMoisture + 15);
 
         const newLog: WaterLog = {
@@ -318,18 +324,12 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
           waterLogs: [newLog, ...stateNow.waterLogs],
           devices: {
             ...stateNow.devices,
-            [activeDeviceId]: {
+            [targetId]: {
               ...dev,
-              config: {
-                ...dev.config,
-                bottle: {
-                  ...dev.config.bottle,
-                  remainingMl: newRemaining,
-                },
-              },
               telemetry: {
                 ...dev.telemetry,
                 pumpOn: false,
+                isPumpActive: false,
                 soilMoisture: newMoisture,
                 ts: Date.now(),
               },
@@ -372,25 +372,56 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     });
   },
 
-  refillBottle: () => {
+  refillBottle: (deviceId?: string) => {
     const { activeDeviceId, devices } = get();
-    const active = devices[activeDeviceId];
-    if (!active) return;
+    const targetId = deviceId || activeDeviceId || 'leaf-node-01';
+    const active = devices[targetId] || createDefaultDeviceRecord(targetId);
+    const validatedCapacity = Math.max(
+      250,
+      active.config.bottle?.capacityMl ||
+      (active.config as any).bottleCapacityMl ||
+      1000
+    );
+
+    // 1. Optimistic local state update
     set({
       devices: {
         ...devices,
-        [activeDeviceId]: {
+        [targetId]: {
           ...active,
           config: {
             ...active.config,
+            bottleCapacityMl: validatedCapacity,
+            remainingMl: validatedCapacity,
             bottle: {
               ...active.config.bottle,
-              remainingMl: active.config.bottle.capacityMl,
+              capacityMl: validatedCapacity,
+              remainingMl: validatedCapacity,
             },
           },
         },
       },
     });
+
+    // 2. Dispatch atomic refilled command payload to /devices/{id}/command
+    try {
+      const uniqueId = `cmd-${Date.now()}`;
+      const commandRef = ref(db, `devices/${targetId}/command`);
+      fbSet(commandRef, {
+        id: uniqueId,
+        type: 'refilled',
+        capacityMl: validatedCapacity,
+        status: 'pending',
+        requestedAt: Date.now(),
+        ack: {
+          id: `ack-${Date.now()}`,
+          status: 'received',
+          ts: Date.now(),
+        },
+      }).catch((e) => console.warn('[refillBottle] Failed to send refilled command:', e));
+    } catch (err) {
+      console.warn('[refillBottle] Error updating RTDB on refill:', err);
+    }
   },
 
   updateLocation: (location: PlantLocation) => {
@@ -481,14 +512,13 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     });
   },
 
-  updateTelemetry: (telemetry) => {
+  updateTelemetry: (telemetry, targetDeviceId?: string) => {
     const { activeDeviceId, devices } = get();
-    const targetId = activeDeviceId || 'leaf-node-01';
+    const targetId = targetDeviceId || activeDeviceId || 'leaf-node-01';
     const active = devices[targetId] || createDefaultDeviceRecord(targetId);
     const isPump = telemetry.isPumpActive ?? telemetry.pumpOn ?? active.telemetry.isPumpActive ?? false;
 
     set({
-      activeDeviceId: targetId,
       devices: {
         ...devices,
         [targetId]: {
@@ -505,31 +535,61 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     });
   },
 
-  updateConfig: (configPartial) => {
+  updateConfig: (configPartial, targetDeviceId?: string) => {
     const { activeDeviceId, devices } = get();
-    const targetId = activeDeviceId || 'leaf-node-01';
+    const targetId = targetDeviceId || activeDeviceId || 'leaf-node-01';
     const active = devices[targetId] || createDefaultDeviceRecord(targetId);
+
+    const rawBottle = (configPartial as any).bottle || {};
+    const currentBottle = active.config.bottle || { capacityMl: 0, flowMlPerSec: 15, remainingMl: 0 };
+
+    // Standardize nested bottle.remainingMl and bottle.capacityMl as single source of truth
+    const resolvedCapacity =
+      rawBottle.capacityMl ??
+      (configPartial as any).bottleCapacityMl ??
+      (currentBottle.capacityMl > 0 ? currentBottle.capacityMl : 1000);
+
+    let resolvedRemaining: number = currentBottle.remainingMl;
+    if (typeof rawBottle.remainingMl === 'number') {
+      resolvedRemaining = rawBottle.remainingMl;
+    } else if (typeof (configPartial as any).remainingMl === 'number') {
+      resolvedRemaining = (configPartial as any).remainingMl;
+    } else if (typeof active.telemetry.waterLevel === 'number' && active.telemetry.waterLevel > 0) {
+      resolvedRemaining = Math.round((active.telemetry.waterLevel * resolvedCapacity) / 100);
+    } else if (!active.isConfigHydrated && currentBottle.capacityMl === 0) {
+      // First snapshot arrival with no prior hydration: initialize remaining to capacity
+      resolvedRemaining = resolvedCapacity;
+    }
+
     set({
-      activeDeviceId: targetId,
       devices: {
         ...devices,
         [targetId]: {
           ...active,
+          isConfigHydrated: true,
           config: {
             ...active.config,
             ...configPartial,
+            bottleCapacityMl: resolvedCapacity,
+            remainingMl: resolvedRemaining,
+            bottle: {
+              ...currentBottle,
+              ...rawBottle,
+              capacityMl: resolvedCapacity,
+              remainingMl: resolvedRemaining,
+              flowMlPerSec: rawBottle.flowMlPerSec ?? currentBottle.flowMlPerSec ?? 15,
+            },
           },
         },
       },
     });
   },
 
-  updateCalibration: (calibration) => {
+  updateCalibration: (calibration, targetDeviceId?: string) => {
     const { activeDeviceId, devices } = get();
-    const targetId = activeDeviceId || 'leaf-node-01';
+    const targetId = targetDeviceId || activeDeviceId || 'leaf-node-01';
     const active = devices[targetId] || createDefaultDeviceRecord(targetId);
     set({
-      activeDeviceId: targetId,
       devices: {
         ...devices,
         [targetId]: {

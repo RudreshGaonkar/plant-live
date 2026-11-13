@@ -15,10 +15,8 @@ import * as Haptics from 'expo-haptics';
 import { useLiveDevice, DeviceCommandAckStatus } from '@/store/useLiveDevice';
 import {
   sendDeviceCommand,
-  sendDeviceControl,
   listenToDeviceCommand,
   appendWaterLogInRTDB,
-  updateDeviceConfigInRTDB,
 } from '@/services/devices';
 
 export type CommandLifecycleStage =
@@ -153,15 +151,7 @@ export function useCommand(): UseCommandReturn {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => null);
 
       try {
-        // 2. Dispatch manual pump control command to /devices/{deviceId}/control (Test Mode / manual override)
-        await sendDeviceControl(deviceId, {
-          pumpState: true,
-          manualOverride: true,
-          timestamp: Date.now(),
-          durationSec: clampedDuration,
-        });
-
-        // 3. Dispatch command node for legacy ACK tracking
+        // Dispatch ONLY ONE command write with unique command.id to /devices/{deviceId}/command
         const cmdId = await sendDeviceCommand(deviceId, {
           type: 'waterNow',
           durationSec: clampedDuration,
@@ -175,20 +165,6 @@ export function useCommand(): UseCommandReturn {
             setErrorMessage("Device didn't respond within 15 seconds. Check Wi-Fi connection.");
           }
         }, 15000);
-
-        // Deduct water volume and record log
-        if (device) {
-          const flowRate = device.config.bottle.flowMlPerSec || 15;
-          const deducted = flowRate * clampedDuration;
-          const newRemaining = Math.max(0, device.config.bottle.remainingMl - deducted);
-
-          updateDeviceConfigInRTDB(deviceId, {
-            bottle: {
-              ...device.config.bottle,
-              remainingMl: newRemaining,
-            },
-          }).catch(() => null);
-        }
 
         // Append log to RTDB
         appendWaterLogInRTDB(deviceId, {
@@ -207,7 +183,7 @@ export function useCommand(): UseCommandReturn {
         return false;
       }
     },
-    [device, deviceId, stage]
+    [deviceId, stage]
   );
 
   // Execute Water Now with safety checks (manual watering explicitly bypasses soil moisture checks)

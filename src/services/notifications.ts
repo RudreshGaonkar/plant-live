@@ -120,6 +120,7 @@ export const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Routine to delete alert documents older than 7 days from Firebase RTDB upon fetching.
+ * Critical: Do NOT auto-delete active, unresolved alerts regardless of age unless manually resolved by the user.
  */
 export async function cleanupOldUserAlertsFromRTDB(uid: string) {
   try {
@@ -132,6 +133,10 @@ export async function cleanupOldUserAlertsFromRTDB(uid: string) {
           const data = snapshot.val();
           for (const key of Object.keys(data)) {
             const item = data[key];
+            const isResolved =
+              item.read || item.status === 'resolved' || item.status === 'RESOLVED' || item.status === 'read';
+            // Only auto-delete resolved alerts older than 7 days; never auto-delete active alerts
+            if (!isResolved) continue;
             const itemTs = item.createdAt || item.timestamp || item.ts;
             if (typeof itemTs === 'number' && itemTs < cutoff) {
               await remove(ref(db, `alerts/${uid}/${key}`));
@@ -148,6 +153,7 @@ export async function cleanupOldUserAlertsFromRTDB(uid: string) {
 
 /**
  * Attaches a realtime listener to `alerts/{uid}` with 7-day retention enforcement.
+ * Active unresolved alerts are preserved regardless of age.
  */
 export function listenToUserAlerts(
   uid: string,
@@ -160,7 +166,6 @@ export function listenToUserAlerts(
   const unsubscribe = onValue(alertsRef, (snapshot) => {
     if (snapshot.exists()) {
       const data = snapshot.val();
-      const cutoff = Date.now() - SEVEN_DAYS_MS;
       const list: CloudAlertRecord[] = Object.keys(data)
         .map((key) => {
           const item = data[key];
@@ -173,8 +178,12 @@ export function listenToUserAlerts(
             timestamp: item.timestamp || tsVal,
           };
         })
-        // Enforce 7-day retention filter: exclude any alert older than 7 days
-        .filter((item) => (item.createdAt || item.ts || item.timestamp || 0) >= cutoff);
+        // Enforce 7-day retention filter: guard against undefined timestamps and do NOT auto-delete active unresolved alerts
+        .filter((item) => {
+          const isResolved = item.read || item.status === 'resolved' || item.status === 'read';
+          if (!isResolved) return true;
+          return Boolean(item.createdAt && (Date.now() - item.createdAt <= SEVEN_DAYS_MS));
+        });
 
       // Sort newest first
       list.sort((a, b) => (b.createdAt || b.ts || b.timestamp || 0) - (a.createdAt || a.ts || a.timestamp || 0));
@@ -221,8 +230,13 @@ export async function writeAlertToRTDB(
   try {
     const alertsRef = ref(db, `alerts/${uid}`);
     const newRef = push(alertsRef);
+    const now = Date.now();
+    const createdAt = alert.createdAt || alert.ts || alert.timestamp || now;
     await set(newRef, {
       ...alert,
+      createdAt,
+      ts: createdAt,
+      timestamp: createdAt,
       id: newRef.key,
     });
     return newRef.key;

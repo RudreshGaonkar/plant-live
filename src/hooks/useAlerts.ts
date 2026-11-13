@@ -1,6 +1,11 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useLiveDevice } from '@/store/useLiveDevice';
-import { listenToDeviceAlerts, DeviceAlertRecord } from '@/services/devices';
+import {
+  listenToDeviceAlerts,
+  saveDeviceAlertToRTDB,
+  updateDeviceAlertInRTDB,
+  DeviceAlertRecord,
+} from '@/services/devices';
 
 export interface UseAlertsReturn {
   alerts: DeviceAlertRecord[];
@@ -15,20 +20,24 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * useAlerts
  * Real-time listener hook for `/devices/{deviceId}/alerts`.
- * Enforces 7-day retention filtering and cleans up event listeners on unmount.
+ * Merges server alerts with local real-time alerts without wiping on RTDB stream updates.
+ * Immediately saves newly generated alerts to Firebase RTDB and protects active alerts from 7-day pruning.
  */
 export function useAlerts(customDeviceId?: string): UseAlertsReturn {
   const activeDeviceId = useLiveDevice((s) => s.activeDeviceId);
   const targetId = customDeviceId || activeDeviceId || 'leaf-node-01';
   const device = useLiveDevice((s) => s.devices[targetId]);
 
-  const [deviceAlerts, setDeviceAlerts] = useState<DeviceAlertRecord[]>([]);
+  const [serverAlerts, setServerAlerts] = useState<DeviceAlertRecord[]>([]);
+  const [localAlerts, setLocalAlerts] = useState<DeviceAlertRecord[]>([]);
+  const savedAlertIdsRef = useRef<Set<string>>(new Set());
 
+  // RTDB listener: do NOT wipe local active alerts when Firebase RTDB listener updates
   useEffect(() => {
     if (!targetId) return;
 
     const unsubscribe = listenToDeviceAlerts(targetId, (liveAlerts) => {
-      setDeviceAlerts(liveAlerts);
+      setServerAlerts(liveAlerts);
     });
 
     return () => {
@@ -36,47 +45,97 @@ export function useAlerts(customDeviceId?: string): UseAlertsReturn {
     };
   }, [targetId]);
 
-  const [mountTime, setMountTime] = useState(() => Date.now());
+  // Telemetry heartbeat evaluation: do not clear active alerts unless condition resolves
   useEffect(() => {
-    const timer = setInterval(() => setMountTime(Date.now()), 60000);
+    if (!device) return;
+
+    const dryAlertId = `live-dry-${targetId}`;
+    const isDry = device.telemetry.soilMoisture < device.config.thresholds.moistureMin;
+
+    if (isDry) {
+      setLocalAlerts((prev) => {
+        const existing = prev.find((a) => a.id === dryAlertId);
+        if (existing && existing.status === 'active') {
+          return prev; // Retain active alert without resetting createdAt
+        }
+
+        const now = Date.now();
+        const liveDryAlert: DeviceAlertRecord = {
+          id: dryAlertId,
+          type: 'warning',
+          title: 'Soil Dry - Needs Water',
+          message: `${device.config.plantName || 'Plant'} soil moisture is ${device.telemetry.soilMoisture}%, below minimum ${device.config.thresholds.moistureMin}%.`,
+          status: 'active',
+          createdAt: existing?.createdAt || now,
+          timestamp: existing?.createdAt || now,
+          ts: existing?.createdAt || now,
+        };
+
+        // Immediately save newly generated alert to Firebase RTDB at /devices/{deviceId}/alerts/{alertId}
+        if (!savedAlertIdsRef.current.has(dryAlertId)) {
+          savedAlertIdsRef.current.add(dryAlertId);
+          saveDeviceAlertToRTDB(targetId, liveDryAlert);
+        }
+
+        return [liveDryAlert, ...prev.filter((a) => a.id !== dryAlertId)];
+      });
+    } else {
+      // Condition resolved: soil moisture returned to normal range
+      setLocalAlerts((prev) => {
+        const existing = prev.find((a) => a.id === dryAlertId);
+        if (existing && existing.status === 'active') {
+          savedAlertIdsRef.current.delete(dryAlertId);
+          updateDeviceAlertInRTDB(targetId, dryAlertId, { status: 'resolved' });
+          return prev.map((a) => (a.id === dryAlertId ? { ...a, status: 'resolved' } : a));
+        }
+        return prev;
+      });
+    }
+  }, [device, targetId]);
+
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(Date.now()), 60000);
     return () => clearInterval(timer);
   }, []);
 
+  // Clean merge strategy: Merge incoming server alerts with locally generated real-time alerts using id as unique key
   const retainedAlerts = useMemo(() => {
-    const cutoff = mountTime - SEVEN_DAYS_MS;
-    const list = deviceAlerts.filter((a) => {
-      const ts = a.createdAt || a.timestamp || a.ts || 0;
-      return ts >= cutoff;
-    });
+    const combined = [...serverAlerts, ...localAlerts];
+    const alertMap = new Map<string, DeviceAlertRecord>();
 
-    // Actively evaluate live threshold violation: soilMoisture < config.thresholds.moistureMin
-    if (device && device.telemetry.soilMoisture < device.config.thresholds.moistureMin) {
-      const liveDryAlert: DeviceAlertRecord = {
-        id: `live-dry-${targetId}`,
-        type: 'warning',
-        title: 'Soil Dry - Needs Water',
-        message: `${device.config.plantName || 'Plant'} soil moisture is ${device.telemetry.soilMoisture}%, below minimum ${device.config.thresholds.moistureMin}%.`,
-        status: 'active',
-        createdAt: mountTime,
-        timestamp: mountTime,
-        ts: mountTime,
-      };
-      if (!list.some((a) => a.id === liveDryAlert.id)) {
-        list.unshift(liveDryAlert);
+    for (const alert of combined) {
+      if (!alertMap.has(alert.id)) {
+        alertMap.set(alert.id, alert);
+      } else {
+        const existing = alertMap.get(alert.id)!;
+        alertMap.set(alert.id, {
+          ...existing,
+          ...alert,
+          createdAt: existing.createdAt || alert.createdAt,
+          status: existing.status === 'resolved' || alert.status === 'resolved' ? 'resolved' : alert.status,
+        });
       }
     }
 
-    list.sort((a, b) => ((b.createdAt || b.timestamp || b.ts || 0) - (a.createdAt || a.timestamp || a.ts || 0)));
-    return list;
-  }, [deviceAlerts, device, targetId, mountTime]);
+    return Array.from(alertMap.values())
+      .filter((alert) => {
+        const isResolved = alert.status === 'resolved' || alert.status === 'read';
+        // Do NOT auto-delete active, unresolved alerts regardless of age unless manually resolved by the user
+        if (!isResolved) return true;
+        // Guard against undefined timestamps: alert.createdAt && (currentTime - alert.createdAt <= 7 * 24 * 60 * 60 * 1000)
+        return Boolean(alert.createdAt && currentTime - alert.createdAt <= SEVEN_DAYS_MS);
+      })
+      .sort((a, b) => (b.createdAt || b.timestamp || b.ts || 0) - (a.createdAt || a.timestamp || a.ts || 0));
+  }, [serverAlerts, localAlerts, currentTime]);
 
   const unreadAlerts = useMemo(
-    () => retainedAlerts.filter((a) => a.status === 'active'),
+    () => retainedAlerts.filter((a) => a.status === 'active' || a.status === 'unread'),
     [retainedAlerts]
   );
 
   const criticalAlerts = useMemo(
-    () => retainedAlerts.filter((a) => a.type === 'critical'),
+    () => retainedAlerts.filter((a) => a.type === 'critical' || a.severity === 'critical'),
     [retainedAlerts]
   );
 
@@ -88,3 +147,4 @@ export function useAlerts(customDeviceId?: string): UseAlertsReturn {
     criticalCount: criticalAlerts.length,
   };
 }
+

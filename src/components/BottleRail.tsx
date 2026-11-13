@@ -34,6 +34,7 @@ export interface BottleRailProps {
   remainingMl: number;
   capacityMl: number;
   flowMlPerSec?: number;
+  isLoading?: boolean;
   onRefill: () => void;
 }
 
@@ -98,17 +99,19 @@ export function BottleRail({
   remainingMl,
   capacityMl,
   flowMlPerSec = 15,
+  isLoading = false,
   onRefill,
 }: BottleRailProps) {
   const { colors, radii } = useAppTheme();
   const [popoverOpen, setPopoverOpen] = useState(false);
 
-  const fillRatio = Math.max(0, Math.min(1, capacityMl > 0 ? remainingMl / capacityMl : 0));
+  const isPending = Boolean(isLoading || capacityMl <= 0);
+  const fillRatio = isPending ? 0 : Math.max(0, Math.min(1, capacityMl > 0 ? remainingMl / capacityMl : 0));
   const fillPercent = Math.round(fillRatio * 100);
-  const levelState = getWaterLevelState(fillPercent);
+  const levelState = isPending ? 'normal' : getWaterLevelState(fillPercent);
   const stateConfig = STATE_COLORS[levelState];
 
-  const estimatedWaterings = Math.floor(remainingMl / (flowMlPerSec * 5)); // 5s default run
+  const estimatedWaterings = isPending ? '--' : String(Math.floor(remainingMl / (flowMlPerSec * 5))); // 5s default run
 
   const RAIL_HEIGHT = 180;
   const RAIL_WIDTH = 44;
@@ -244,7 +247,7 @@ export function BottleRail({
           ]}
         >
           <Ionicons
-            name={stateConfig.icon}
+            name={isPending ? 'water-outline' : stateConfig.icon}
             size={11}
             color={stateConfig.accent}
           />
@@ -256,7 +259,7 @@ export function BottleRail({
               },
             ]}
           >
-            {fillPercent}%
+            {isPending ? '--%' : `${fillPercent}%`}
           </Text>
         </View>
       </TouchableOpacity>

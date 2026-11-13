@@ -1,5 +1,5 @@
 import { ref, onValue, set, update, push, off, remove, query, limitToLast } from 'firebase/database';
-import { db } from './firebase';
+import { db, auth } from './firebase';
 import {
   DeviceConfig,
   DeviceTelemetry,
@@ -240,12 +240,96 @@ export interface DeviceAlertRecord {
   createdAt: number;
   timestamp?: number;
   ts?: number;
+  severity?: string;
+  actionLabel?: string;
 }
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
+const alertSaveDebounceMap = new Map<string, number>();
+
+/**
+ * Saves a device alert directly to Firebase RTDB at `/devices/{deviceId}/alerts/{alertId}`.
+ * Explicitly sets `createdAt: Date.now()` (or provided ts) so it persists across stream updates.
+ */
+export async function saveDeviceAlertToRTDB(
+  deviceId: string,
+  alert: Partial<DeviceAlertRecord> & { id: string }
+): Promise<void> {
+  try {
+    if (!deviceId || !alert?.id) return;
+    if (auth && auth.currentUser === null) return;
+
+    // Deduplicate identical writes occurring within 3 seconds
+    const cacheKey = `${deviceId}:${alert.id}`;
+    const now = Date.now();
+    const lastSaved = alertSaveDebounceMap.get(cacheKey);
+    if (lastSaved && now - lastSaved < 3000) {
+      return;
+    }
+    alertSaveDebounceMap.set(cacheKey, now);
+
+    const alertRef = ref(db, `devices/${deviceId}/alerts/${alert.id}`);
+    const createdAt = alert.createdAt || alert.timestamp || alert.ts || now;
+    const msg = alert.message || alert.body || alert.description || '';
+    const payload = {
+      id: alert.id,
+      type: alert.type || 'warning',
+      severity: alert.severity || alert.type || 'warning',
+      title: alert.title || 'System Notice',
+      message: msg,
+      body: alert.body || msg,
+      description: alert.description || msg,
+      status: alert.status || 'active',
+      createdAt,
+      timestamp: createdAt,
+      ts: createdAt,
+      ...(alert.actionLabel ? { actionLabel: alert.actionLabel } : {}),
+    };
+    await set(alertRef, payload);
+  } catch (err) {
+    console.warn(`Failed to save alert ${alert.id} to RTDB:`, err);
+  }
+}
+
+/**
+ * Updates partial alert fields in `/devices/{deviceId}/alerts/{alertId}`.
+ */
+export async function updateDeviceAlertInRTDB(
+  deviceId: string,
+  alertId: string,
+  updates: Partial<DeviceAlertRecord>
+): Promise<void> {
+  try {
+    if (!deviceId || !alertId) return;
+    if (auth && auth.currentUser === null) return;
+    const alertRef = ref(db, `devices/${deviceId}/alerts/${alertId}`);
+    await update(alertRef, updates);
+  } catch (err) {
+    console.warn(`Failed to update alert ${alertId} in RTDB:`, err);
+  }
+}
+
+/**
+ * Deletes an alert document from `/devices/{deviceId}/alerts/{alertId}`.
+ */
+export async function deleteDeviceAlertFromRTDB(
+  deviceId: string,
+  alertId: string
+): Promise<void> {
+  try {
+    if (!deviceId || !alertId) return;
+    if (auth && auth.currentUser === null) return;
+    const alertRef = ref(db, `devices/${deviceId}/alerts/${alertId}`);
+    await remove(alertRef);
+  } catch (err) {
+    console.warn(`Failed to delete alert ${alertId} from RTDB:`, err);
+  }
+}
+
 /**
  * Routine to delete alert documents older than 7 days directly from Firebase RTDB (/devices/{deviceId}/alerts).
+ * Critical: Do NOT auto-delete active, unresolved alerts regardless of age unless manually resolved by the user.
  */
 export async function cleanupOldDeviceAlertsFromRTDB(deviceId: string) {
   try {
@@ -258,6 +342,10 @@ export async function cleanupOldDeviceAlertsFromRTDB(deviceId: string) {
           const data = snapshot.val();
           for (const key of Object.keys(data)) {
             const item = data[key];
+            const isResolved =
+              item.status === 'resolved' || item.status === 'RESOLVED' || item.status === 'read';
+            // Only auto-delete resolved alerts older than 7 days; never auto-delete active alerts
+            if (!isResolved) continue;
             const itemTs = item.createdAt || item.timestamp || item.ts;
             if (typeof itemTs === 'number' && itemTs < cutoff) {
               await remove(ref(db, `devices/${deviceId}/alerts/${key}`));
@@ -274,19 +362,19 @@ export async function cleanupOldDeviceAlertsFromRTDB(deviceId: string) {
 
 /**
  * Attaches a realtime listener to `devices/{deviceId}/alerts` with 7-day retention enforcement.
+ * Active unresolved alerts are preserved regardless of age.
  */
 export const listenToDeviceAlerts = (
   deviceId: string,
   onData: (alerts: DeviceAlertRecord[]) => void
 ) => {
   const alertsRef = ref(db, `devices/${deviceId}/alerts`);
-  // Trigger cleanup routine for items older than 7 days
+  // Trigger cleanup routine for expired resolved items older than 7 days
   cleanupOldDeviceAlertsFromRTDB(deviceId);
 
   const unsubscribe = onValue(alertsRef, (snapshot) => {
     if (snapshot.exists()) {
       const data = snapshot.val();
-      const cutoff = Date.now() - SEVEN_DAYS_MS;
       const list: DeviceAlertRecord[] = Object.keys(data)
         .map((key) => {
           const item = data[key];
@@ -302,15 +390,17 @@ export const listenToDeviceAlerts = (
               ? 'resolved'
               : 'active';
           const titleVal =
-            (item.title && String(item.title).trim().length > 0)
+            item.title && String(item.title).trim().length > 0
               ? String(item.title).trim()
-              : (alertType === 'critical' ? 'Low Reservoir Water' : 'System Notice');
+              : alertType === 'critical'
+              ? 'Low Reservoir Water'
+              : 'System Notice';
           const messageVal =
-            (item.message && String(item.message).trim().length > 0)
+            item.message && String(item.message).trim().length > 0
               ? String(item.message).trim()
-              : (item.description && String(item.description).trim().length > 0)
+              : item.description && String(item.description).trim().length > 0
               ? String(item.description).trim()
-              : (item.body && String(item.body).trim().length > 0)
+              : item.body && String(item.body).trim().length > 0
               ? String(item.body).trim()
               : 'Water level is low. Please refill the reservoir.';
 
@@ -326,11 +416,17 @@ export const listenToDeviceAlerts = (
             ts: tsVal,
           };
         })
-        // Enforce 7-day retention filter
-        .filter((item) => (item.createdAt || item.timestamp || item.ts || 0) >= cutoff);
+        // Enforce 7-day retention filter: guard against undefined timestamps and do NOT auto-delete active unresolved alerts
+        .filter((item) => {
+          const isResolved = item.status === 'resolved' || item.status === 'read';
+          if (!isResolved) return true;
+          return Boolean(item.createdAt && (Date.now() - item.createdAt <= SEVEN_DAYS_MS));
+        });
 
       // Sort newest first
-      list.sort((a, b) => (b.createdAt || b.timestamp || b.ts || 0) - (a.createdAt || a.timestamp || a.ts || 0));
+      list.sort(
+        (a, b) => (b.createdAt || b.timestamp || b.ts || 0) - (a.createdAt || a.timestamp || a.ts || 0)
+      );
       onData(list);
     } else {
       onData([]);
@@ -339,4 +435,5 @@ export const listenToDeviceAlerts = (
 
   return () => off(alertsRef, 'value', unsubscribe);
 };
+
 

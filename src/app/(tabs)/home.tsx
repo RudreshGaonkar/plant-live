@@ -15,6 +15,7 @@ import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
+  Image,
   StyleSheet,
   Dimensions,
   TouchableOpacity,
@@ -34,6 +35,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice } from '@/hooks/useLiveDevice';
+import { useSession } from '@/store/useSession';
 import { usePlantState } from '@/hooks/usePlantState';
 import { sendDeviceControl } from '@/services/devices';
 import { Plant3DHero } from '@/components/Plant3D';
@@ -62,6 +64,7 @@ export default function HomeScreen() {
   const { colors, radii, spacing } = useAppTheme();
   const insets = useSafeAreaInsets();
   const { device, health, isWatering, secondsLeft } = usePlantState();
+  const user = useSession((s) => s.user);
   const devices = useLiveDevice((s) => s.devices);
   const activeDeviceId = useLiveDevice((s) => s.activeDeviceId);
   const setActiveDeviceId = useLiveDevice((s) => s.setActiveDeviceId);
@@ -257,15 +260,25 @@ export default function HomeScreen() {
             {
               backgroundColor: `${colors.palette.white}CC`,
               borderRadius: radii.full,
+              overflow: 'hidden',
             },
           ]}
-          accessibilityLabel="User menu"
+          onPress={() => router.push('/(tabs)/settings')}
+          accessibilityLabel="User profile and settings"
         >
-          <Ionicons
-            name="person-outline"
-            size={18}
-            color={colors.palette.forest}
-          />
+          {user?.avatarUri ? (
+            <Image
+              source={{ uri: user.avatarUri }}
+              style={styles.avatarImg}
+              resizeMode="cover"
+            />
+          ) : (
+            <Ionicons
+              name="person-outline"
+              size={18}
+              color={colors.palette.forest}
+            />
+          )}
         </TouchableOpacity>
 
         {/* Center: Plant switcher pill (Dynamically shows location and plant name) */}
@@ -447,6 +460,7 @@ export default function HomeScreen() {
           remainingMl={config.bottle.remainingMl}
           capacityMl={config.bottle.capacityMl}
           flowMlPerSec={config.bottle.flowMlPerSec}
+          isLoading={!device?.isConfigHydrated && (config.bottle.capacityMl === 0 || config.bottle.remainingMl === 0)}
           onRefill={refillBottle}
         />
       </Animated.View>
@@ -510,6 +524,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 1.5,
     borderColor: 'rgba(90,138,92,0.2)',
+    overflow: 'hidden',
+  },
+  avatarImg: {
+    width: '100%',
+    height: '100%',
   },
   switcherPill: {
     flex: 1,

@@ -15,6 +15,9 @@
     "devices": {
       "$deviceId": {
         ".read": "auth != null",
+        "alerts": {
+          ".write": "auth != null"
+        },
         "config": {
           ".write": "auth != null"
         },

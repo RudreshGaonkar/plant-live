@@ -71,33 +71,25 @@ export default function AlertsScreen() {
     isCloudSynced,
   } = useAlertEngine();
 
-  // Enforce 7-day retention filter on all fetched alerts
-  const [mountTime, setMountTime] = useState(() => Date.now());
+  // 7-day pruning filter guards against undefined timestamps
+  // Do NOT auto-delete active, unresolved alerts regardless of age unless manually resolved by the user
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
   useEffect(() => {
-    const timer = setInterval(() => setMountTime(Date.now()), 60000);
+    const timer = setInterval(() => setCurrentTime(Date.now()), 60000);
     return () => clearInterval(timer);
   }, []);
 
-  const retainedAlerts = alerts.filter((a) => {
-    const ts = a.createdAt ?? a.ts ?? a.timestamp;
-    return typeof ts === 'number' && ts >= mountTime - SEVEN_DAYS_MS;
-  });
-  const retainedUnread = unreadAlerts.filter((a) => {
-    const ts = a.createdAt ?? a.ts ?? a.timestamp;
-    return typeof ts === 'number' && ts >= mountTime - SEVEN_DAYS_MS;
-  });
-  const retainedCritical = criticalAlerts.filter((a) => {
-    const ts = a.createdAt ?? a.ts ?? a.timestamp;
-    return typeof ts === 'number' && ts >= mountTime - SEVEN_DAYS_MS;
-  });
-  const retainedWarning = warningAlerts.filter((a) => {
-    const ts = a.createdAt ?? a.ts ?? a.timestamp;
-    return typeof ts === 'number' && ts >= mountTime - SEVEN_DAYS_MS;
-  });
-  const retainedInfo = infoAlerts.filter((a) => {
-    const ts = a.createdAt ?? a.ts ?? a.timestamp;
-    return typeof ts === 'number' && ts >= mountTime - SEVEN_DAYS_MS;
-  });
+  const isRetained = (alert: AppAlert) => {
+    const isResolved = alert.status === 'resolved' || alert.status === 'read';
+    if (!isResolved) return true;
+    return Boolean(alert.createdAt && (currentTime - alert.createdAt <= SEVEN_DAYS_MS));
+  };
+
+  const retainedAlerts = alerts.filter(isRetained);
+  const retainedUnread = unreadAlerts.filter(isRetained);
+  const retainedCritical = criticalAlerts.filter(isRetained);
+  const retainedWarning = warningAlerts.filter(isRetained);
+  const retainedInfo = infoAlerts.filter(isRetained);
 
   const readAlerts = retainedAlerts.filter((a) => a.status === 'resolved' || a.status === 'read' || a.status === 'snoozed');
   const isEmpty = retainedAlerts.length === 0 || retainedUnread.length === 0;
@@ -364,68 +356,69 @@ function SwipeableAlertCard({
   const timestamp = alert.createdAt ?? alert.ts ?? alert.timestamp;
 
   return (
-    <GestureDetector gesture={panGesture}>
-      <Animated.View
-        style={[
-          styles.alertCard,
-          {
-            backgroundColor: sev.bg,
-            borderRadius: radii.card,
-            borderColor: sev.border,
-            borderLeftWidth: 4,
-          },
-          cardAnimStyle,
-        ]}
-        entering={FadeIn.springify()}
-      >
-        {/* Swipe hint row */}
-        <View style={styles.swipeHint}>
-          <View style={styles.swipeHintLeft}>
-            <Ionicons name="checkmark" size={10} color={colors.palette.forest} />
-            <Text style={[styles.swipeHintText, { color: colors.palette.forest }]}>
-              Read
-            </Text>
-          </View>
-          <View style={styles.swipeHintRight}>
-            <Text style={[styles.swipeHintText, { color: colors.palette.sage }]}>
-              Snooze
-            </Text>
-            <Ionicons name="time-outline" size={10} color={colors.palette.sage} />
-          </View>
-        </View>
-
-        <View style={styles.cardContent}>
-          <Ionicons name={sev.icon} size={20} color={sev.text} />
-          <View style={{ flex: 1 }}>
-            <View style={styles.cardTitleRow}>
-              <Text style={[styles.cardTitle, { color: sev.text }]}>
-                {displayTitle}
-              </Text>
-              <Text style={[styles.cardTime, { color: `${sev.text}80` }]}>
-                {formatTime(timestamp)}
+    <Animated.View entering={FadeIn.springify()}>
+      <GestureDetector gesture={panGesture}>
+        <Animated.View
+          style={[
+            styles.alertCard,
+            {
+              backgroundColor: sev.bg,
+              borderRadius: radii.card,
+              borderColor: sev.border,
+              borderLeftWidth: 4,
+            },
+            cardAnimStyle,
+          ]}
+        >
+          {/* Swipe hint row */}
+          <View style={styles.swipeHint}>
+            <View style={styles.swipeHintLeft}>
+              <Ionicons name="checkmark" size={10} color={colors.palette.forest} />
+              <Text style={[styles.swipeHintText, { color: colors.palette.forest }]}>
+                Read
               </Text>
             </View>
-            <Text style={[styles.cardBody, { color: `${sev.text}CC` }]}>
-              {displayBody}
-            </Text>
-            {alert.actionLabel && (
-              <TouchableOpacity
-                onPress={onAction}
-                style={[
-                  styles.cardAction,
-                  {
-                    backgroundColor: sev.border,
-                    borderRadius: radii.md,
-                  },
-                ]}
-              >
-                <Text style={styles.cardActionText}>{alert.actionLabel}</Text>
-              </TouchableOpacity>
-            )}
+            <View style={styles.swipeHintRight}>
+              <Text style={[styles.swipeHintText, { color: colors.palette.sage }]}>
+                Snooze
+              </Text>
+              <Ionicons name="time-outline" size={10} color={colors.palette.sage} />
+            </View>
           </View>
-        </View>
-      </Animated.View>
-    </GestureDetector>
+
+          <View style={styles.cardContent}>
+            <Ionicons name={sev.icon} size={20} color={sev.text} />
+            <View style={{ flex: 1 }}>
+              <View style={styles.cardTitleRow}>
+                <Text style={[styles.cardTitle, { color: sev.text }]}>
+                  {displayTitle}
+                </Text>
+                <Text style={[styles.cardTime, { color: `${sev.text}80` }]}>
+                  {formatTime(timestamp)}
+                </Text>
+              </View>
+              <Text style={[styles.cardBody, { color: `${sev.text}CC` }]}>
+                {displayBody}
+              </Text>
+              {alert.actionLabel && (
+                <TouchableOpacity
+                  onPress={onAction}
+                  style={[
+                    styles.cardAction,
+                    {
+                      backgroundColor: sev.border,
+                      borderRadius: radii.md,
+                    },
+                  ]}
+                >
+                  <Text style={styles.cardActionText}>{alert.actionLabel}</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        </Animated.View>
+      </GestureDetector>
+    </Animated.View>
   );
 }
 
