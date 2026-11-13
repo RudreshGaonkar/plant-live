@@ -12,7 +12,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Alert } from 'react-native';
 import * as Haptics from 'expo-haptics';
-import { useLiveDevice, DeviceCommandAckStatus } from '@/store/useLiveDevice';
+import { useLiveDevice } from '@/store/useLiveDevice';
 import {
   sendDeviceCommand,
   listenToDeviceCommand,
@@ -36,6 +36,7 @@ export interface UseCommandReturn {
   errorMessage: string | null;
   canWater: boolean;
   executeWaterNow: (durationSec?: number, forceIfWet?: boolean) => Promise<boolean>;
+  triggerWaterNow: (durationSec?: number, forceIfWet?: boolean) => Promise<boolean>;
   resetCommandState: () => void;
   refillBottle: () => void;
 }
@@ -51,6 +52,7 @@ export function useCommand(): UseCommandReturn {
   const wateringSecondsLeft = useLiveDevice((s) => s.wateringSecondsLeft);
   const storeRefillBottle = useLiveDevice((s) => s.refillBottle);
 
+  const [commandDeviceId, setCommandDeviceId] = useState<string | null>(null);
   const [stage, setStage] = useState<CommandLifecycleStage>('idle');
   const [activeDuration, setActiveDuration] = useState<number>(5);
   const [cooldownSecondsLeft, setCooldownSecondsLeft] = useState<number>(0);
@@ -84,53 +86,22 @@ export function useCommand(): UseCommandReturn {
   // Synchronize with store watering seconds
   const secondsRemaining = isWateringActive ? wateringSecondsLeft : 0;
 
-  // Listen to remote RTDB command ack if online device
-  useEffect(() => {
-    if (!deviceId) return;
+  const unsubscribeRef = useRef<(() => void) | null>(null);
+  const clearPendingCommand = useCallback(() => {
+    activeCmdIdRef.current = null;
+    unsubscribeRef.current?.();
+    unsubscribeRef.current = null;
+    if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
+    timeoutTimerRef.current = null;
+  }, []);
 
-    const unsubscribe = listenToDeviceCommand(deviceId, (cmd) => {
-      if (!cmd || !activeCmdIdRef.current || cmd.id !== activeCmdIdRef.current) {
-        return;
-      }
+  useEffect(() => clearPendingCommand, [deviceId, clearPendingCommand]);
 
-      const ackStatus: DeviceCommandAckStatus | undefined = cmd.ack?.status;
-
-      if (ackStatus === 'received') {
-        setStage('received');
-      } else if (ackStatus === 'running') {
-        setStage('running');
-        // Clear 15s timeout once hardware acknowledges running
-        if (timeoutTimerRef.current) {
-          clearTimeout(timeoutTimerRef.current);
-          timeoutTimerRef.current = null;
-        }
-      } else if (ackStatus === 'done') {
-        setStage('done');
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => null);
-
-        // Start 60s cooldown
-        setCooldownSecondsLeft(COOLDOWN_DURATION_SEC);
-        activeCmdIdRef.current = null;
-      } else if (ackStatus === 'rejected') {
-        setStage('rejected');
-        setErrorMessage('Device rejected watering command (safety lock).');
-        activeCmdIdRef.current = null;
-      }
-    });
-
-    return () => {
-      unsubscribe();
-      if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
-    };
-  }, [deviceId]);
-
-  // Reset command lifecycle state
   const resetCommandState = useCallback(() => {
+    clearPendingCommand();
     setStage('idle');
     setErrorMessage(null);
-    activeCmdIdRef.current = null;
-    if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
-  }, []);
+  }, [clearPendingCommand]);
 
   // Check if watering can be triggered safely
   const canWater =
@@ -141,6 +112,35 @@ export function useCommand(): UseCommandReturn {
   // Core command dispatcher with Optimistic UI feedback
   const dispatchWaterCommand = useCallback(
     async (clampedDuration: number, currentMoisture: number): Promise<boolean> => {
+      if (activeCmdIdRef.current) return false;
+      console.log('[LeafLink] Active Device ID:', deviceId);
+      const cmdId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      activeCmdIdRef.current = cmdId;
+      setCommandDeviceId(deviceId);
+      timeoutTimerRef.current = setTimeout(() => {
+        clearPendingCommand();
+        setStage('timeout');
+        setErrorMessage("Device didn't respond. Check Wi-Fi connection.");
+      }, (clampedDuration + 15) * 1000);
+
+      unsubscribeRef.current = listenToDeviceCommand(deviceId, (command) => {
+        const ack = command?.ack;
+        if (activeCmdIdRef.current !== cmdId || command?.id !== cmdId || ack?.id !== cmdId) return;
+
+        if (ack.status === 'done') {
+          clearPendingCommand();
+          setStage('done');
+          setCooldownSecondsLeft(COOLDOWN_DURATION_SEC);
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => null);
+        } else if (ack.status === 'rejected' || ack.status === 'failed') {
+          clearPendingCommand();
+          setStage('rejected');
+          setErrorMessage(ack.reason || 'Device could not complete the watering command.');
+        } else if (ack.status === 'running') {
+          setStage('running');
+        }
+      });
+
       // 1. Optimistic UI: Immediately show pump state as active & watering locally
       setErrorMessage(null);
       setStage('running');
@@ -152,19 +152,15 @@ export function useCommand(): UseCommandReturn {
 
       try {
         // Dispatch ONLY ONE command write with unique command.id to /devices/{deviceId}/command
-        const cmdId = await sendDeviceCommand(deviceId, {
+        void sendDeviceCommand(deviceId, {
           type: 'waterNow',
           durationSec: clampedDuration,
+        }, cmdId).catch((err: unknown) => {
+          if (activeCmdIdRef.current !== cmdId) return;
+          clearPendingCommand();
+          setStage('timeout');
+          setErrorMessage(err instanceof Error ? err.message : 'Failed to dispatch command.');
         });
-        activeCmdIdRef.current = cmdId;
-
-        // Set 15s timeout for hardware response
-        timeoutTimerRef.current = setTimeout(() => {
-          if (stage !== 'running' && stage !== 'done') {
-            setStage('timeout');
-            setErrorMessage("Device didn't respond within 15 seconds. Check Wi-Fi connection.");
-          }
-        }, 15000);
 
         // Append log to RTDB
         appendWaterLogInRTDB(deviceId, {
@@ -178,12 +174,14 @@ export function useCommand(): UseCommandReturn {
 
         return true;
       } catch (err) {
+        if (activeCmdIdRef.current !== cmdId) return false;
+        clearPendingCommand();
         setStage('timeout');
         setErrorMessage(err instanceof Error ? err.message : 'Failed to dispatch command.');
         return false;
       }
     },
-    [deviceId, stage]
+    [deviceId, clearPendingCommand]
   );
 
   // Execute Water Now with safety checks (manual watering explicitly bypasses soil moisture checks)
@@ -228,14 +226,18 @@ export function useCommand(): UseCommandReturn {
   );
 
   return {
-    stage,
+    stage: commandDeviceId === deviceId ? stage : 'idle',
     activeDuration,
     secondsRemaining,
     cooldownSecondsLeft,
-    errorMessage,
+    errorMessage: commandDeviceId === deviceId ? errorMessage : null,
     canWater,
     executeWaterNow,
+    triggerWaterNow: executeWaterNow,
     resetCommandState,
-    refillBottle: storeRefillBottle,
+    refillBottle: () => {
+      console.log('[LeafLink] Active Device ID:', deviceId);
+      storeRefillBottle(deviceId);
+    },
   };
 }

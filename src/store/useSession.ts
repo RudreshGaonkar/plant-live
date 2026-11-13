@@ -100,6 +100,7 @@ export const useSession = create<SessionState>((set, get) => ({
     } catch (err) {
       console.warn('[Session] Sign out error:', err);
     }
+    useLiveDevice.getState().clearDeviceState();
     set({ user: null, activeDeviceId: '', isDemoMode: false, isLoading: false, isAuthReady: true });
   },
 
@@ -151,6 +152,7 @@ export const useSession = create<SessionState>((set, get) => ({
           isAuthReady: true,
         });
       } else {
+        useLiveDevice.getState().clearDeviceState();
         set({ user: null, activeDeviceId: '', isDemoMode: false, isLoading: false, isAuthReady: true });
       }
     });

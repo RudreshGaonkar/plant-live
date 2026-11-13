@@ -1,4 +1,4 @@
-import { ref, onValue, set, update, push, off, remove, query, limitToLast } from 'firebase/database';
+import { ref, onValue, set, update, push, remove, query, limitToLast } from 'firebase/database';
 import { db, auth } from './firebase';
 import {
   DeviceConfig,
@@ -22,7 +22,7 @@ export const listenToDeviceTelemetry = (
     }
   });
 
-  return () => off(telemetryRef, 'value', unsubscribe);
+  return () => unsubscribe();
 };
 
 /**
@@ -39,7 +39,7 @@ export const listenToDeviceConfig = (
     }
   });
 
-  return () => off(configRef, 'value', unsubscribe);
+  return () => unsubscribe();
 };
 
 /**
@@ -56,7 +56,7 @@ export const listenToDeviceStatus = (
     }
   });
 
-  return () => off(statusRef, 'value', unsubscribe);
+  return () => unsubscribe();
 };
 
 /**
@@ -75,7 +75,7 @@ export const listenToDeviceCommand = (
     }
   });
 
-  return () => off(commandRef, 'value', unsubscribe);
+  return () => unsubscribe();
 };
 
 /**
@@ -83,9 +83,9 @@ export const listenToDeviceCommand = (
  */
 export const sendDeviceCommand = async (
   deviceId: string,
-  command: Omit<DeviceCommand, 'id' | 'requestedAt'>
+  command: Omit<DeviceCommand, 'id' | 'requestedAt'>,
+  cmdId = `cmd-${Date.now()}`
 ): Promise<string> => {
-  const cmdId = `cmd-${Date.now()}`;
   const fullCommand: DeviceCommand = {
     ...command,
     id: cmdId,
@@ -168,7 +168,7 @@ export const listenToWaterLogs = (
     }
   });
 
-  return () => off(logsQuery, 'value', unsubscribe);
+  return () => unsubscribe();
 };
 
 /**
@@ -226,7 +226,7 @@ export const listenToDeviceHistory = (
     }
   });
 
-  return () => off(historyQuery, 'value', unsubscribe);
+  return () => unsubscribe();
 };
 
 export interface DeviceAlertRecord {
@@ -433,7 +433,7 @@ export const listenToDeviceAlerts = (
     }
   });
 
-  return () => off(alertsRef, 'value', unsubscribe);
+  return () => unsubscribe();
 };
 
 

@@ -5,19 +5,32 @@
  */
 import React, { useState } from 'react';
 import { View } from 'react-native';
-import { Tabs, router, useSegments } from 'expo-router';
+import { Tabs, router, useSegments, Redirect } from 'expo-router';
 import { FloatingDock } from '@/components/FloatingDock';
 import { WaterNowSheet } from '@/components/WaterNowSheet';
 import { useLiveDevice } from '@/hooks/useLiveDevice';
 import { useAlertEngine } from '@/hooks/useAlertEngine';
+import { useSession } from '@/store/useSession';
 
 export default function TabLayout() {
   const segments = useSegments();
   const [waterSheetVisible, setWaterSheetVisible] = useState(false);
 
+  const user = useSession((s) => s.user);
+  const isAuthReady = useSession((s) => s.isAuthReady);
+
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
   const isWateringActive = useLiveDevice((s) => s.isWateringActive);
   const { unreadCount } = useAlertEngine();
+
+  // Guard protected tab routes when !user && isAuthReady
+  if (isAuthReady && !user) {
+    return <Redirect href="/(auth)/login" />;
+  }
+
+  if (!isAuthReady) {
+    return null;
+  }
 
   // Live pump state bound to Firebase telemetry.isPumpActive and control.pumpState
   const isPumpActive = Boolean(

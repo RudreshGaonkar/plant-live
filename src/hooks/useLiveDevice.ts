@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { ref, onValue, off } from 'firebase/database';
+import { ref, onValue } from 'firebase/database';
 import { db } from '@/services/firebase';
 import { useSession } from '@/store/useSession';
 import {
@@ -58,7 +58,7 @@ export const useLiveDevice: typeof useLiveDeviceStore = Object.assign(
       });
 
       return () => {
-        off(userDevicesRef, 'value', unsubUserDevices);
+        unsubUserDevices();
       };
     }, [user?.uid, setActiveDeviceId]);
 
@@ -128,10 +128,10 @@ export const useLiveDevice: typeof useLiveDeviceStore = Object.assign(
       });
 
       return () => {
-        off(telemetryRef, 'value', unsubTelemetry);
-        off(statusRef, 'value', unsubStatus);
-        off(configRef, 'value', unsubConfig);
-        off(controlRef, 'value', unsubControl);
+        unsubTelemetry();
+        unsubStatus();
+        unsubConfig();
+        unsubControl();
       };
     }, [activeDeviceId]);
 

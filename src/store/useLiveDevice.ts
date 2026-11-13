@@ -1,6 +1,7 @@
 import { create } from 'zustand';
-import { ref, set as fbSet } from 'firebase/database';
+import { ref, set as fbSet, onValue } from 'firebase/database';
 import { db } from '@/services/firebase';
+import { updateDeviceConfigInRTDB } from '@/services/devices';
 
 export type PlantLocation = 'balcony' | 'terrace' | 'indoor';
 export type DeviceMode = 'auto' | 'manual';
@@ -59,12 +60,14 @@ export interface DeviceStatus {
   firmware: string;
 }
 
-export type DeviceCommandAckStatus = 'received' | 'running' | 'done' | 'rejected';
+export type DeviceCommandAckStatus = 'received' | 'running' | 'done' | 'rejected' | 'failed' | 'pending';
 
 export interface DeviceCommand {
   id: string;
   type: 'waterNow' | 'calibrateDry' | 'calibrateWet' | 'refilled';
   durationSec?: number;
+  capacityMl?: number;
+  status?: string;
   requestedAt: number;
   ack?: {
     id: string;
@@ -127,8 +130,9 @@ export interface LiveDeviceStore {
   // Actions
   setActiveDeviceId: (id: string) => void;
   triggerWaterNow: (durationSec?: number) => void;
-  toggleMode: () => void;
-  refillBottle: (deviceId?: string) => void;
+  toggleMode: () => void | Promise<void>;
+  refillBottle: (deviceId?: string) => Promise<boolean> | void;
+  clearDeviceState: () => void;
   updateLocation: (location: PlantLocation) => void;
   updateThresholds: (thresholds: Partial<DeviceConfig['thresholds']>) => void;
   updateSensors: (sensors: Partial<DeviceConfig['sensors']>) => void;
@@ -259,6 +263,7 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   triggerWaterNow: (durationSec = 5) => {
     const { activeDeviceId, devices } = get();
     const targetId = activeDeviceId || 'leaf-node-01';
+    console.log('[LeafLink] Active Device ID:', targetId);
     const active = devices[targetId] || createDefaultDeviceRecord(targetId);
 
     // Optimistic activation of pump state locally
@@ -353,15 +358,20 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     }, 1000);
   },
 
-  toggleMode: () => {
+  toggleMode: async () => {
     const { activeDeviceId, devices } = get();
-    const active = devices[activeDeviceId];
+    const targetId = activeDeviceId || 'leaf-node-01';
+    console.log('[LeafLink] Active Device ID:', targetId);
+    const active = devices[targetId];
     if (!active) return;
-    const nextMode = active.config.mode === 'auto' ? 'manual' : 'auto';
+    const prevMode = active.config.mode;
+    const nextMode = prevMode === 'auto' ? 'manual' : 'auto';
+
+    // Optimistically update local state
     set({
       devices: {
         ...devices,
-        [activeDeviceId]: {
+        [targetId]: {
           ...active,
           config: {
             ...active.config,
@@ -370,11 +380,46 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
         },
       },
     });
+
+    try {
+      await updateDeviceConfigInRTDB(targetId, { mode: nextMode });
+    } catch (err: any) {
+      // Revert local state with an error toast if the write fails
+      const currentDevices = get().devices;
+      const currentActive = currentDevices[targetId];
+      if (currentActive) {
+        set({
+          devices: {
+            ...currentDevices,
+            [targetId]: {
+              ...currentActive,
+              config: {
+                ...currentActive.config,
+                mode: prevMode,
+              },
+            },
+          },
+        });
+      }
+      const errorMsg = err?.message || 'Failed to update device mode. Please check connection.';
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const RN = require('react-native');
+        if (RN?.Platform?.OS === 'android' && RN?.ToastAndroid?.show) {
+          RN.ToastAndroid.show(errorMsg, RN.ToastAndroid.SHORT);
+        } else if (RN?.Alert?.alert) {
+          RN.Alert.alert('Mode Update Failed', errorMsg);
+        }
+      } catch {
+        console.warn('[toggleMode] Mode Update Failed:', errorMsg);
+      }
+    }
   },
 
-  refillBottle: (deviceId?: string) => {
+  refillBottle: async (deviceId?: string): Promise<boolean> => {
     const { activeDeviceId, devices } = get();
-    const targetId = deviceId || activeDeviceId || 'leaf-node-01';
+    const targetId = (typeof deviceId === 'string' && deviceId.trim()) ? deviceId : (activeDeviceId || 'leaf-node-01');
+    console.log('[LeafLink] Active Device ID:', targetId);
     const active = devices[targetId] || createDefaultDeviceRecord(targetId);
     const validatedCapacity = Math.max(
       250,
@@ -383,45 +428,163 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
       1000
     );
 
-    // 1. Optimistic local state update
+    const uniqueId = `cmd-${Date.now()}`;
+
+    // 1. Keep the refill status pending until ack arrives
     set({
       devices: {
         ...devices,
         [targetId]: {
           ...active,
-          config: {
-            ...active.config,
-            bottleCapacityMl: validatedCapacity,
-            remainingMl: validatedCapacity,
-            bottle: {
-              ...active.config.bottle,
-              capacityMl: validatedCapacity,
-              remainingMl: validatedCapacity,
+          command: {
+            id: uniqueId,
+            type: 'refilled',
+            capacityMl: validatedCapacity,
+            status: 'pending',
+            requestedAt: Date.now(),
+            ack: {
+              id: uniqueId,
+              status: 'pending',
+              ts: Date.now(),
             },
           },
         },
       },
     });
 
-    // 2. Dispatch atomic refilled command payload to /devices/{id}/command
-    try {
-      const uniqueId = `cmd-${Date.now()}`;
-      const commandRef = ref(db, `devices/${targetId}/command`);
-      fbSet(commandRef, {
+    // 3. Correlate acknowledgement from /devices/{id}/command/ack matching uniqueId
+    return new Promise<boolean>((resolve) => {
+      const ackRef = ref(db, `devices/${targetId}/command/ack`);
+      let hasResolved = false;
+      let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+      const unsubscribe = onValue(ackRef, (snapshot) => {
+        if (!snapshot.exists()) return;
+        const ack = snapshot.val();
+        if (ack && ack.id === uniqueId) {
+          if (ack.status === 'done') {
+            if (!hasResolved) {
+              hasResolved = true;
+              if (timeoutHandle) clearTimeout(timeoutHandle);
+              unsubscribe();
+
+              // Confirm refill in store now that hardware acknowledged done
+              const currentDevices = get().devices;
+              const cur = currentDevices[targetId] || active;
+              set({
+                devices: {
+                  ...currentDevices,
+                  [targetId]: {
+                    ...cur,
+                    config: {
+                      ...cur.config,
+                      bottleCapacityMl: validatedCapacity,
+                      remainingMl: validatedCapacity,
+                      bottle: {
+                        ...cur.config.bottle,
+                        capacityMl: validatedCapacity,
+                        remainingMl: validatedCapacity,
+                      },
+                    },
+                    command: {
+                      id: uniqueId,
+                      type: 'refilled',
+                      capacityMl: validatedCapacity,
+                      requestedAt: cur.command?.requestedAt || Date.now(),
+                      status: 'done',
+                      ack: {
+                        id: uniqueId,
+                        status: 'done',
+                        ts: ack.ts || Date.now(),
+                      },
+                    },
+                  },
+                },
+              });
+              resolve(true);
+            }
+          } else if (ack.status === 'rejected' || ack.status === 'failed') {
+            if (!hasResolved) {
+              hasResolved = true;
+              if (timeoutHandle) clearTimeout(timeoutHandle);
+              unsubscribe();
+
+              const currentDevices = get().devices;
+              const cur = currentDevices[targetId] || active;
+              set({
+                devices: {
+                  ...currentDevices,
+                  [targetId]: {
+                    ...cur,
+                    command: {
+                      id: uniqueId,
+                      type: 'refilled',
+                      capacityMl: validatedCapacity,
+                      requestedAt: cur.command?.requestedAt || Date.now(),
+                      status: ack.status,
+                      ack: {
+                        id: uniqueId,
+                        status: ack.status,
+                        reason: ack.reason,
+                        ts: ack.ts || Date.now(),
+                      },
+                    },
+                  },
+                },
+              });
+              resolve(false);
+            }
+          }
+        }
+      });
+
+      const fail = (reason: string) => {
+        if (hasResolved) return;
+        hasResolved = true;
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        unsubscribe();
+        set((state) => {
+          const current = state.devices[targetId];
+          if (current?.command?.id !== uniqueId) return state;
+          return {
+            devices: {
+              ...state.devices,
+              [targetId]: {
+                ...current,
+                command: {
+                  ...current.command,
+                  status: 'failed',
+                  ack: { id: uniqueId, status: 'failed', reason, ts: Date.now() },
+                },
+              },
+            },
+          };
+        });
+        resolve(false);
+      };
+
+      timeoutHandle = setTimeout(() => fail('refill_timeout'), 20000);
+      void fbSet(ref(db, `devices/${targetId}/command`), {
         id: uniqueId,
         type: 'refilled',
         capacityMl: validatedCapacity,
         status: 'pending',
         requestedAt: Date.now(),
-        ack: {
-          id: `ack-${Date.now()}`,
-          status: 'received',
-          ts: Date.now(),
-        },
-      }).catch((e) => console.warn('[refillBottle] Failed to send refilled command:', e));
-    } catch (err) {
-      console.warn('[refillBottle] Error updating RTDB on refill:', err);
-    }
+        ack: { id: uniqueId, status: 'pending', ts: Date.now() },
+      }).catch(() => fail('refill_write_failed'));
+    });
+  },
+
+  clearDeviceState: () => {
+    set({
+      devices: {},
+      activeDeviceId: '',
+      waterLogs: [],
+      isWateringActive: false,
+      wateringSecondsLeft: 0,
+      weather: null,
+      weatherLoading: false,
+    });
   },
 
   updateLocation: (location: PlantLocation) => {

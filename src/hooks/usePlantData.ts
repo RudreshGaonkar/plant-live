@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { ref, onValue, off, query, limitToLast } from 'firebase/database';
+import { ref, onValue, query, limitToLast } from 'firebase/database';
 import { db } from '@/services/firebase';
 import {
   useLiveDevice,
@@ -139,12 +139,12 @@ export function usePlantData(customDeviceId?: string): UsePlantDataReturn {
     });
 
     return () => {
-      off(telemetryRef, 'value', unsubTelemetry);
-      off(configRef, 'value', unsubConfig);
-      off(statusRef, 'value', unsubStatus);
-      off(controlRef, 'value', unsubControl);
-      off(logsQuery, 'value', unsubLogs);
-      off(historyQuery, 'value', unsubHistory);
+      unsubTelemetry();
+      unsubConfig();
+      unsubStatus();
+      unsubControl();
+      unsubLogs();
+      unsubHistory();
     };
   }, [targetId]);
 

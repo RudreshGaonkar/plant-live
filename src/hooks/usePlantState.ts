@@ -7,7 +7,6 @@ import {
 } from '@/hooks/useLiveDevice';
 import {
   listenToDeviceTelemetry,
-  listenToDeviceConfig,
   listenToDeviceStatus,
   listenToWaterLogs,
 } from '@/services/devices';
@@ -28,10 +27,6 @@ export function usePlantState(device?: DeviceRecord) {
 
     const unsubTelemetry = listenToDeviceTelemetry(targetId, (telemetry) => {
       useLiveDevice.getState().updateTelemetry(telemetry);
-    });
-
-    const unsubConfig = listenToDeviceConfig(targetId, (config) => {
-      useLiveDevice.getState().updateConfig(config);
     });
 
     const unsubStatus = listenToDeviceStatus(targetId, (status) => {
@@ -57,7 +52,6 @@ export function usePlantState(device?: DeviceRecord) {
 
     return () => {
       unsubTelemetry();
-      unsubConfig();
       unsubStatus();
       unsubLogs();
     };

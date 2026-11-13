@@ -53,6 +53,7 @@ export default function SettingsScreen() {
 
   // Calibration Wizard modal state
   const [calibrationModalOpen, setCalibrationModalOpen] = useState<boolean>(false);
+  const [isRefilling, setIsRefilling] = useState<boolean>(false);
 
   // User Profile Form States
   const [displayNameDraft, setDisplayNameDraft] = useState<string | null>(null);
@@ -258,7 +259,7 @@ export default function SettingsScreen() {
         <View style={styles.headerTitleWrap}>
           <Text style={[styles.screenTitle, { color: colors.text }]}>Settings</Text>
           <Text style={[styles.screenSubtitle, { color: colors.textMuted }]}>
-            Profile, plant passport & hardware preferences
+            Profile, plant passport & hardware preferences · ID: {device.id}
           </Text>
         </View>
 
@@ -390,6 +391,7 @@ export default function SettingsScreen() {
 
         {/* ── 2. PLANT PASSPORT HEADER CARD ──────────────────────────── */}
         <PlantPassportHeader
+          deviceId={device.id}
           config={config}
           status={status}
           telemetry={telemetry}
@@ -605,18 +607,35 @@ export default function SettingsScreen() {
 
           {/* Shortcut refill button */}
           <TouchableOpacity
-            onPress={() => {
-              refillBottle(device?.id);
-              Alert.alert('Reservoir Refilled', `Reset bottle level to ${config.bottle.capacityMl} ml.`);
+            disabled={isRefilling}
+            onPress={async () => {
+              setIsRefilling(true);
+              try {
+                const confirmed = await refillBottle(device?.id);
+                if (confirmed) {
+                  Alert.alert('Reservoir Refilled', `Reset bottle level to ${config.bottle.capacityMl} ml.`);
+                } else {
+                  Alert.alert(
+                    'Refill Pending',
+                    'Waiting for device acknowledgement. Please check hardware connection.'
+                  );
+                }
+              } catch (err: any) {
+                Alert.alert('Refill Error', err?.message || 'Failed to dispatch refill command.');
+              } finally {
+                setIsRefilling(false);
+              }
             }}
             style={[
               styles.refillRowBtn,
-              { backgroundColor: colors.palette.lime, borderRadius: radii.sm },
+              { backgroundColor: colors.palette.lime, borderRadius: radii.sm, opacity: isRefilling ? 0.7 : 1 },
             ]}
           >
             <Ionicons name="refresh" size={15} color={colors.palette.forest} />
             <Text style={[styles.refillRowText, { color: colors.palette.forest }]}>
-              Mark Bottle as Refilled ({config.bottle.remainingMl} / {config.bottle.capacityMl} ml)
+              {isRefilling
+                ? 'Confirming Refill with Device...'
+                : `Mark Bottle as Refilled (${config.bottle.remainingMl} / ${config.bottle.capacityMl} ml)`}
             </Text>
           </TouchableOpacity>
         </View>

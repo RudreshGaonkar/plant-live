@@ -98,7 +98,7 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
               <View>
                 <Text style={[styles.title, { color: colors.text }]}>Manual Water Dispenser</Text>
                 <Text style={[styles.subtitle, { color: colors.textMuted }]}>
-                  {config.name} • {telemetry.soilMoisture}% Moisture
+                  {config.name || config.plantName || 'Plant'} • ID: {device.id} • {telemetry.soilMoisture}% Moisture
                 </Text>
               </View>
             </View>
@@ -132,7 +132,7 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
               </View>
               <TouchableOpacity
                 style={[styles.refillBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.full }]}
-                onPress={refillBottle}
+                onPress={() => refillBottle()}
               >
                 <Text style={styles.refillBtnText}>I Refilled</Text>
               </TouchableOpacity>

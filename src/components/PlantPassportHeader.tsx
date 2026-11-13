@@ -5,12 +5,14 @@ import { useAppTheme } from '@/theme';
 import { DeviceConfig, DeviceStatus, DeviceTelemetry } from '@/store/useLiveDevice';
 
 export interface PlantPassportHeaderProps {
+  deviceId?: string;
   config: DeviceConfig;
   status: DeviceStatus;
   telemetry: DeviceTelemetry;
 }
 
 export function PlantPassportHeader({
+  deviceId,
   config,
   status,
   telemetry,
@@ -121,8 +123,15 @@ export function PlantPassportHeader({
               style={[styles.plantName, { color: colors.palette.ink }]}
               numberOfLines={1}
             >
-              {config.name || config.plantName || 'Monstera Deliciosa'}
+              {config.name || config.plantName || 'Plant'}
             </Text>
+            {Boolean(deviceId) && (
+              <View style={[styles.idBadge, { backgroundColor: colors.palette.mist, borderColor: `${colors.palette.forest}30` }]}>
+                <Text style={[styles.idBadgeText, { color: colors.palette.forest }]}>
+                  ID: {deviceId}
+                </Text>
+              </View>
+            )}
           </View>
 
           <Text style={[styles.speciesText, { color: colors.palette.forest }]}>
@@ -269,6 +278,17 @@ const styles = StyleSheet.create({
     fontSize: 19,
     fontWeight: '800',
     letterSpacing: -0.3,
+  },
+  idBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    marginLeft: 6,
+  },
+  idBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
   },
   speciesText: {
     fontSize: 13,

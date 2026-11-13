@@ -37,7 +37,7 @@ import { useAppTheme } from '@/theme';
 import { useLiveDevice } from '@/hooks/useLiveDevice';
 import { useSession } from '@/store/useSession';
 import { usePlantState } from '@/hooks/usePlantState';
-import { sendDeviceControl } from '@/services/devices';
+import { useCommand } from '@/hooks/useCommand';
 import { Plant3DHero } from '@/components/Plant3D';
 import { MoodBubble } from '@/components/MoodBubble';
 import { BottleRail } from '@/components/BottleRail';
@@ -71,15 +71,12 @@ export default function HomeScreen() {
   const toggleMode = useLiveDevice((s) => s.toggleMode);
   const refillBottle = useLiveDevice((s) => s.refillBottle);
   const waterLogs = useLiveDevice((s) => s.waterLogs);
-  const triggerWaterNow = useLiveDevice((s) => s.triggerWaterNow);
+  const { triggerWaterNow } = useCommand();
 
   const [gardenStripOpen, setGardenStripOpen] = useState(false);
 
   // Dynamic device location weather & smart terrace rain delay
-  const currentPlantLocation =
-    device?.config?.location && device.config.plantName !== 'Terrace Tulsi Pot'
-      ? device.config.location
-      : 'indoor';
+  const currentPlantLocation = device?.config?.location || 'indoor';
   const { weather, loading: weatherLoading, isRainDelayActive } = useWeather(
     device ? currentPlantLocation : undefined,
     device?.telemetry?.soilMoisture
@@ -162,25 +159,20 @@ export default function HomeScreen() {
   const isOffline = !status.online;
   const deviceList = Object.values(devices);
 
-  // Dynamic plant location & name binding (replaces fallback string "Terrace Tulsi Pot")
+  // Dynamic plant location & name binding
   const locationMeta: Record<string, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
     indoor: { label: 'Indoor', icon: 'home-outline' },
     balcony: { label: 'Balcony', icon: 'leaf-outline' },
     terrace: { label: 'Terrace', icon: 'sunny-outline' },
   };
 
-  const activeLocation = config.location && config.plantName !== 'Terrace Tulsi Pot' ? config.location : 'indoor';
+  const activeLocation = config.location || 'indoor';
   const currentLocation = locationMeta[activeLocation] ?? {
     label: activeLocation.charAt(0).toUpperCase() + activeLocation.slice(1),
     icon: 'home-outline',
   };
 
-  const plantDisplayName =
-    config.plantName && config.plantName !== 'Terrace Tulsi Pot'
-      ? config.plantName
-      : config.name && config.name !== 'Terrace Tulsi Pot'
-      ? config.name
-      : 'Monstera Deliciosa';
+  const plantDisplayName = config.name || config.plantName || 'Plant';
 
   // Real-time pump active state bound to telemetry.isPumpActive and control.pumpState
   const isPumpActive = Boolean(
@@ -190,23 +182,10 @@ export default function HomeScreen() {
     isWatering
   );
 
-  // Manual watering trigger with immediate optimistic feedback & Firebase RTDB dispatch
+  // Manual watering trigger with unified command hook
   const handleManualWatering = async () => {
-    // 1. Immediate optimistic UI feedback
-    triggerWaterNow(5);
-
-    // 2. Write { pumpState: true, manualOverride: true, timestamp: Date.now() } to Firebase
-    try {
-      const targetDeviceId = device?.id || activeDeviceId || 'leaf-node-01';
-      await sendDeviceControl(targetDeviceId, {
-        pumpState: true,
-        manualOverride: true,
-        timestamp: Date.now(),
-        durationSec: 5,
-      });
-    } catch (err) {
-      console.warn('[HomeScreen] Manual water send error:', err);
-    }
+    console.log('[LeafLink] Active Device ID:', device.id);
+    await triggerWaterNow(5);
   };
 
   return (
@@ -281,7 +260,7 @@ export default function HomeScreen() {
           )}
         </TouchableOpacity>
 
-        {/* Center: Plant switcher pill (Dynamically shows location and plant name) */}
+        {/* Center: Plant switcher pill (Dynamically shows location, plant name, and device ID) */}
         <TouchableOpacity
           style={[
             styles.switcherPill,
@@ -295,12 +274,20 @@ export default function HomeScreen() {
           accessibilityLabel="Switch plant device"
         >
           <Ionicons name={currentLocation.icon} size={14} color={colors.palette.forest} />
-          <Text
-            style={[styles.switcherText, { color: colors.palette.ink }]}
-            numberOfLines={1}
-          >
-            {currentLocation.label} · {plantDisplayName}
-          </Text>
+          <View style={{ flex: 1, justifyContent: 'center' }}>
+            <Text
+              style={[styles.switcherText, { color: colors.palette.ink }]}
+              numberOfLines={1}
+            >
+              {currentLocation.label} · {plantDisplayName}
+            </Text>
+            <Text
+              style={[styles.switcherSubtext, { color: colors.palette.sage }]}
+              numberOfLines={1}
+            >
+              ID: {device.id}
+            </Text>
+          </View>
           <Ionicons
             name={gardenStripOpen ? 'chevron-up' : 'chevron-down'}
             size={14}
@@ -461,7 +448,7 @@ export default function HomeScreen() {
           capacityMl={config.bottle.capacityMl}
           flowMlPerSec={config.bottle.flowMlPerSec}
           isLoading={!device?.isConfigHydrated && (config.bottle.capacityMl === 0 || config.bottle.remainingMl === 0)}
-          onRefill={refillBottle}
+          onRefill={() => refillBottle(device.id)}
         />
       </Animated.View>
 
@@ -540,9 +527,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   switcherText: {
-    flex: 1,
     fontSize: 13,
     fontWeight: '700',
+  },
+  switcherSubtext: {
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 0.2,
   },
   topRightActions: {
     flexDirection: 'row',

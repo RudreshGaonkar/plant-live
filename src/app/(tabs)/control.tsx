@@ -114,7 +114,7 @@ export default function ControlScreen() {
             </View>
             <TouchableOpacity
               style={[styles.refillBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.full }]}
-              onPress={refillBottle}
+              onPress={() => refillBottle()}
             >
               <Text style={styles.refillBtnText}>I Refilled</Text>
             </TouchableOpacity>
