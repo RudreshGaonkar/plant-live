@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -85,10 +86,14 @@ export default function LoginScreen() {
             <View
               style={[
                 styles.logoWrap,
-                { backgroundColor: colors.palette.lime, borderRadius: radii.full },
+                { backgroundColor: '#16221A', borderRadius: 20 },
               ]}
             >
-              <Ionicons name="leaf" size={36} color={colors.palette.forest} />
+              <Image
+                source={require('@/assets/images/leaflink-mark.png')}
+                style={{ width: 44, height: 44 }}
+                resizeMode="contain"
+              />
             </View>
             <Text style={[styles.title, { color: colors.text }]}>LeafLink</Text>
             <Text style={[styles.subtitle, { color: colors.textMuted }]}>

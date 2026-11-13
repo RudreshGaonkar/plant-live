@@ -142,11 +142,16 @@ export const useSession = create<SessionState>((set, get) => ({
           avatarUri = firebaseUser.photoURL || null;
         }
 
-        // Hydrate paired devices for this user
+        // Hydrate paired devices for this user with timeout protection
         let pairedDeviceId = '';
         try {
           const userDevRef = ref(db, `users/${firebaseUser.uid}/devices`);
-          const devSnap = await fbGet(userDevRef);
+          const devSnap = await Promise.race([
+            fbGet(userDevRef),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('Device hydration timed out')), 5000)
+            ),
+          ]);
           if (devSnap.exists()) {
             const val = devSnap.val();
             const deviceIds =
@@ -175,7 +180,17 @@ export const useSession = create<SessionState>((set, get) => ({
             }
           }
         } catch (err) {
-          console.warn('[Session] Failed to hydrate user devices on launch:', err);
+          console.warn('[Session] Failed to hydrate user devices on launch, checking local cache:', err);
+          try {
+            const cachedId = await AsyncStorage.getItem(
+              `@plant_live_active_device_${firebaseUser.uid}`
+            );
+            if (cachedId) {
+              pairedDeviceId = cachedId;
+            }
+          } catch {
+            // Continue with empty device
+          }
         }
 
         if (pairedDeviceId) {

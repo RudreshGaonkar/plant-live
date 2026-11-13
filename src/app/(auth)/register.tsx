@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -175,10 +176,14 @@ export default function RegisterScreen() {
             <View
               style={[
                 styles.logoWrap,
-                { backgroundColor: colors.palette.lime, borderRadius: radii.full },
+                { backgroundColor: '#16221A', borderRadius: 18 },
               ]}
             >
-              <Ionicons name="leaf" size={32} color={colors.palette.forest} />
+              <Image
+                source={require('@/assets/images/leaflink-mark.png')}
+                style={{ width: 40, height: 40 }}
+                resizeMode="contain"
+              />
             </View>
             <Text style={[styles.title, { color: colors.text }]}>
               Create LeafLink Account
