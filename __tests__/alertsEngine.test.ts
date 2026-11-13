@@ -330,7 +330,6 @@ describe('Alerts Engine & Retention Suite', () => {
       const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
       const yesterday = startOfTodayMs - 3600000;
       const todayEarlier = startOfTodayMs + 1000 * 60;
-      const todayNow = Date.now();
 
       const alerts: DeviceAlertRecord[] = [
         { id: 'yesterday-1', title: 'Yesterday', message: 'Yesterday message', createdAt: yesterday, status: 'active', type: 'warning' },

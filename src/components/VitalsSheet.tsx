@@ -129,12 +129,14 @@ export function VitalsSheet({
     }
   }, [forceSnap, snapTo]);
 
-  // Safely notify onTranslateY if passed via JS callback
+  // Safely notify onTranslateY if passed via JS callback (quantized to keep gesture updates lightweight)
   useAnimatedReaction(
     () => translateY.value,
     (currentY, previousY) => {
       if (onTranslateY && currentY !== previousY) {
-        runOnJS(onTranslateY)(currentY);
+        if (!previousY || Math.abs(currentY - previousY) >= 4) {
+          runOnJS(onTranslateY)(currentY);
+        }
       }
     }
   );

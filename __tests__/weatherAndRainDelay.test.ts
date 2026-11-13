@@ -7,7 +7,6 @@ import {
 } from '../src/services/weather';
 import {
   evaluateAutoWaterDecision,
-  CRITICAL_MIN,
 } from '../src/services/calibration';
 
 jest.mock('expo-location', () => ({

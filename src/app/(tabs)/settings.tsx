@@ -21,8 +21,19 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import * as ImagePicker from 'expo-image-picker';
+import {
+  ref,
+  set,
+  update,
+  get as fbGet,
+  remove,
+  onValue,
+} from 'firebase/database';
+import { deleteUser } from 'firebase/auth';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { auth, db } from '@/services/firebase';
 import { useAppTheme } from '@/theme';
-import { useLiveDevice, LightMode } from '@/store/useLiveDevice';
+import { useLiveDevice } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
 import { updateDeviceConfigInRTDB, removeDeviceWithAudit } from '@/services/devices';
 import {
@@ -30,6 +41,8 @@ import {
   SliderControl,
   CalibrationWizard,
   CalibrationValues,
+  LegalPoliciesModal,
+  LegalPolicyType,
 } from '@/components';
 
 export default function SettingsScreen() {
@@ -45,7 +58,6 @@ export default function SettingsScreen() {
   // Store bindings
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
   const updateThresholds = useLiveDevice((s) => s.updateThresholds);
-  const updateSensors = useLiveDevice((s) => s.updateSensors);
   const updateConfig = useLiveDevice((s) => s.updateConfig);
   const updateCalibration = useLiveDevice((s) => s.updateCalibration);
   const refillBottle = useLiveDevice((s) => s.refillBottle);
@@ -54,6 +66,38 @@ export default function SettingsScreen() {
   const [calibrationModalOpen, setCalibrationModalOpen] = useState<boolean>(false);
   const [isRefilling, setIsRefilling] = useState<boolean>(false);
   const [isRemovingDevice, setIsRemovingDevice] = useState<boolean>(false);
+
+  // Draft values for Bottle Size and Pump Speed (commit on sliding complete)
+  const [bottleCapacityDraft, setBottleCapacityDraft] = useState<number | null>(null);
+  const [pumpFlowDraft, setPumpFlowDraft] = useState<number | null>(null);
+
+  const activeBottleCapacity = bottleCapacityDraft ?? device?.config?.bottle?.capacityMl ?? 1000;
+  const activePumpFlow = pumpFlowDraft ?? device?.config?.bottle?.flowMlPerSec ?? 15;
+
+  const LOCATION_PRESETS = {
+    indoor: { moistureMin: 35, moistureMax: 65, tempMax: 35, humidityMax: 80, pumpDurationSec: 5 },
+    balcony: { moistureMin: 30, moistureMax: 60, tempMax: 35, humidityMax: 80, pumpDurationSec: 5 },
+    terrace: { moistureMin: 25, moistureMax: 55, tempMax: 32, humidityMax: 80, pumpDurationSec: 5 },
+  };
+
+  const handleSelectLocation = async (loc: 'indoor' | 'balcony' | 'terrace') => {
+    if (!device?.id) return;
+    const defaults = LOCATION_PRESETS[loc];
+    try {
+      await updateDeviceConfigInRTDB(device.id, {
+        location: loc,
+        thresholds: {
+          ...device.config?.thresholds,
+          ...defaults,
+        },
+      });
+      updateConfig({ location: loc }, device.id);
+      updateThresholds(defaults);
+      Alert.alert('Saved', `Location set to ${loc.charAt(0).toUpperCase() + loc.slice(1)} and watering limits updated successfully.`);
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Failed to update location and watering limits.');
+    }
+  };
 
   // User Profile Form States
   const [displayNameDraft, setDisplayNameDraft] = useState<string | null>(null);
@@ -81,12 +125,76 @@ export default function SettingsScreen() {
   const [quietHoursEnabled, setQuietHoursEnabled] = useState<boolean>(false);
   const quietHoursRange = '22:00 - 07:00';
 
+  // Legal Policies Modal State
+  const [policyModal, setPolicyModal] = useState<{ visible: boolean; type: LegalPolicyType }>({
+    visible: false,
+    type: 'terms',
+  });
+  const [isDeletingAccount, setIsDeletingAccount] = useState<boolean>(false);
+
+  // Synchronize initial preferences from RTDB
+  React.useEffect(() => {
+    if (!user?.uid) return;
+    const prefsRef = ref(db, `users/${user.uid}/prefs`);
+    const unsubscribe = onValue(prefsRef, (snap) => {
+      if (snap.exists()) {
+        const val = snap.val();
+        if (val.units === 'C' || val.units === 'F') {
+          setTempUnit(val.units);
+        }
+        if (val.quietHours && typeof val.quietHours.enabled === 'boolean') {
+          setQuietHoursEnabled(val.quietHours.enabled);
+        }
+        if (val.alerts && typeof val.alerts === 'object') {
+          setAlerts((prev) => ({
+            ...prev,
+            ...val.alerts,
+          }));
+        }
+      }
+    });
+    return () => unsubscribe();
+  }, [user?.uid]);
+
+  const handleSetTempUnit = (unit: 'C' | 'F') => {
+    setTempUnit(unit);
+    if (user?.uid) {
+      update(ref(db, `users/${user.uid}/prefs`), { units: unit }).catch((err) =>
+        console.warn('[settings] Failed to persist units:', err)
+      );
+    }
+  };
+
+  const handleToggleQuietHours = (val: boolean) => {
+    setQuietHoursEnabled(val);
+    if (user?.uid) {
+      update(ref(db, `users/${user.uid}/prefs/quietHours`), {
+        enabled: val,
+        start: '22:00',
+        end: '07:00',
+      }).catch((err) => console.warn('[settings] Failed to persist quietHours:', err));
+    }
+  };
+
+  const handleToggleAlert = (key: keyof typeof alerts, val: boolean) => {
+    setAlerts((prev) => {
+      const next = { ...prev, [key]: val };
+      if (user?.uid) {
+        update(ref(db, `users/${user.uid}/prefs/alerts`), { [key]: val }).catch((err) =>
+          console.warn('[settings] Failed to persist alert toggle:', err)
+        );
+      }
+      return next;
+    });
+  };
+
   // Collapsible Accordion Sections State (Secondary Options)
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     alerts: false,
     deviceInfo: false,
     firmware: false,
     security: false,
+    legal: false,
   });
 
   const toggleSection = (sectionKey: string) => {
@@ -200,6 +308,96 @@ export default function SettingsScreen() {
     ]);
   };
 
+  const handleDeleteAccount = () => {
+    Alert.alert(
+      'Delete Account',
+      'Are you sure you want to permanently delete your account and all associated data? All paired devices will be unlinked, and your telemetry, alert history, and push tokens will be erased. This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete Account',
+          style: 'destructive',
+          onPress: async () => {
+            if (!user?.uid) return;
+            setIsDeletingAccount(true);
+            try {
+              const uid = user.uid;
+
+              // 1. Disarm paired controllers FIRST while user is still owner
+              try {
+                const userDevsSnap = await fbGet(ref(db, `users/${uid}/devices`));
+                if (userDevsSnap.exists()) {
+                  const devMap = userDevsSnap.val() || {};
+                  for (const devId of Object.keys(devMap)) {
+                    try {
+                      await update(ref(db, `devices/${devId}/config`), { mode: 'manual' });
+                    } catch {}
+                    try {
+                      await set(ref(db, `devices/${devId}/command`), {
+                        id: `cmd-disarm-${Date.now()}`,
+                        type: 'disarm',
+                        requestedAt: Date.now(),
+                      });
+                    } catch {}
+                    try {
+                      const metaSnap = await fbGet(ref(db, `devices/${devId}/meta/ownerUid`));
+                      if (metaSnap.exists() && metaSnap.val() === uid) {
+                        await remove(ref(db, `devices/${devId}/meta/ownerUid`));
+                      }
+                    } catch {}
+                    try {
+                      const ownerSnap = await fbGet(ref(db, `owners/${devId}`));
+                      if (ownerSnap.exists() && ownerSnap.val() === uid) {
+                        await remove(ref(db, `owners/${devId}`));
+                      }
+                    } catch {}
+                  }
+                }
+              } catch (err) {
+                console.warn('[handleDeleteAccount] Failed unlinking controllers:', err);
+              }
+
+              // 2. Clear user data from RTDB
+              try {
+                await remove(ref(db, `users/${uid}`));
+              } catch {}
+              try {
+                await remove(ref(db, `alerts/${uid}`));
+              } catch {}
+              try {
+                await remove(ref(db, `userAuditLogs/${uid}`));
+              } catch {}
+
+              // 3. Clear AsyncStorage
+              await AsyncStorage.removeItem(`@plant_live_active_device_${uid}`).catch(() => {});
+
+              // 4. Delete Firebase Auth User
+              if (auth.currentUser) {
+                await deleteUser(auth.currentUser);
+              }
+
+              // 5. Sign out & route to login
+              await signOut();
+              router.replace('/(auth)/login');
+            } catch (err: any) {
+              console.warn('[handleDeleteAccount] Error deleting account:', err);
+              if (err?.code === 'auth/requires-recent-login') {
+                Alert.alert(
+                  'Re-authentication Required',
+                  'For security reasons, please sign out and sign back in before deleting your account.'
+                );
+              } else {
+                Alert.alert('Account Deletion Failed', err?.message || 'Could not delete account.');
+              }
+            } finally {
+              setIsDeletingAccount(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const handleRemoveDevice = () => {
     if (!device || !user?.uid) return;
     const plantName = device.config.plantName || device.config.name || 'Plant';
@@ -253,25 +451,9 @@ export default function SettingsScreen() {
     );
   };
 
-  if (!device) {
-    return (
-      <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
-        <View style={styles.emptyContainer}>
-          <Ionicons name="leaf-outline" size={48} color={colors.palette.sage} />
-          <Text style={[styles.emptyTitle, { color: colors.text }]}>No Active Plant Device</Text>
-          <TouchableOpacity
-            onPress={() => router.push('/add-device' as any)}
-            style={[styles.primaryBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.md }]}
-          >
-            <Ionicons name="add" size={18} color={colors.palette.white} />
-            <Text style={[styles.primaryBtnText, { color: colors.palette.white }]}>Add Device</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  const { config, status, telemetry } = device;
+  const config = device?.config;
+  const status = device?.status;
+  const telemetry = device?.telemetry;
   const isNameChanged = displayNameInput.trim() !== (user?.displayName || '');
 
   return (
@@ -284,7 +466,9 @@ export default function SettingsScreen() {
         <View style={styles.headerTitleWrap}>
           <Text style={[styles.screenTitle, { color: colors.text }]}>Settings</Text>
           <Text style={[styles.screenSubtitle, { color: colors.textMuted }]}>
-            Profile, plant passport & hardware preferences · ID: {device.id}
+            {device
+              ? `Profile, plant passport & hardware preferences · ID: ${device.id}`
+              : 'Profile, account & application preferences'}
           </Text>
         </View>
 
@@ -414,80 +598,228 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* ── 2. PLANT PASSPORT HEADER CARD ──────────────────────────── */}
-        <PlantPassportHeader
-          deviceId={device.id}
-          config={config}
-          status={status}
-          telemetry={telemetry}
-        />
-
-        {/* ── 3. CORE WATERING THRESHOLDS CARD ───────────────────────── */}
-        <View
-          style={[
-            styles.card,
-            {
-              backgroundColor: colors.surface,
-              borderRadius: radii.card,
-              borderColor: colors.border,
-            },
-          ]}
-        >
-          <View style={styles.cardHeaderRow}>
-            <View style={[styles.iconPill, { backgroundColor: colors.palette.mint }]}>
-              <Ionicons name="water-outline" size={18} color={colors.palette.forest} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.cardTitle, { color: colors.text }]}>Watering & Soil Moisture</Text>
-              <Text style={[styles.cardSubtitle, { color: colors.textMuted }]}>
-                Automated irrigation bounds & pump timing
-              </Text>
-            </View>
+        {/* ── CONDITIONAL HARDWARE PASSPORT OR EMPTY PROMPT ─────────── */}
+        {!device ? (
+          <View
+            style={[
+              styles.card,
+              {
+                backgroundColor: colors.surface,
+                borderRadius: radii.card,
+                borderColor: colors.border,
+                alignItems: 'center',
+                paddingVertical: 32,
+                paddingHorizontal: 20,
+              },
+            ]}
+          >
+            <Ionicons name="leaf-outline" size={48} color={colors.palette.sage} />
+            <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12, marginBottom: 6 }]}>
+              No Active Plant Device
+            </Text>
+            <Text style={[styles.emptyDesc, { color: colors.textMuted, textAlign: 'center', marginBottom: 18 }]}>
+              Pair your LeafLink controller to manage automated watering, soil moisture bounds, and sensor calibration.
+            </Text>
+            <TouchableOpacity
+              onPress={() => router.push('/add-device' as any)}
+              style={[styles.primaryBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.md }]}
+            >
+              <Ionicons name="add" size={18} color={colors.palette.white} />
+              <Text style={[styles.primaryBtnText, { color: colors.palette.white }]}>Add Device</Text>
+            </TouchableOpacity>
           </View>
+        ) : (
+          <>
+            {/* ── 2. PLANT PASSPORT HEADER CARD ──────────────────────────── */}
+            <PlantPassportHeader
+              deviceId={device.id}
+              config={config!}
+              status={status!}
+              telemetry={telemetry!}
+            />
 
-          {/* Moisture Min Slider */}
-          <SliderControl
-            label="Moisture Threshold Min"
-            description="Triggers auto-watering when soil drops below this %"
-            value={config.thresholds.moistureMin}
-            min={10}
-            max={50}
-            step={5}
-            unit="%"
-            accentColor={colors.palette.warningBorder}
-            onChange={(val) => updateThresholds({ moistureMin: val })}
-          />
+            {/* ── 3. CORE WATERING LIMITS CARD ───────────────────────── */}
+            <View
+              style={[
+                styles.card,
+                {
+                  backgroundColor: colors.surface,
+                  borderRadius: radii.card,
+                  borderColor: colors.border,
+                },
+              ]}
+            >
+              <View style={styles.cardHeaderRow}>
+                <View style={[styles.iconPill, { backgroundColor: colors.palette.mint }]}>
+                  <Ionicons name="water-outline" size={18} color={colors.palette.forest} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.cardTitle, { color: colors.text }]}>Watering Limits</Text>
+                  <Text style={[styles.cardSubtitle, { color: colors.textMuted }]}>
+                    Automated watering bounds & timing
+                  </Text>
+                </View>
+              </View>
 
-          <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+              {/* Location Picker */}
+              <View style={styles.locationSection}>
+                <Text style={[styles.itemLabel, { color: colors.text, marginBottom: 4 }]}>Plant Location</Text>
+                <Text style={[styles.itemDesc, { color: colors.textMuted, marginBottom: 10 }]}>
+                  Select location to apply recommended watering bounds
+                </Text>
+                <View style={styles.locationPickerRow}>
+                  {(['indoor', 'balcony', 'terrace'] as const).map((loc) => {
+                    const isSelected = (config?.location || 'indoor') === loc;
+                    const meta = {
+                      indoor: { label: 'Indoor', icon: 'home-outline' as const },
+                      balcony: { label: 'Balcony', icon: 'leaf-outline' as const },
+                      terrace: { label: 'Terrace', icon: 'sunny-outline' as const },
+                    }[loc];
+                    return (
+                      <TouchableOpacity
+                        key={loc}
+                        activeOpacity={0.8}
+                        onPress={() => handleSelectLocation(loc)}
+                        style={[
+                          styles.locationBtn,
+                          {
+                            backgroundColor: isSelected ? colors.palette.forest : colors.palette.mist,
+                            borderColor: isSelected ? colors.palette.forest : colors.border,
+                            borderRadius: radii.md,
+                          },
+                        ]}
+                      >
+                        <Ionicons
+                          name={meta.icon}
+                          size={16}
+                          color={isSelected ? colors.palette.white : colors.palette.forest}
+                          style={{ marginRight: 6 }}
+                        />
+                        <Text
+                          style={[
+                            styles.locationBtnText,
+                            { color: isSelected ? colors.palette.white : colors.palette.ink },
+                          ]}
+                        >
+                          {meta.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
 
-          {/* Moisture Max Slider */}
-          <SliderControl
-            label="Moisture Threshold Max"
-            description="Target soil saturation limit for irrigation shut-off"
-            value={config.thresholds.moistureMax}
-            min={50}
-            max={90}
-            step={5}
-            unit="%"
-            accentColor={colors.palette.forest}
-            onChange={(val) => updateThresholds({ moistureMax: val })}
-          />
+              <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
-          <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+              {/* Start Watering Below Slider */}
+              <SliderControl
+                label="Start Watering Below"
+                description="Triggers auto-watering when soil drops below this %"
+                value={config!.thresholds.moistureMin}
+                min={10}
+                max={50}
+                step={5}
+                unit="%"
+                accentColor={colors.palette.warningBorder}
+                onChange={(val) => updateThresholds({ moistureMin: val })}
+                onSlidingComplete={(val) => {
+                  if (device?.id) {
+                    updateDeviceConfigInRTDB(device.id, {
+                      'thresholds/moistureMin': val,
+                    } as any).catch((err) => console.warn('[settings] Failed to persist moistureMin to RTDB:', err));
+                  }
+                }}
+              />
 
-          {/* Pump Duration Slider */}
-          <SliderControl
-            label="Auto Pump Duration"
-            description="Run-time per automatic irrigation cycle (max 15s)"
-            value={config.thresholds.pumpDurationSec}
-            min={1}
-            max={15}
-            step={1}
-            unit="s"
-            accentColor={colors.palette.sage}
-            onChange={(val) => updateThresholds({ pumpDurationSec: val })}
-          />
-        </View>
+              <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+              {/* Stop Watering At Slider */}
+              <SliderControl
+                label="Stop Watering At"
+                description="Target soil saturation limit for irrigation shut-off"
+                value={config!.thresholds.moistureMax}
+                min={50}
+                max={90}
+                step={5}
+                unit="%"
+                accentColor={colors.palette.forest}
+                onChange={(val) => updateThresholds({ moistureMax: val })}
+                onSlidingComplete={(val) => {
+                  if (device?.id) {
+                    updateDeviceConfigInRTDB(device.id, {
+                      'thresholds/moistureMax': val,
+                    } as any).catch((err) => console.warn('[settings] Failed to persist moistureMax to RTDB:', err));
+                  }
+                }}
+              />
+
+              <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+              {/* Max Temperature Limit Slider */}
+              <SliderControl
+                label="Max Temperature Limit"
+                description="Pauses auto-watering during peak heat to protect roots"
+                value={config!.thresholds.tempMax}
+                min={20}
+                max={50}
+                step={1}
+                unit="°C"
+                accentColor={colors.palette.warningBorder}
+                onChange={(val) => updateThresholds({ tempMax: val })}
+                onSlidingComplete={(val) => {
+                  if (device?.id) {
+                    updateDeviceConfigInRTDB(device.id, {
+                      'thresholds/tempMax': val,
+                    } as any).catch((err) => console.warn('[settings] Failed to persist tempMax to RTDB:', err));
+                  }
+                }}
+              />
+
+              <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+              {/* Max Humidity Limit Slider */}
+              <SliderControl
+                label="Max Humidity Limit"
+                description="Coastal guard delays watering when ambient air humidity is high"
+                value={config!.thresholds.humidityMax}
+                min={40}
+                max={95}
+                step={5}
+                unit="%"
+                accentColor={colors.palette.forest}
+                onChange={(val) => updateThresholds({ humidityMax: val })}
+                onSlidingComplete={(val) => {
+                  if (device?.id) {
+                    updateDeviceConfigInRTDB(device.id, {
+                      'thresholds/humidityMax': val,
+                    } as any).catch((err) => console.warn('[settings] Failed to persist humidityMax to RTDB:', err));
+                  }
+                }}
+              />
+
+              <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+              {/* Watering Duration Slider */}
+              <SliderControl
+                label="Watering Duration"
+                description="Run-time per automatic irrigation cycle (max 15s)"
+                value={config!.thresholds.pumpDurationSec}
+                min={1}
+                max={15}
+                step={1}
+                unit="s"
+                accentColor={colors.palette.sage}
+                onChange={(val) => updateThresholds({ pumpDurationSec: val })}
+                onSlidingComplete={(val) => {
+                  if (device?.id) {
+                    updateDeviceConfigInRTDB(device.id, {
+                      'thresholds/pumpDurationSec': val,
+                      'thresholds/waterDurationSec': val,
+                    } as any).catch((err) => console.warn('[settings] Failed to persist pumpDurationSec to RTDB:', err));
+                  }
+                }}
+              />
+            </View>
 
         {/* ── 4. SENSORS & RESERVOIR CARD ────────────────────────────── */}
         <View
@@ -512,50 +844,10 @@ export default function SettingsScreen() {
             </View>
           </View>
 
-          {/* Light Sensor Mode */}
-          <View style={styles.rowBetween}>
-            <View style={{ flex: 1, paddingRight: 8 }}>
-              <Text style={[styles.itemLabel, { color: colors.text }]}>Light Sensor (LDR)</Text>
-              <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
-                Sunlight mode ({config.sensors.lightMode})
-              </Text>
-            </View>
-            <View style={styles.pillSelectorRow}>
-              {(['none', 'digital', 'analog'] as LightMode[]).map((mode) => {
-                const isSelected = config.sensors.lightMode === mode;
-                return (
-                  <TouchableOpacity
-                    key={mode}
-                    onPress={() => updateSensors({ lightMode: mode })}
-                    style={[
-                      styles.modePill,
-                      {
-                        backgroundColor: isSelected ? colors.palette.forest : colors.palette.mist,
-                        borderColor: isSelected ? colors.palette.forest : colors.border,
-                        borderRadius: radii.sm,
-                      },
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.modePillText,
-                        { color: isSelected ? colors.palette.white : colors.palette.ink },
-                      ]}
-                    >
-                      {mode.charAt(0).toUpperCase() + mode.slice(1)}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </View>
-
-          <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
-
           {/* Soil Calibration Wizard Trigger */}
           <View style={styles.rowBetween}>
             <View style={{ flex: 1 }}>
-              <Text style={[styles.itemLabel, { color: colors.text }]}>Soil Sensor Calibration</Text>
+              <Text style={[styles.itemLabel, { color: colors.text }]}>Soil Sensor Calibration (Dry & Wet)</Text>
               <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
                 Dry: {config.calibration.soilDryRaw} | Wet: {config.calibration.soilWetRaw}
               </Text>
@@ -576,56 +868,66 @@ export default function SettingsScreen() {
 
           <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
-          {/* Reservoir Capacity */}
+          {/* Bottle Size */}
           <SliderControl
-            label="Bottle Capacity"
-            description="Volume of reservoir attached to the plant node"
-            value={config.bottle.capacityMl}
+            label="Bottle Size"
+            description="Volume of water bottle attached to the plant node"
+            value={activeBottleCapacity}
             min={250}
             max={2000}
             step={50}
             unit=" ml"
             accentColor={colors.palette.forest}
-            onChange={(val) => {
+            onChange={(val) => setBottleCapacityDraft(val)}
+            onSlidingComplete={(val) => {
+              setBottleCapacityDraft(null);
+              const currentRemaining = config!.bottle.remainingMl;
+              const newRemaining = Math.min(currentRemaining, val);
               updateConfig({
                 bottleCapacityMl: val,
+                remainingMl: newRemaining,
                 bottle: {
-                  ...config.bottle,
+                  ...config!.bottle,
                   capacityMl: val,
+                  remainingMl: newRemaining,
                 },
               }, device?.id);
               if (device?.id) {
                 updateDeviceConfigInRTDB(device.id, {
                   bottleCapacityMl: val,
+                  remainingMl: newRemaining,
                   'bottle/capacityMl': val,
-                } as any).catch((err) => console.warn('[settings] Failed to persist bottle capacity to RTDB:', err));
+                  'bottle/remainingMl': newRemaining,
+                } as any).catch((err) => console.warn('[settings] Failed to persist bottle size to RTDB:', err));
               }
             }}
           />
 
           <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
-          {/* Pump Flow Rate */}
+          {/* Pump Speed */}
           <SliderControl
-            label="Pump Flow Rate"
-            description="Calibration flow rate measured during bottle pump test"
-            value={config.bottle.flowMlPerSec}
+            label="Pump Speed"
+            description="Adjusts the water-use estimate while the relay switches the pump on and off"
+            value={activePumpFlow}
             min={5}
             max={30}
             step={1}
             unit=" ml/s"
             accentColor={colors.palette.sage}
-            onChange={(val) => {
+            onChange={(val) => setPumpFlowDraft(val)}
+            onSlidingComplete={(val) => {
+              setPumpFlowDraft(null);
               updateConfig({
                 bottle: {
-                  ...config.bottle,
+                  ...config!.bottle,
                   flowMlPerSec: val,
                 },
               }, device?.id);
               if (device?.id) {
                 updateDeviceConfigInRTDB(device.id, {
                   'bottle/flowMlPerSec': val,
-                } as any).catch((err) => console.warn('[settings] Failed to persist flow rate to RTDB:', err));
+                } as any).catch((err) => console.warn('[settings] Failed to persist pump speed to RTDB:', err));
               }
             }}
           />
@@ -642,7 +944,7 @@ export default function SettingsScreen() {
                 } else {
                   Alert.alert(
                     'Refill Pending',
-                    'Waiting for device acknowledgement. Please check hardware connection.'
+                    'Waiting for controller acknowledgement. Please check hardware connection.'
                   );
                 }
               } catch (err: any) {
@@ -659,11 +961,13 @@ export default function SettingsScreen() {
             <Ionicons name="refresh" size={15} color={colors.palette.forest} />
             <Text style={[styles.refillRowText, { color: colors.palette.forest }]}>
               {isRefilling
-                ? 'Confirming Refill with Device...'
+                ? 'Confirming Refill with Controller...'
                 : `Mark Bottle as Refilled (${config.bottle.remainingMl} / ${config.bottle.capacityMl} ml)`}
             </Text>
           </TouchableOpacity>
         </View>
+          </>
+        )}
 
         {/* ── 5. SECONDARY OPTIONS ACCORDION (COLLAPSIBLE GROUPING) ──── */}
         <View style={styles.accordionGroupWrap}>
@@ -675,155 +979,157 @@ export default function SettingsScreen() {
           </View>
 
           {/* ACCORDION 1: Notifications & Alerts */}
-          <View
-            style={[
-              styles.accordionCard,
-              {
-                backgroundColor: colors.surface,
-                borderRadius: radii.card,
-                borderColor: colors.border,
-              },
-            ]}
-          >
-            <TouchableOpacity
-              onPress={() => toggleSection('alerts')}
-              style={styles.accordionTitleRow}
-              activeOpacity={0.7}
-            >
-              <View style={styles.rowCentered}>
-                <View style={[styles.iconPillSm, { backgroundColor: colors.palette.blush }]}>
-                  <Ionicons name="notifications-outline" size={16} color={colors.palette.warningText} />
-                </View>
-                <View>
-                  <Text style={[styles.accordionItemTitle, { color: colors.text }]}>
-                    Alerts & Push Notifications
-                  </Text>
-                  <Text style={[styles.accordionItemSubtitle, { color: colors.textMuted }]}>
-                    Threshold warnings & quiet hours
-                  </Text>
-                </View>
+              <View
+                style={[
+                  styles.accordionCard,
+                  {
+                    backgroundColor: colors.surface,
+                    borderRadius: radii.card,
+                    borderColor: colors.border,
+                  },
+                ]}
+              >
+                <TouchableOpacity
+                  onPress={() => toggleSection('alerts')}
+                  style={styles.accordionTitleRow}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.rowCentered}>
+                    <View style={[styles.iconPillSm, { backgroundColor: colors.palette.blush }]}>
+                      <Ionicons name="notifications-outline" size={16} color={colors.palette.warningText} />
+                    </View>
+                    <View>
+                      <Text style={[styles.accordionItemTitle, { color: colors.text }]}>
+                        Alerts & Push Notifications
+                      </Text>
+                      <Text style={[styles.accordionItemSubtitle, { color: colors.textMuted }]}>
+                        Threshold warnings & quiet hours
+                      </Text>
+                    </View>
+                  </View>
+                  <Ionicons
+                    name={expandedSections.alerts ? 'chevron-up' : 'chevron-down'}
+                    size={18}
+                    color={colors.palette.sage}
+                  />
+                </TouchableOpacity>
+
+                {expandedSections.alerts && (
+                  <View style={styles.accordionBody}>
+                    <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+                    {/* Bottle Low / Empty */}
+                    <View style={styles.toggleRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.itemLabel, { color: colors.text }]}>Reservoir Low / Empty</Text>
+                        <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
+                          Alert when bottle level drops below 20%
+                        </Text>
+                      </View>
+                      <Switch
+                        value={alerts.bottle}
+                        onValueChange={(val) => handleToggleAlert('bottle', val)}
+                        trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
+                        thumbColor={colors.palette.white}
+                      />
+                    </View>
+
+                    <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+                    {/* Dry Soil */}
+                    <View style={styles.toggleRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.itemLabel, { color: colors.text }]}>Dry Soil Warning</Text>
+                        <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
+                          Alert if moisture stays under min threshold
+                        </Text>
+                      </View>
+                      <Switch
+                        value={alerts.dry}
+                        onValueChange={(val) => handleToggleAlert('dry', val)}
+                        trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
+                        thumbColor={colors.palette.white}
+                      />
+                    </View>
+
+                    <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+                    {/* Overwatered Risk */}
+                    <View style={styles.toggleRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.itemLabel, { color: colors.text }]}>Over-watering Risk</Text>
+                        <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
+                          Alert if soil moisture exceeds max cap with high humidity
+                        </Text>
+                      </View>
+                      <Switch
+                        value={alerts.wet}
+                        onValueChange={(val) => handleToggleAlert('wet', val)}
+                        trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
+                        thumbColor={colors.palette.white}
+                      />
+                    </View>
+
+                    <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+                    {/* Extreme Heat */}
+                    <View style={styles.toggleRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.itemLabel, { color: colors.text }]}>Extreme Heat & Weather</Text>
+                        <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
+                          Alert if temperature exceeds {config?.thresholds.tempMax ?? 35}°C
+                        </Text>
+                      </View>
+                      <Switch
+                        value={alerts.heat}
+                        onValueChange={(val) => handleToggleAlert('heat', val)}
+                        trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
+                        thumbColor={colors.palette.white}
+                      />
+                    </View>
+
+                    <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+                    {/* Device Offline */}
+                    <View style={styles.toggleRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.itemLabel, { color: colors.text }]}>Device Offline</Text>
+                        <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
+                          Alert if no telemetry signal received for &gt; 3 mins
+                        </Text>
+                      </View>
+                      <Switch
+                        value={alerts.offline}
+                        onValueChange={(val) => handleToggleAlert('offline', val)}
+                        trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
+                        thumbColor={colors.palette.white}
+                      />
+                    </View>
+
+                    <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+                    {/* Quiet Hours Picker */}
+                    <View style={styles.rowBetween}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.itemLabel, { color: colors.text }]}>Quiet Hours</Text>
+                        <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
+                          Silence notifications during night ({quietHoursRange})
+                        </Text>
+                      </View>
+                      <Switch
+                        value={quietHoursEnabled}
+                        onValueChange={handleToggleQuietHours}
+                        trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
+                        thumbColor={colors.palette.white}
+                      />
+                    </View>
+                  </View>
+                )}
               </View>
-              <Ionicons
-                name={expandedSections.alerts ? 'chevron-up' : 'chevron-down'}
-                size={18}
-                color={colors.palette.sage}
-              />
-            </TouchableOpacity>
 
-            {expandedSections.alerts && (
-              <View style={styles.accordionBody}>
-                <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
-
-                {/* Bottle Low / Empty */}
-                <View style={styles.toggleRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.itemLabel, { color: colors.text }]}>Reservoir Low / Empty</Text>
-                    <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
-                      Alert when bottle level drops below 20%
-                    </Text>
-                  </View>
-                  <Switch
-                    value={alerts.bottle}
-                    onValueChange={(val) => setAlerts((prev) => ({ ...prev, bottle: val }))}
-                    trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
-                    thumbColor={colors.palette.white}
-                  />
-                </View>
-
-                <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
-
-                {/* Dry Soil */}
-                <View style={styles.toggleRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.itemLabel, { color: colors.text }]}>Dry Soil Warning</Text>
-                    <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
-                      Alert if moisture stays under min threshold
-                    </Text>
-                  </View>
-                  <Switch
-                    value={alerts.dry}
-                    onValueChange={(val) => setAlerts((prev) => ({ ...prev, dry: val }))}
-                    trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
-                    thumbColor={colors.palette.white}
-                  />
-                </View>
-
-                <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
-
-                {/* Overwatered Risk */}
-                <View style={styles.toggleRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.itemLabel, { color: colors.text }]}>Over-watering Risk</Text>
-                    <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
-                      Alert if soil moisture exceeds max cap with high humidity
-                    </Text>
-                  </View>
-                  <Switch
-                    value={alerts.wet}
-                    onValueChange={(val) => setAlerts((prev) => ({ ...prev, wet: val }))}
-                    trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
-                    thumbColor={colors.palette.white}
-                  />
-                </View>
-
-                <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
-
-                {/* Extreme Heat */}
-                <View style={styles.toggleRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.itemLabel, { color: colors.text }]}>Extreme Heat & Weather</Text>
-                    <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
-                      Alert if temperature exceeds {config.thresholds.tempMax}°C
-                    </Text>
-                  </View>
-                  <Switch
-                    value={alerts.heat}
-                    onValueChange={(val) => setAlerts((prev) => ({ ...prev, heat: val }))}
-                    trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
-                    thumbColor={colors.palette.white}
-                  />
-                </View>
-
-                <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
-
-                {/* Device Offline */}
-                <View style={styles.toggleRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.itemLabel, { color: colors.text }]}>Device Offline</Text>
-                    <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
-                      Alert if no telemetry signal received for &gt; 3 mins
-                    </Text>
-                  </View>
-                  <Switch
-                    value={alerts.offline}
-                    onValueChange={(val) => setAlerts((prev) => ({ ...prev, offline: val }))}
-                    trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
-                    thumbColor={colors.palette.white}
-                  />
-                </View>
-
-                <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
-
-                {/* Quiet Hours Picker */}
-                <View style={styles.rowBetween}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.itemLabel, { color: colors.text }]}>Quiet Hours</Text>
-                    <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
-                      Silence notifications during night ({quietHoursRange})
-                    </Text>
-                  </View>
-                  <Switch
-                    value={quietHoursEnabled}
-                    onValueChange={setQuietHoursEnabled}
-                    trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
-                    thumbColor={colors.palette.white}
-                  />
-                </View>
-              </View>
-            )}
-          </View>
-
-          {/* ACCORDION 2: Device Information & Network */}
+          {device && (
+            <>
+              {/* ACCORDION 2: Device Information & Network */}
           <View
             style={[
               styles.accordionCard,
@@ -845,10 +1151,10 @@ export default function SettingsScreen() {
                 </View>
                 <View>
                   <Text style={[styles.accordionItemTitle, { color: colors.text }]}>
-                    Device & Network Information
+                    Controller & Network
                   </Text>
                   <Text style={[styles.accordionItemSubtitle, { color: colors.textMuted }]}>
-                    Hardware ID, Wi-Fi pairing & unpair
+                    Controller ID, connection & unpair
                   </Text>
                 </View>
               </View>
@@ -864,7 +1170,7 @@ export default function SettingsScreen() {
                 <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
                 <View style={styles.rowBetween}>
-                  <Text style={[styles.itemLabel, { color: colors.textMuted }]}>Hardware ID</Text>
+                  <Text style={[styles.itemLabel, { color: colors.textMuted }]}>Controller ID</Text>
                   <View
                     style={[
                       styles.monoBadge,
@@ -896,15 +1202,15 @@ export default function SettingsScreen() {
                 >
                   <Ionicons name="sync-outline" size={16} color={colors.palette.forest} />
                   <Text style={[styles.actionBtnText, { color: colors.palette.forest }]}>
-                    Re-pair Device / Wi-Fi Setup
+                    Reconnect Controller / Wi-Fi Setup
                   </Text>
                 </TouchableOpacity>
 
-                {/* Action: Remove / Unpair Device */}
+                {/* Action: Remove / Unpair Controller */}
                 <TouchableOpacity
                   testID="remove-device-btn"
                   accessibilityRole="button"
-                  accessibilityLabel="Remove or unpair this plant device"
+                  accessibilityLabel="Remove or unpair this plant controller"
                   onPress={handleRemoveDevice}
                   disabled={isRemovingDevice}
                   style={[
@@ -929,7 +1235,7 @@ export default function SettingsScreen() {
                           { color: colors.palette.critical, fontWeight: '700' },
                         ]}
                       >
-                        Remove / Unpair Device
+                        Remove Controller
                       </Text>
                     </>
                   )}
@@ -938,7 +1244,7 @@ export default function SettingsScreen() {
             )}
           </View>
 
-          {/* ACCORDION 3: Firmware Details & Diagnostics */}
+          {/* ACCORDION 3: Controller Details */}
           <View
             style={[
               styles.accordionCard,
@@ -956,14 +1262,14 @@ export default function SettingsScreen() {
             >
               <View style={styles.rowCentered}>
                 <View style={[styles.iconPillSm, { backgroundColor: colors.palette.mist }]}>
-                  <Ionicons name="code-slash-outline" size={16} color={colors.palette.forest} />
+                  <Ionicons name="hardware-chip-outline" size={16} color={colors.palette.forest} />
                 </View>
                 <View>
                   <Text style={[styles.accordionItemTitle, { color: colors.text }]}>
-                    Firmware & Diagnostics
+                    Controller Details
                   </Text>
                   <Text style={[styles.accordionItemSubtitle, { color: colors.textMuted }]}>
-                    Microcontroller architecture & signal stats
+                    Controller status & live sensor information
                   </Text>
                 </View>
               </View>
@@ -988,7 +1294,7 @@ export default function SettingsScreen() {
                 <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
                 <View style={styles.rowBetween}>
-                  <Text style={[styles.infoFieldLabel, { color: colors.textMuted }]}>Microcontroller</Text>
+                  <Text style={[styles.infoFieldLabel, { color: colors.textMuted }]}>Controller Hardware</Text>
                   <Text style={[styles.infoFieldValue, { color: colors.text }]}>
                     NodeMCU / ESP-12E (80 MHz)
                   </Text>
@@ -997,7 +1303,7 @@ export default function SettingsScreen() {
                 <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
                 <View style={styles.rowBetween}>
-                  <Text style={[styles.infoFieldLabel, { color: colors.textMuted }]}>Wi-Fi RSSI Signal</Text>
+                  <Text style={[styles.infoFieldLabel, { color: colors.textMuted }]}>Wi-Fi Signal</Text>
                   <Text style={[styles.infoFieldValue, { color: colors.text }]}>
                     {telemetry.rssi ? `${telemetry.rssi} dBm` : '-60 dBm (Good)'}
                   </Text>
@@ -1006,7 +1312,7 @@ export default function SettingsScreen() {
                 <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
                 <View style={styles.rowBetween}>
-                  <Text style={[styles.infoFieldLabel, { color: colors.textMuted }]}>ADC Span (Air / Water)</Text>
+                  <Text style={[styles.infoFieldLabel, { color: colors.textMuted }]}>Soil Sensor Calibration (Dry & Wet)</Text>
                   <Text style={[styles.infoFieldValue, { color: colors.text }]}>
                     {config.calibration.soilDryRaw} - {config.calibration.soilWetRaw}
                   </Text>
@@ -1015,14 +1321,16 @@ export default function SettingsScreen() {
                 <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
                 <View style={styles.rowBetween}>
-                  <Text style={[styles.infoFieldLabel, { color: colors.textMuted }]}>Telemetry Protocol</Text>
+                  <Text style={[styles.infoFieldLabel, { color: colors.textMuted }]}>Live Sensor Updates</Text>
                   <Text style={[styles.infoFieldValue, { color: colors.text }]}>
-                    Firebase Realtime Database (RTDB)
+                    {status.online ? 'Connected' : 'Offline'}
                   </Text>
                 </View>
               </View>
             )}
           </View>
+            </>
+          )}
 
           {/* ACCORDION 4: Account Security & Session */}
           <View
@@ -1074,7 +1382,7 @@ export default function SettingsScreen() {
                   </View>
                   <View style={styles.unitToggleWrap}>
                     <TouchableOpacity
-                      onPress={() => setTempUnit('C')}
+                      onPress={() => handleSetTempUnit('C')}
                       style={[
                         styles.unitBtn,
                         {
@@ -1093,7 +1401,7 @@ export default function SettingsScreen() {
                       </Text>
                     </TouchableOpacity>
                     <TouchableOpacity
-                      onPress={() => setTempUnit('F')}
+                      onPress={() => handleSetTempUnit('F')}
                       style={[
                         styles.unitBtn,
                         {
@@ -1142,6 +1450,103 @@ export default function SettingsScreen() {
                   <Text style={[styles.signOutText, { color: colors.palette.warningText }]}>
                     Sign Out of Account
                   </Text>
+                </TouchableOpacity>
+
+                <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+                {/* Delete Account Action */}
+                <TouchableOpacity
+                  testID="delete-account-btn"
+                  accessibilityRole="button"
+                  accessibilityLabel="Permanently delete account"
+                  onPress={handleDeleteAccount}
+                  disabled={isDeletingAccount}
+                  style={[
+                    styles.deleteAccountRow,
+                    { backgroundColor: 'rgba(235, 87, 87, 0.08)', borderRadius: radii.sm },
+                  ]}
+                >
+                  {isDeletingAccount ? (
+                    <ActivityIndicator size="small" color={colors.palette.critical} />
+                  ) : (
+                    <>
+                      <Ionicons name="trash-outline" size={16} color={colors.palette.critical} />
+                      <Text style={[styles.deleteAccountText, { color: colors.palette.critical }]}>
+                        Delete Account & Data
+                      </Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+
+          {/* ACCORDION 5: Legal & Privacy Compliance */}
+          <View
+            style={[
+              styles.accordionCard,
+              {
+                backgroundColor: colors.surface,
+                borderRadius: radii.card,
+                borderColor: colors.border,
+              },
+            ]}
+          >
+            <TouchableOpacity
+              onPress={() => toggleSection('legal')}
+              style={styles.accordionTitleRow}
+              activeOpacity={0.7}
+            >
+              <View style={styles.rowCentered}>
+                <View style={[styles.iconPillSm, { backgroundColor: colors.palette.mist }]}>
+                  <Ionicons name="document-text-outline" size={16} color={colors.palette.forest} />
+                </View>
+                <View>
+                  <Text style={[styles.accordionItemTitle, { color: colors.text }]}>
+                    Legal & Privacy Compliance
+                  </Text>
+                  <Text style={[styles.accordionItemSubtitle, { color: colors.textMuted }]}>
+                    Terms, sensor telemetry & privacy policies
+                  </Text>
+                </View>
+              </View>
+              <Ionicons
+                name={expandedSections.legal ? 'chevron-up' : 'chevron-down'}
+                size={18}
+                color={colors.palette.sage}
+              />
+            </TouchableOpacity>
+
+            {expandedSections.legal && (
+              <View style={styles.accordionBody}>
+                <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+                <TouchableOpacity
+                  onPress={() => setPolicyModal({ visible: true, type: 'terms' })}
+                  style={styles.legalRowItem}
+                >
+                  <View style={styles.rowCentered}>
+                    <Ionicons name="shield-outline" size={18} color={colors.palette.forest} />
+                    <Text style={[styles.legalItemText, { color: colors.text }]}>
+                      Terms & Conditions
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={colors.palette.sage} />
+                </TouchableOpacity>
+
+                <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+                <TouchableOpacity
+                  onPress={() => setPolicyModal({ visible: true, type: 'privacy' })}
+                  style={styles.legalRowItem}
+                >
+                  <View style={styles.rowCentered}>
+                    <Ionicons name="lock-closed-outline" size={18} color={colors.palette.forest} />
+                    <Text style={[styles.legalItemText, { color: colors.text }]}>
+                      Privacy Policy & Telemetry Notice
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={colors.palette.sage} />
                 </TouchableOpacity>
               </View>
             )}
@@ -1271,15 +1676,24 @@ export default function SettingsScreen() {
               </TouchableOpacity>
             </View>
 
-            <CalibrationWizard
-              deviceId={device.id}
-              initialValues={config.calibration}
-              onCalibrationComplete={handleCalibrationComplete}
-              onSkip={() => setCalibrationModalOpen(false)}
-            />
+            {device && config && (
+              <CalibrationWizard
+                deviceId={device.id}
+                initialValues={config.calibration}
+                onCalibrationComplete={handleCalibrationComplete}
+                onSkip={() => setCalibrationModalOpen(false)}
+              />
+            )}
           </View>
         </View>
       </Modal>
+
+      {/* ── LEGAL & PRIVACY POLICIES MODAL ───────────────────────────── */}
+      <LegalPoliciesModal
+        visible={policyModal.visible}
+        type={policyModal.type}
+        onClose={() => setPolicyModal((prev) => ({ ...prev, visible: false }))}
+      />
     </SafeAreaView>
   );
 }
@@ -1314,6 +1728,27 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginTop: 12,
     marginBottom: 16,
+  },
+  locationSection: {
+    marginBottom: 4,
+  },
+  locationPickerRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 6,
+  },
+  locationBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderWidth: 1.5,
+  },
+  locationBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
   },
   primaryBtn: {
     flexDirection: 'row',
@@ -1702,5 +2137,32 @@ const styles = StyleSheet.create({
   calModalTitle: {
     fontSize: 18,
     fontWeight: '800',
+  },
+  emptyDesc: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  deleteAccountRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    marginTop: 10,
+  },
+  deleteAccountText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  legalRowItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+  },
+  legalItemText: {
+    fontSize: 13,
+    fontWeight: '600',
+    marginLeft: 10,
   },
 });

@@ -39,8 +39,10 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
     canWater,
     executeWaterNow,
     resetCommandState,
-    refillBottle,
   } = useCommand();
+
+  const [isRefilling, setIsRefilling] = useState(false);
+  const liveRefillBottle = useLiveDevice((s) => s.refillBottle);
 
   if (!device) return null;
 
@@ -67,12 +69,10 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
     switch (stg) {
       case 'sent':
         return 1;
-      case 'received':
-        return 2;
       case 'running':
-        return 3;
+        return 2;
       case 'done':
-        return 4;
+        return 3;
       default:
         return 0;
     }
@@ -98,7 +98,7 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
               <View>
                 <Text style={[styles.title, { color: colors.text }]}>Manual Water Dispenser</Text>
                 <Text style={[styles.subtitle, { color: colors.textMuted }]}>
-                  {config.name || config.plantName || 'Plant'} • ID: {device.id} • {telemetry.soilMoisture}% Moisture
+                  {config.name || config.plantName || 'Plant'} • Controller: {device.id} • {telemetry.soilMoisture}% Moisture
                 </Text>
               </View>
             </View>
@@ -131,10 +131,25 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
                 </Text>
               </View>
               <TouchableOpacity
-                style={[styles.refillBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.full }]}
-                onPress={() => refillBottle()}
+                disabled={isRefilling}
+                style={[
+                  styles.refillBtn,
+                  { backgroundColor: colors.palette.forest, borderRadius: radii.full, opacity: isRefilling ? 0.7 : 1 },
+                ]}
+                onPress={async () => {
+                  setIsRefilling(true);
+                  try {
+                    await liveRefillBottle(device.id);
+                  } finally {
+                    setIsRefilling(false);
+                  }
+                }}
               >
-                <Text style={styles.refillBtnText}>I Refilled</Text>
+                {isRefilling ? (
+                  <ActivityIndicator size="small" color={colors.palette.white} />
+                ) : (
+                  <Text style={styles.refillBtnText}>I Refilled</Text>
+                )}
               </TouchableOpacity>
             </View>
           )}
@@ -142,14 +157,13 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
           {/* Active Command Lifecycle Stepper */}
           {stage !== 'idle' && (
             <View style={[styles.stepperCard, { backgroundColor: colors.palette.mist, borderRadius: radii.card }]}>
-              <Text style={[styles.stepperHeader, { color: colors.text }]}>Command Lifecycle Stream</Text>
+              <Text style={[styles.stepperHeader, { color: colors.text }]}>Watering Status</Text>
 
               <View style={styles.stepperRow}>
                 {[
-                  { label: 'Sent', idx: 1, icon: 'paper-plane-outline' as const },
-                  { label: 'Received', idx: 2, icon: 'checkmark-circle-outline' as const },
-                  { label: 'Watering', idx: 3, icon: 'water-outline' as const },
-                  { label: 'Done', idx: 4, icon: 'checkmark-done-circle' as const },
+                  { label: 'Sending request', idx: 1, icon: 'paper-plane-outline' as const },
+                  { label: 'Watering', idx: 2, icon: 'water-outline' as const },
+                  { label: 'Done', idx: 3, icon: 'checkmark-done-circle' as const },
                 ].map((st, i) => {
                   const isPast = activeStageIndex >= st.idx;
                   const isCurrent = activeStageIndex === st.idx;
@@ -197,11 +211,18 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
               </View>
 
               {/* Active countdown or done banner */}
+              {stage === 'sent' && (
+                <View style={[styles.activeWateringPill, { backgroundColor: colors.palette.forest, borderRadius: radii.full }]}>
+                  <ActivityIndicator size="small" color={colors.palette.white} style={{ marginRight: 6 }} />
+                  <Text style={styles.activeWateringText}>Sending request...</Text>
+                </View>
+              )}
+
               {stage === 'running' && (
                 <View style={[styles.activeWateringPill, { backgroundColor: colors.palette.forest, borderRadius: radii.full }]}>
                   <Ionicons name="water" size={14} color={colors.palette.white} />
                   <Text style={styles.activeWateringText}>
-                    Dispensing... {secondsRemaining}s remaining
+                    Watering... {secondsRemaining}s remaining
                   </Text>
                 </View>
               )}
@@ -220,7 +241,7 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
                 <View style={[styles.errorBanner, { backgroundColor: colors.palette.blush, borderRadius: radii.md }]}>
                   <Ionicons name="warning" size={16} color={colors.palette.warningText} />
                   <Text style={[styles.errorText, { color: colors.palette.warningText }]}>
-                    {errorMessage || "Device didn't respond. Check Wi-Fi."}
+                    {errorMessage || "Controller didn't respond. Check Wi-Fi."}
                   </Text>
                   <TouchableOpacity
                     style={[styles.retryBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.sm }]}
@@ -312,12 +333,12 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
             accessibilityLabel="Water Now"
             activeOpacity={0.85}
             onPress={stage === 'done' ? handleClose : handleStartWatering}
-            disabled={!canWater && telemetry.soilMoisture < 100 && stage === 'idle'}
+            disabled={(!canWater && telemetry.soilMoisture < 100 && stage === 'idle') || stage === 'sent'}
             style={[
               styles.primaryBtn,
               {
                 backgroundColor:
-                  stage === 'running'
+                  stage === 'sent' || stage === 'running'
                     ? colors.palette.sage
                     : stage === 'done'
                     ? colors.palette.forest
@@ -328,10 +349,15 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
               },
             ]}
           >
-            {stage === 'running' ? (
+            {stage === 'sent' ? (
               <>
                 <ActivityIndicator color="#FFFFFF" size="small" style={{ marginRight: 8 }} />
-                <Text style={styles.primaryBtnText}>Dispensing ({secondsRemaining}s)...</Text>
+                <Text style={styles.primaryBtnText}>Sending request...</Text>
+              </>
+            ) : stage === 'running' ? (
+              <>
+                <ActivityIndicator color="#FFFFFF" size="small" style={{ marginRight: 8 }} />
+                <Text style={styles.primaryBtnText}>Watering... ({secondsRemaining}s)</Text>
               </>
             ) : stage === 'done' ? (
               <>

@@ -64,6 +64,14 @@ export default function AddDeviceScreen() {
   const addDevice = useLiveDevice((s) => s.addDevice);
   const setActiveDeviceId = useSession((s) => s.setActiveDeviceId);
   const user = useSession((s) => s.user);
+  const isAuthReady = useSession((s) => s.isAuthReady);
+
+  // Guard add-device when signed out
+  useEffect(() => {
+    if (isAuthReady && !user) {
+      router.replace('/(auth)/login');
+    }
+  }, [user, isAuthReady]);
 
   const [step, setStep] = useState<number>(1);
   const [showWifiGuide, setShowWifiGuide] = useState<boolean>(true);

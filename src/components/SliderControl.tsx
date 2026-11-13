@@ -19,6 +19,7 @@ export interface SliderControlProps {
   step?: number;
   unit?: string;
   onChange: (val: number) => void;
+  onSlidingComplete?: (val: number) => void;
   accentColor?: string;
   description?: string;
 }
@@ -31,6 +32,7 @@ export function SliderControl({
   step = 1,
   unit = '',
   onChange,
+  onSlidingComplete,
   accentColor,
   description,
 }: SliderControlProps) {
@@ -44,9 +46,9 @@ export function SliderControl({
     return Math.max(min, Math.min(max, stepped));
   };
 
-  const propsRef = useRef({ min, max, step, onChange });
+  const propsRef = useRef({ min, max, step, onChange, onSlidingComplete });
   useEffect(() => {
-    propsRef.current = { min, max, step, onChange };
+    propsRef.current = { min, max, step, onChange, onSlidingComplete };
   });
 
   const panResponder = useRef(
@@ -59,7 +61,8 @@ export function SliderControl({
         const ratio = Math.max(0, Math.min(1, relativeX / (trackWidthRef.current || 1)));
         const rawVal = currentProps.min + ratio * (currentProps.max - currentProps.min);
         const stepped = Math.round((rawVal - currentProps.min) / currentProps.step) * currentProps.step + currentProps.min;
-        currentProps.onChange(Math.max(currentProps.min, Math.min(currentProps.max, stepped)));
+        const clamped = Math.max(currentProps.min, Math.min(currentProps.max, stepped));
+        currentProps.onChange(clamped);
       },
       onPanResponderMove: (evt: GestureResponderEvent) => {
         const currentProps = propsRef.current;
@@ -67,7 +70,27 @@ export function SliderControl({
         const ratio = Math.max(0, Math.min(1, relativeX / (trackWidthRef.current || 1)));
         const rawVal = currentProps.min + ratio * (currentProps.max - currentProps.min);
         const stepped = Math.round((rawVal - currentProps.min) / currentProps.step) * currentProps.step + currentProps.min;
-        currentProps.onChange(Math.max(currentProps.min, Math.min(currentProps.max, stepped)));
+        const clamped = Math.max(currentProps.min, Math.min(currentProps.max, stepped));
+        currentProps.onChange(clamped);
+      },
+      onPanResponderRelease: (evt: GestureResponderEvent) => {
+        const currentProps = propsRef.current;
+        const relativeX = evt.nativeEvent.pageX - trackLayoutXRef.current;
+        const ratio = Math.max(0, Math.min(1, relativeX / (trackWidthRef.current || 1)));
+        const rawVal = currentProps.min + ratio * (currentProps.max - currentProps.min);
+        const stepped = Math.round((rawVal - currentProps.min) / currentProps.step) * currentProps.step + currentProps.min;
+        const clamped = Math.max(currentProps.min, Math.min(currentProps.max, stepped));
+        currentProps.onChange(clamped);
+        currentProps.onSlidingComplete?.(clamped);
+      },
+      onPanResponderTerminate: (evt: GestureResponderEvent) => {
+        const currentProps = propsRef.current;
+        const relativeX = evt.nativeEvent.pageX - trackLayoutXRef.current;
+        const ratio = Math.max(0, Math.min(1, relativeX / (trackWidthRef.current || 1)));
+        const rawVal = currentProps.min + ratio * (currentProps.max - currentProps.min);
+        const stepped = Math.round((rawVal - currentProps.min) / currentProps.step) * currentProps.step + currentProps.min;
+        const clamped = Math.max(currentProps.min, Math.min(currentProps.max, stepped));
+        currentProps.onSlidingComplete?.(clamped);
       },
     })
   ).current;
@@ -75,11 +98,15 @@ export function SliderControl({
   const percentage = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
 
   const handleDecrement = () => {
-    onChange(clampValue(value - step));
+    const nextVal = clampValue(value - step);
+    onChange(nextVal);
+    onSlidingComplete?.(nextVal);
   };
 
   const handleIncrement = () => {
-    onChange(clampValue(value + step));
+    const nextVal = clampValue(value + step);
+    onChange(nextVal);
+    onSlidingComplete?.(nextVal);
   };
 
   return (

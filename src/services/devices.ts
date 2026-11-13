@@ -36,7 +36,11 @@ export const listenToDeviceTelemetry = (
     }
   });
 
-  return () => unsubscribe();
+  return () => {
+    if (typeof unsubscribe === 'function') {
+      unsubscribe();
+    }
+  };
 };
 
 /**
@@ -53,7 +57,11 @@ export const listenToDeviceConfig = (
     }
   });
 
-  return () => unsubscribe();
+  return () => {
+    if (typeof unsubscribe === 'function') {
+      unsubscribe();
+    }
+  };
 };
 
 /**
@@ -70,7 +78,11 @@ export const listenToDeviceStatus = (
     }
   });
 
-  return () => unsubscribe();
+  return () => {
+    if (typeof unsubscribe === 'function') {
+      unsubscribe();
+    }
+  };
 };
 
 /**
@@ -89,7 +101,11 @@ export const listenToDeviceCommand = (
     }
   });
 
-  return () => unsubscribe();
+  return () => {
+    if (typeof unsubscribe === 'function') {
+      unsubscribe();
+    }
+  };
 };
 
 /**
@@ -100,15 +116,10 @@ export const sendDeviceCommand = async (
   command: Omit<DeviceCommand, 'id' | 'requestedAt'>,
   cmdId = `cmd-${Date.now()}`
 ): Promise<string> => {
-  const fullCommand: DeviceCommand = {
+  const fullCommand = {
     ...command,
     id: cmdId,
     requestedAt: Date.now(),
-    ack: {
-      id: `ack-${Date.now()}`,
-      status: 'received',
-      ts: Date.now(),
-    },
   };
 
   const commandRef = ref(db, `devices/${deviceId}/command`);
@@ -182,7 +193,11 @@ export const listenToWaterLogs = (
     }
   });
 
-  return () => unsubscribe();
+  return () => {
+    if (typeof unsubscribe === 'function') {
+      unsubscribe();
+    }
+  };
 };
 
 /**
@@ -240,7 +255,11 @@ export const listenToDeviceHistory = (
     }
   });
 
-  return () => unsubscribe();
+  return () => {
+    if (typeof unsubscribe === 'function') {
+      unsubscribe();
+    }
+  };
 };
 
 export interface DeviceAlertRecord {
@@ -448,7 +467,11 @@ export const listenToDeviceAlerts = (
     }
   });
 
-  return () => unsubscribe();
+  return () => {
+    if (typeof unsubscribe === 'function') {
+      unsubscribe();
+    }
+  };
 };
 
 /**
@@ -471,13 +494,12 @@ export async function removeDeviceWithAudit(
 
   const effectivePlantName = plantName || 'Unnamed Plant';
 
-  // 1. First push immutable audit records
+  // 1. First push immutable audit records (with emails stripped)
   const auditRecord = {
     action: 'DEVICE_REMOVED',
     deviceId,
     plantName: effectivePlantName,
-    deletedByUid: uid,
-    deletedByEmail: userEmail || 'unknown',
+    actorUid: uid,
     timestamp: serverTimestamp(),
   };
 
@@ -495,7 +517,51 @@ export async function removeDeviceWithAudit(
     console.warn(`[removeDeviceWithAudit] Failed to write user audit log for ${uid}:`, err);
   }
 
-  // 2. Remove /users/{uid}/devices/{deviceId}
+  // 2. Write a terminal disarm command and reset controller mode so old auto schedules are disarmed
+  const disarmCmdId = `cmd-disarm-${Date.now()}`;
+  try {
+    await update(ref(db, `devices/${deviceId}/config`), {
+      mode: 'manual',
+    });
+  } catch (err) {
+    console.warn(`[removeDeviceWithAudit] Failed to reset mode to manual for ${deviceId}:`, err);
+  }
+
+  try {
+    await set(ref(db, `devices/${deviceId}/command`), {
+      id: disarmCmdId,
+      type: 'disarm',
+      requestedAt: Date.now(),
+    });
+
+    // Wait for hardware disarm confirmation before releasing ownership
+    await new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let unsubscribe: (() => void) | null = null;
+      try {
+        unsubscribe = listenToDeviceCommand(deviceId, (cmd) => {
+          if (cmd?.id === disarmCmdId && cmd?.ack?.id === disarmCmdId) {
+            if (timer) clearTimeout(timer);
+            unsubscribe?.();
+            resolve();
+          }
+        });
+      } catch {
+        resolve();
+      }
+      const timeoutMs = typeof process !== 'undefined' && process.env.NODE_ENV === 'test' ? 50 : 2000;
+      timer = setTimeout(() => {
+        try {
+          unsubscribe?.();
+        } catch {}
+        resolve();
+      }, timeoutMs);
+    });
+  } catch (err) {
+    console.warn(`[removeDeviceWithAudit] Failed to dispatch disarm command for ${deviceId}:`, err);
+  }
+
+  // 3. Remove /users/{uid}/devices/{deviceId}
   try {
     await remove(ref(db, `users/${uid}/devices/${deviceId}`));
   } catch (err) {
@@ -524,7 +590,7 @@ export async function removeDeviceWithAudit(
     console.warn(`[removeDeviceWithAudit] Failed to clear owner entry for ${deviceId}:`, err);
   }
 
-  // 3. Clear activeDeviceId and update remaining devices
+  // 4. Update remaining devices and preserve active selection if an inactive device was removed
   let remainingDeviceIds: string[] = [];
   try {
     const userDevRef = ref(db, `users/${uid}/devices`);
@@ -544,20 +610,28 @@ export async function removeDeviceWithAudit(
   // Remove device from live store
   useLiveDevice.getState().removeDevice(deviceId);
 
-  const nextDeviceId = remainingDeviceIds.length > 0 ? remainingDeviceIds[0] : null;
+  const currentActiveId = useLiveDevice.getState().activeDeviceId;
+  const isRemovingActive = currentActiveId === deviceId || !currentActiveId;
 
-  if (nextDeviceId) {
-    useLiveDevice.getState().setActiveDeviceId(nextDeviceId);
-    useSession.getState().setActiveDeviceId(nextDeviceId);
-    await AsyncStorage.setItem(`@plant_live_active_device_${uid}`, nextDeviceId).catch((err) => {
-      console.warn('[removeDeviceWithAudit] Failed to persist next deviceId to AsyncStorage:', err);
-    });
+  let nextDeviceId: string | null = null;
+  if (isRemovingActive) {
+    nextDeviceId = remainingDeviceIds.length > 0 ? remainingDeviceIds[0] : null;
+    if (nextDeviceId) {
+      useLiveDevice.getState().setActiveDeviceId(nextDeviceId);
+      useSession.getState().setActiveDeviceId(nextDeviceId);
+      await AsyncStorage.setItem(`@plant_live_active_device_${uid}`, nextDeviceId).catch((err) => {
+        console.warn('[removeDeviceWithAudit] Failed to persist next deviceId to AsyncStorage:', err);
+      });
+    } else {
+      useLiveDevice.getState().setActiveDeviceId('');
+      useSession.getState().setActiveDeviceId('');
+      await AsyncStorage.removeItem(`@plant_live_active_device_${uid}`).catch((err) => {
+        console.warn('[removeDeviceWithAudit] Failed to remove activeDeviceId from AsyncStorage:', err);
+      });
+    }
   } else {
-    useLiveDevice.getState().setActiveDeviceId('');
-    useSession.getState().setActiveDeviceId('');
-    await AsyncStorage.removeItem(`@plant_live_active_device_${uid}`).catch((err) => {
-      console.warn('[removeDeviceWithAudit] Failed to remove activeDeviceId from AsyncStorage:', err);
-    });
+    // Preserve current active device selection
+    nextDeviceId = currentActiveId;
   }
 
   return { nextDeviceId, remainingCount: remainingDeviceIds.length };

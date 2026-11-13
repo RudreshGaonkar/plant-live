@@ -39,8 +39,10 @@ export default function ControlScreen() {
     canWater,
     executeWaterNow,
     resetCommandState,
-    refillBottle,
   } = useCommand();
+
+  const [isRefilling, setIsRefilling] = useState(false);
+  const liveRefillBottle = useLiveDevice((s) => s.refillBottle);
 
   if (!device) return null;
 
@@ -66,12 +68,10 @@ export default function ControlScreen() {
     switch (stage) {
       case 'sent':
         return 1;
-      case 'received':
-        return 2;
       case 'running':
-        return 3;
+        return 2;
       case 'done':
-        return 4;
+        return 3;
       default:
         return 0;
     }
@@ -113,10 +113,25 @@ export default function ControlScreen() {
               </Text>
             </View>
             <TouchableOpacity
-              style={[styles.refillBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.full }]}
-              onPress={() => refillBottle()}
+              disabled={isRefilling}
+              style={[
+                styles.refillBtn,
+                { backgroundColor: colors.palette.forest, borderRadius: radii.full, opacity: isRefilling ? 0.7 : 1 },
+              ]}
+              onPress={async () => {
+                setIsRefilling(true);
+                try {
+                  await liveRefillBottle(device.id);
+                } finally {
+                  setIsRefilling(false);
+                }
+              }}
             >
-              <Text style={styles.refillBtnText}>I Refilled</Text>
+              {isRefilling ? (
+                <ActivityIndicator size="small" color={colors.palette.white} />
+              ) : (
+                <Text style={styles.refillBtnText}>I Refilled</Text>
+              )}
             </TouchableOpacity>
           </View>
         )}
@@ -142,7 +157,7 @@ export default function ControlScreen() {
               <Text style={[styles.cardDesc, { color: colors.textMuted }]}>
                 {isAuto
                   ? 'Auto mode waters automatically based on soil moisture & climate thresholds.'
-                  : 'Manual mode disables automatic pump runs. The app only delivers notifications.'}
+                  : 'Manual mode disables automatic watering cycles. The app only delivers notifications.'}
               </Text>
             </View>
             <StatusChip status={health} />
@@ -292,11 +307,11 @@ export default function ControlScreen() {
             accessibilityLabel="Water Now"
             activeOpacity={0.85}
             onPress={stage === 'done' ? resetCommandState : handleWaterPress}
-            disabled={(!canWater && telemetry.soilMoisture < 100 && stage === 'idle') || isDispensing}
+            disabled={(!canWater && telemetry.soilMoisture < 100 && stage === 'idle') || isDispensing || stage === 'sent'}
             style={[
               styles.waterNowBtn,
               {
-                backgroundColor: isDispensing
+                backgroundColor: (isDispensing || stage === 'sent')
                   ? colors.palette.sage
                   : stage === 'done'
                   ? colors.palette.forest
@@ -307,11 +322,16 @@ export default function ControlScreen() {
               },
             ]}
           >
-            {isDispensing ? (
+            {stage === 'sent' ? (
+              <>
+                <ActivityIndicator color="#FFFFFF" size="small" style={{ marginRight: 8 }} />
+                <Text style={styles.waterNowBtnText}>Sending request...</Text>
+              </>
+            ) : isDispensing || stage === 'running' ? (
               <>
                 <ActivityIndicator color="#FFFFFF" size="small" style={{ marginRight: 8 }} />
                 <Text style={styles.waterNowBtnText}>
-                  Dispensing... ({secondsRemaining}s)
+                  Watering... ({secondsRemaining}s)
                 </Text>
               </>
             ) : stage === 'done' ? (
@@ -379,16 +399,15 @@ export default function ControlScreen() {
         >
           <View style={styles.cardTitleRow}>
             <Ionicons name="radio-outline" size={18} color={colors.palette.forest} />
-            <Text style={[styles.cardTitle, { color: colors.text }]}>Real-Time Command Stream</Text>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>Watering Status</Text>
           </View>
 
-          {/* 4-Step Lifecycle Progress Stepper */}
+          {/* 3-Step Lifecycle Progress Stepper */}
           <View style={styles.stepperRow}>
             {[
-              { label: 'Sent', idx: 1, icon: 'paper-plane-outline' as const },
-              { label: 'Received', idx: 2, icon: 'checkmark-circle-outline' as const },
-              { label: 'Watering', idx: 3, icon: 'water-outline' as const },
-              { label: 'Done', idx: 4, icon: 'checkmark-done-circle' as const },
+              { label: 'Sending request', idx: 1, icon: 'paper-plane-outline' as const },
+              { label: 'Watering', idx: 2, icon: 'water-outline' as const },
+              { label: 'Done', idx: 3, icon: 'checkmark-done-circle' as const },
             ].map((st, i) => {
               const isPast = activeStageIndex >= st.idx;
               const isCurrent = activeStageIndex === st.idx;
@@ -451,8 +470,10 @@ export default function ControlScreen() {
             />
             <Text style={[styles.streamStatus, { color: colors.text }]}>
               {isDispensing
-                ? `Relay Pin D6: ACTIVE (Watering)`
-                : `Listening on /devices/${device.id}/control`}
+                ? 'Watering in progress'
+                : status.online
+                ? 'Controller online and connected'
+                : 'Controller offline'}
             </Text>
           </View>
 
@@ -461,7 +482,7 @@ export default function ControlScreen() {
             <View style={[styles.errorBanner, { backgroundColor: colors.palette.blush, borderRadius: radii.md }]}>
               <Ionicons name="warning" size={16} color={colors.palette.warningText} />
               <Text style={[styles.errorText, { color: colors.palette.warningText }]}>
-                {errorMessage || "Device didn't respond within 15 seconds."}
+                {errorMessage || "Controller didn't respond within 15 seconds."}
               </Text>
               <TouchableOpacity
                 style={[styles.retryBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.sm }]}

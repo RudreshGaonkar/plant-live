@@ -48,25 +48,15 @@ export const onTelemetryWrite = onValueWritten(
       return;
     }
 
-    // 1. Resolve Device Owner
+    // 1. Resolve Device Owner strictly via server/owner claims
     let uid: string | null = null;
-    const ownerSnap = await adminDb.ref(`owners/${deviceId}`).once('value');
-    if (ownerSnap.exists()) {
-      uid = ownerSnap.val() as string;
+    const metaOwnerSnap = await adminDb.ref(`devices/${deviceId}/meta/ownerUid`).once('value');
+    if (metaOwnerSnap.exists() && typeof metaOwnerSnap.val() === 'string') {
+      uid = metaOwnerSnap.val() as string;
     } else {
-      // Fallback: check index under users/{uid}/devices/{deviceId}
-      const usersSnap = await adminDb
-        .ref('users')
-        .orderByChild(`devices/${deviceId}`)
-        .equalTo(true)
-        .limitToFirst(1)
-        .once('value');
-
-      if (usersSnap.exists()) {
-        const uids = Object.keys(usersSnap.val());
-        if (uids.length > 0) {
-          uid = uids[0];
-        }
+      const ownerSnap = await adminDb.ref(`owners/${deviceId}`).once('value');
+      if (ownerSnap.exists() && typeof ownerSnap.val() === 'string') {
+        uid = ownerSnap.val() as string;
       }
     }
 

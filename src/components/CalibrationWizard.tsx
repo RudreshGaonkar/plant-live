@@ -141,13 +141,13 @@ export function CalibrationWizard({
             <View style={[styles.iconCircle, { backgroundColor: colors.palette.blush }]}>
               <Ionicons name="sunny" size={32} color={colors.palette.warningText} />
             </View>
-            <Text style={[styles.stepTitle, { color: colors.text }]}>Step 1: Calibrate Dry (0% Baseline)</Text>
+            <Text style={[styles.stepTitle, { color: colors.text }]}>Step 1: Dry Sensor (Air)</Text>
             <Text style={[styles.stepDesc, { color: colors.textMuted }]}>
               Hold the capacitive probe in dry air or completely dry soil away from moisture.
             </Text>
 
             <View style={[styles.valueBox, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
-              <Text style={[styles.valueLabel, { color: colors.textMuted }]}>Dry Raw Reading (ADC)</Text>
+              <Text style={[styles.valueLabel, { color: colors.textMuted }]}>Dry Reading</Text>
               <Text style={[styles.valueText, { color: colors.palette.forest }]}>
                 {dryRaw ?? initialValues.soilDryRaw}
               </Text>
@@ -166,7 +166,7 @@ export function CalibrationWizard({
               ) : (
                 <>
                   <Ionicons name="hardware-chip-outline" size={18} color={colors.palette.white} style={{ marginRight: 6 }} />
-                  <Text style={styles.actionButtonText}>Calibrate Dry</Text>
+                  <Text style={styles.actionButtonText}>Capture Dry Reading</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -179,13 +179,13 @@ export function CalibrationWizard({
             <View style={[styles.iconCircle, { backgroundColor: colors.palette.mint }]}>
               <Ionicons name="water" size={32} color={colors.palette.forest} />
             </View>
-            <Text style={[styles.stepTitle, { color: colors.text }]}>Step 2: Calibrate Wet (100% Saturation)</Text>
+            <Text style={[styles.stepTitle, { color: colors.text }]}>Step 2: Wet Sensor (Water)</Text>
             <Text style={[styles.stepDesc, { color: colors.textMuted }]}>
-              Place the probe in a glass of water or thoroughly soaked soil up to the white line.
+              Place the probe in a glass of water or thoroughly soaked soil up to the indicator line.
             </Text>
 
             <View style={[styles.valueBox, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
-              <Text style={[styles.valueLabel, { color: colors.textMuted }]}>Wet Raw Reading (ADC)</Text>
+              <Text style={[styles.valueLabel, { color: colors.textMuted }]}>Wet Reading</Text>
               <Text style={[styles.valueText, { color: colors.palette.forest }]}>
                 {wetRaw ?? initialValues.soilWetRaw}
               </Text>
@@ -204,7 +204,7 @@ export function CalibrationWizard({
               ) : (
                 <>
                   <Ionicons name="water-outline" size={18} color={colors.palette.white} style={{ marginRight: 6 }} />
-                  <Text style={styles.actionButtonText}>Calibrate Wet</Text>
+                  <Text style={styles.actionButtonText}>Capture Wet Reading</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -217,11 +217,11 @@ export function CalibrationWizard({
             <View style={styles.summaryRow}>
               <Ionicons name="checkmark-circle" size={18} color={colors.palette.forest} />
               <Text style={[styles.summaryTitle, { color: colors.palette.ink }]}>
-                Sensitivity Delta: {dynamicRange} counts
+                Sensor Sensitivity: {dynamicRange} counts
               </Text>
             </View>
             <Text style={[styles.summarySub, { color: colors.palette.forest }]}>
-              Span: {dryRaw} (dry) → {wetRaw} (wet). Ideal resolution: 500–650 counts.
+              Span: {dryRaw} (dry) → {wetRaw} (wet). Ideal range: 500–650 counts.
             </Text>
           </View>
         )}

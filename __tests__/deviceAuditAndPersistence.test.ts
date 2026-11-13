@@ -1,8 +1,12 @@
 import { removeDeviceWithAudit } from '../src/services/devices';
 import { useLiveDevice } from '../src/store/useLiveDevice';
-import { useSession } from '../src/store/useSession';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { ref, set, remove, push, get as fbGet } from 'firebase/database';
+import { set, remove, push, get as fbGet } from 'firebase/database';
+
+jest.mock('react-native', () => ({
+  Platform: { OS: 'ios' },
+}));
+jest.mock('expo-device', () => ({}));
 
 jest.mock('../src/services/firebase', () => ({
   db: {},
@@ -16,7 +20,7 @@ jest.mock('firebase/database', () => {
     ref: jest.fn((database, path) => ({ path })),
     set: jest.fn(() => Promise.resolve()),
     update: jest.fn(() => Promise.resolve()),
-    onValue: jest.fn(),
+    onValue: jest.fn(() => jest.fn()),
     push: jest.fn((refObj) => ({ ...refObj, key: 'mock-audit-id' })),
     remove: jest.fn(() => Promise.resolve()),
     get: jest.fn(),
@@ -109,8 +113,7 @@ describe('Device Audit Logging & Persistence Suite', () => {
           action: 'DEVICE_REMOVED',
           deviceId: devId,
           plantName,
-          deletedByUid: uid,
-          deletedByEmail: email,
+          actorUid: uid,
           timestamp: 'SERVER_TIMESTAMP_MOCK',
         })
       );
@@ -120,8 +123,7 @@ describe('Device Audit Logging & Persistence Suite', () => {
           action: 'DEVICE_REMOVED',
           deviceId: devId,
           plantName,
-          deletedByUid: uid,
-          deletedByEmail: email,
+          actorUid: uid,
           timestamp: 'SERVER_TIMESTAMP_MOCK',
         })
       );
@@ -162,6 +164,29 @@ describe('Device Audit Logging & Persistence Suite', () => {
         'leaf-node-remaining-02'
       );
     });
+
+    test('preserves active device selection when an inactive device is removed', async () => {
+      useLiveDevice.getState().setActiveDeviceId('active-leaf-node');
+      (fbGet as jest.Mock).mockImplementation((refObj: any) => {
+        if (refObj.path === `devices/${devId}/meta/ownerUid`) {
+          return Promise.resolve({ exists: () => true, val: () => uid });
+        }
+        if (refObj.path === `users/${uid}/devices`) {
+          return Promise.resolve({
+            exists: () => true,
+            val: () => ({
+              'active-leaf-node': true,
+              [devId]: true,
+            }),
+          });
+        }
+        return Promise.resolve({ exists: () => false, val: () => null });
+      });
+
+      const res = await removeDeviceWithAudit(uid, email, devId, plantName);
+      expect(res.nextDeviceId).toBe('active-leaf-node');
+      expect(useLiveDevice.getState().activeDeviceId).toBe('active-leaf-node');
+    });
   });
 
   describe('3. Database Security Rules & Ownership Claim Invariants', () => {
@@ -171,14 +196,18 @@ describe('Device Audit Logging & Persistence Suite', () => {
       const devRules = rules.rules.devices['$deviceId'];
       const owner = "root.child('devices').child($deviceId).child('meta').child('ownerUid')";
       const legacyOwner = "root.child('owners').child($deviceId)";
-      const paired = "root.child('users').child(auth.uid).child('devices').child($deviceId)";
       const ownershipExpr =
-        `auth != null && ((${owner}.val() === auth.uid || (!${owner}.exists() && (${legacyOwner}.val() === auth.uid || (!${legacyOwner}.exists() && ${paired}.val() === true)))) || auth.token.email === $deviceId + '@devices.leaflink.local')`;
+        `auth != null && (${owner}.val() === auth.uid || ${legacyOwner}.val() === auth.uid || auth.token.email === $deviceId + '@devices.leaflink.local')`;
 
       expect(devRules.config['.read']).toBe(ownershipExpr);
       expect(devRules.config['.write']).toBe(ownershipExpr);
       expect(devRules.command['.read']).toBe(ownershipExpr);
-      expect(devRules.command['.write']).toBe(ownershipExpr);
+      expect(devRules.command['.write']).toBe(
+        `auth != null && (root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid || root.child('owners').child($deviceId).val() === auth.uid) && !newData.hasChild('ack')`
+      );
+      expect(devRules.command.ack['.write']).toBe(
+        `auth != null && auth.token.email === $deviceId + '@devices.leaflink.local'`
+      );
       expect(devRules.control['.read']).toBe(ownershipExpr);
       expect(devRules.control['.write']).toBe(ownershipExpr);
       expect(devRules.telemetry['.read']).toBe(ownershipExpr);
@@ -204,6 +233,7 @@ describe('Device Audit Logging & Persistence Suite', () => {
       expect(cmdRules.type['.validate']).toContain('refilled');
       expect(cmdRules.type['.validate']).toContain('calibrateDry');
       expect(cmdRules.type['.validate']).toContain('calibrateWet');
+      expect(cmdRules.type['.validate']).toContain('disarm');
       expect(cmdRules.durationSec['.validate']).toBe('newData.isNumber() && newData.val() >= 1 && newData.val() <= 15');
 
       const configRules = rules.rules.devices['$deviceId'].config;
@@ -212,6 +242,7 @@ describe('Device Audit Logging & Persistence Suite', () => {
 
     test('enforces immutable audit log rules on /auditLogs/$deviceId', () => {
       const auditRules = rules.rules.auditLogs['$deviceId'];
+      expect(auditRules['.read']).toContain("root.child('devices').child($deviceId).child('meta').child('ownerUid').val() === auth.uid");
       expect(auditRules['.write']).toBe('auth != null && !data.exists()');
       expect(auditRules['$logId']['.write']).toBe('auth != null && !data.exists()');
     });

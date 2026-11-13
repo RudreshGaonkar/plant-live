@@ -40,24 +40,35 @@ export function DayRibbon({
 
   const ribbonPos = useSharedValue(scrubFraction);
   const startPos = useSharedValue(scrubFraction);
+  const lastEmittedPos = useSharedValue(scrubFraction);
 
   // Keep shared value in sync when props change
   React.useEffect(() => {
     ribbonPos.value = scrubFraction;
-  }, [scrubFraction, ribbonPos]);
+    lastEmittedPos.value = scrubFraction;
+  }, [scrubFraction, ribbonPos, lastEmittedPos]);
 
   const panGesture = Gesture.Pan()
     .onStart(() => {
       startPos.value = ribbonPos.value;
+      // eslint-disable-next-line react-hooks/immutability
+      lastEmittedPos.value = ribbonPos.value;
     })
     .onUpdate((event) => {
       const delta = event.translationX / RIBBON_WIDTH;
       const nextPos = Math.max(0, Math.min(1, startPos.value + delta));
       // eslint-disable-next-line react-hooks/immutability
       ribbonPos.value = nextPos;
-      runOnJS(onScrub)(nextPos);
+      // Keep gesture updates lightweight: bridge to JS on meaningful delta (>= 0.01)
+      if (Math.abs(nextPos - lastEmittedPos.value) >= 0.01) {
+        // eslint-disable-next-line react-hooks/immutability
+        lastEmittedPos.value = nextPos;
+        runOnJS(onScrub)(nextPos);
+      }
     })
     .onEnd(() => {
+      // eslint-disable-next-line react-hooks/immutability
+      lastEmittedPos.value = ribbonPos.value;
       runOnJS(onScrub)(ribbonPos.value);
     });
 

@@ -16,7 +16,6 @@ import { useLiveDevice } from '@/store/useLiveDevice';
 import {
   sendDeviceCommand,
   listenToDeviceCommand,
-  appendWaterLogInRTDB,
 } from '@/services/devices';
 
 export type CommandLifecycleStage =
@@ -64,6 +63,7 @@ export function useCommand(): UseCommandReturn {
   const timeoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cooldownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastMoistureBeforeRef = useRef<number>(50);
+  const pumpObservedActiveRef = useRef<boolean>(false);
 
   const deviceId = device?.id ?? 'leaf-node-01';
 
@@ -91,6 +91,7 @@ export function useCommand(): UseCommandReturn {
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const clearPendingCommand = useCallback(() => {
     activeCmdIdRef.current = null;
+    pumpObservedActiveRef.current = false;
     unsubscribeRef.current?.();
     unsubscribeRef.current = null;
     if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
@@ -106,24 +107,7 @@ export function useCommand(): UseCommandReturn {
     useLiveDevice.getState().resetWateringState(deviceId);
   }, [clearPendingCommand, deviceId]);
 
-  // Immediately reset external command ref and live device when telemetry.pumpOn becomes false or ack reaches a terminal state
   const isPumpActiveTelemetry = Boolean(device?.telemetry?.pumpOn || device?.telemetry?.isPumpActive);
-  const ackStatus = device?.command?.ack?.status;
-  const isTerminalAck = ackStatus === 'done' || ackStatus === 'failed' || ackStatus === 'rejected';
-
-  useEffect(() => {
-    if (!isPumpActiveTelemetry || isTerminalAck) {
-      if (activeCmdIdRef.current) {
-        clearPendingCommand();
-        useLiveDevice.getState().resetWateringState(deviceId);
-      }
-    }
-  }, [isPumpActiveTelemetry, isTerminalAck, clearPendingCommand, deviceId]);
-
-  const effectiveStage: CommandLifecycleStage =
-    isTerminalAck && ackStatus
-      ? (ackStatus as CommandLifecycleStage)
-      : (!isPumpActiveTelemetry && stage === 'running' ? 'idle' : stage);
 
   // Check if watering can be triggered safely
   const canWater =
@@ -139,16 +123,19 @@ export function useCommand(): UseCommandReturn {
       const cmdId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       activeCmdIdRef.current = cmdId;
       setCommandDeviceId(deviceId);
+      pumpObservedActiveRef.current = false;
+
+      // Extended timeout: covers full watering duration + 20s network buffer for controller ack flush
       timeoutTimerRef.current = setTimeout(() => {
         clearPendingCommand();
         setStage('timeout');
         setErrorMessage("Device didn't respond. Check Wi-Fi connection.");
         useLiveDevice.getState().resetWateringState(deviceId);
-      }, (clampedDuration + 15) * 1000);
+      }, clampedDuration * 1000 + 20000);
 
-      unsubscribeRef.current = listenToDeviceCommand(deviceId, (command) => {
+      const unsubCommand = listenToDeviceCommand(deviceId, (command) => {
         const ack = command?.ack;
-        if (activeCmdIdRef.current !== cmdId || command?.id !== cmdId || ack?.id !== cmdId) return;
+        if (activeCmdIdRef.current !== cmdId || ack?.id !== cmdId) return;
 
         if (ack.status === 'done') {
           clearPendingCommand();
@@ -159,18 +146,63 @@ export function useCommand(): UseCommandReturn {
         } else if (ack.status === 'rejected' || ack.status === 'failed') {
           clearPendingCommand();
           setStage('rejected');
-          setErrorMessage(ack.reason || 'Device could not complete the watering command.');
+          setErrorMessage(ack.reason || 'Controller could not complete the watering command.');
           useLiveDevice.getState().resetWateringState(deviceId);
         } else if (ack.status === 'running') {
           setStage('running');
         }
       });
 
-      // 1. Optimistic UI: Immediately show pump state as active & watering locally
+      const unsubStore = useLiveDevice.subscribe((state) => {
+        if (activeCmdIdRef.current !== cmdId) return;
+        const targetDev = state.devices[deviceId];
+        if (!targetDev) return;
+
+        const ack = targetDev.command?.ack;
+        if (ack && ack.id === cmdId) {
+          if (ack.status === 'done') {
+            clearPendingCommand();
+            setStage('done');
+            setCooldownSecondsLeft(COOLDOWN_DURATION_SEC);
+            useLiveDevice.getState().resetWateringState(deviceId);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => null);
+            return;
+          } else if (ack.status === 'rejected' || ack.status === 'failed') {
+            clearPendingCommand();
+            setStage('rejected');
+            setErrorMessage(ack.reason || 'Controller could not complete the watering command.');
+            useLiveDevice.getState().resetWateringState(deviceId);
+            return;
+          } else if (ack.status === 'running') {
+            setStage('running');
+          }
+        }
+
+        const telemPump = Boolean(targetDev.telemetry?.pumpOn || targetDev.telemetry?.isPumpActive);
+        if (telemPump) {
+          pumpObservedActiveRef.current = true;
+          setStage((prev) => (prev === 'sent' ? 'running' : prev));
+        } else if (pumpObservedActiveRef.current) {
+          console.log('[useCommand] Pump completed run observed via telemetry cutoff.');
+          pumpObservedActiveRef.current = false;
+          clearPendingCommand();
+          setStage('done');
+          setCooldownSecondsLeft(COOLDOWN_DURATION_SEC);
+          useLiveDevice.getState().resetWateringState(deviceId);
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => null);
+        }
+      });
+
+      unsubscribeRef.current = () => {
+        unsubCommand?.();
+        unsubStore?.();
+      };
+
+      // 1. Initial State: "Sending request" awaiting controller acknowledgement
       setErrorMessage(null);
-      setStage('running');
+      setStage('sent');
       lastMoistureBeforeRef.current = currentMoisture;
-      useLiveDevice.getState().triggerWaterNow(clampedDuration);
+      useLiveDevice.getState().triggerWaterNow(clampedDuration, deviceId);
 
       // Haptic pulse on command initiation
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => null);
@@ -186,16 +218,6 @@ export function useCommand(): UseCommandReturn {
           setStage('timeout');
           setErrorMessage(err instanceof Error ? err.message : 'Failed to dispatch command.');
         });
-
-        // Append log to RTDB
-        appendWaterLogInRTDB(deviceId, {
-          ts: Date.now(),
-          trigger: 'manual',
-          durationSec: clampedDuration,
-          moistureBefore: currentMoisture,
-          moistureAfter: Math.min(100, Math.round(currentMoisture + 15)),
-          note: 'Manual watering triggered via app',
-        }).catch(() => null);
 
         return true;
       } catch (err) {
@@ -250,13 +272,13 @@ export function useCommand(): UseCommandReturn {
     [device, cooldownSecondsLeft, storeRefillBottle, dispatchWaterCommand]
   );
 
-  const isCommandPending = commandDeviceId === deviceId && (effectiveStage === 'sent' || effectiveStage === 'running');
-  const isWatering = Boolean(isPumpActiveTelemetry && (isWateringActive || effectiveStage === 'running'));
+  const isCommandPending = commandDeviceId === deviceId && (stage === 'sent' || stage === 'running');
+  const isWatering = Boolean(isPumpActiveTelemetry || (commandDeviceId === deviceId && (isWateringActive || stage === 'running')));
 
   return {
-    stage: commandDeviceId === deviceId ? effectiveStage : 'idle',
+    stage: commandDeviceId === deviceId ? stage : (isPumpActiveTelemetry ? 'running' : 'idle'),
     activeDuration,
-    secondsRemaining,
+    secondsRemaining: commandDeviceId === deviceId ? secondsRemaining : 0,
     cooldownSecondsLeft,
     errorMessage: commandDeviceId === deviceId ? errorMessage : null,
     canWater,

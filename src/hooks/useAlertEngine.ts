@@ -1,4 +1,7 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { create } from 'zustand';
+import { ref, onValue } from 'firebase/database';
+import { db } from '@/services/firebase';
 import { useLiveDevice } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
 import {
@@ -16,6 +19,8 @@ import {
   updateDeviceAlertInRTDB,
   deleteDeviceAlertFromRTDB,
   DeviceAlertRecord,
+  sendDeviceCommand,
+  listenToDeviceCommand,
 } from '@/services/devices';
 
 export type AlertSeverity = 'critical' | 'warning' | 'info';
@@ -54,195 +59,376 @@ export interface AppAlert {
 
 const THREE_MINUTES_MS = 3 * 60 * 1000;
 
-export function useAlertEngine() {
-  const user = useSession((s) => s.user);
-  const devices = useLiveDevice((s) => s.devices);
-  const activeDeviceId = useLiveDevice((s) => s.activeDeviceId);
-  const refillBottle = useLiveDevice((s) => s.refillBottle);
-  const triggerWaterNow = useLiveDevice((s) => s.triggerWaterNow);
+/**
+ * Execute real hardware waterNow command targeting a specific deviceId
+ * and wait for confirmed execution before completing.
+ */
+export async function executeWaterForDevice(deviceId: string, durationSec = 5): Promise<boolean> {
+  return new Promise((resolve) => {
+    const cmdId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    let hasResolved = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let unsub: (() => void) | null = null;
 
-  const [localAlerts, setLocalAlerts] = useState<AppAlert[]>([]);
-  const [deviceAlerts, setDeviceAlerts] = useState<AppAlert[]>([]);
-  const [userAlerts, setUserAlerts] = useState<AppAlert[]>([]);
-  const [statusOverrides, setStatusOverrides] = useState<Record<string, AlertStatus>>({});
-  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
-  const notifiedAlertsRef = useRef<Set<string>>(new Set());
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      unsub?.();
+    };
 
-  // Tracking previous pump states to detect dry pump cycles
-  const prevPumpStateRef = useRef<Record<string, { pumpOn: boolean; moisture: number }>>({});
-  // Ref to hold current local alerts to prevent over-clearing on telemetry heartbeats
-  const localAlertsRef = useRef<AppAlert[]>([]);
-  useEffect(() => {
-    localAlertsRef.current = localAlerts;
-  }, [localAlerts]);
-
-  const deviceAlertsRef = useRef<AppAlert[]>([]);
-  useEffect(() => {
-    deviceAlertsRef.current = deviceAlerts;
-  }, [deviceAlerts]);
-
-  const userAlertsRef = useRef<AppAlert[]>([]);
-  useEffect(() => {
-    userAlertsRef.current = userAlerts;
-  }, [userAlerts]);
-
-  // Set of alert keys already created or dispatched today to prevent 5-second tick spam
-  const createdTodayAlertKeysRef = useRef<Set<string>>(new Set());
-
-  const [currentTime, setCurrentTime] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(Date.now()), 60000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const isCloudSynced = Boolean(user);
-
-  /**
-   * Evaluates active conditions for all devices without clearing existing active alerts.
-   * Telemetry updates do NOT wipe active alerts unless the underlying condition actually resolves.
-   * Every newly generated alert is immediately saved to Firebase RTDB at `/devices/{deviceId}/alerts/{alertId}`.
-   */
-  const runLocalEvaluation = useCallback(() => {
-    const now = Date.now();
-    const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
-    const weather = useLiveDevice.getState().weather;
-    const currentAlerts = [...localAlertsRef.current];
-    const alertMap = new Map<string, AppAlert>();
-    for (const a of currentAlerts) {
-      alertMap.set(a.id, a);
-    }
-
-    const newLocalAlerts: AppAlert[] = [];
-    const newlyCreatedAlerts: AppAlert[] = [];
-
-    for (const dev of Object.values(devices)) {
-      const { id: deviceId, config, telemetry, status } = dev;
-      const plantName = config.plantName || config.name || 'Plant';
-      const location = config.location || 'indoor';
-      const isOutdoor = location === 'balcony' || location === 'terrace';
-      const locationLabel = location === 'balcony' ? 'Balcony' : location === 'terrace' ? 'Terrace' : 'Indoor';
-      const thresholds = config.thresholds;
-
-      // Helper to evaluate an alert rule condition:
-      // If violated: retain existing or generate new for today; do NOT spam duplicates every 5s tick
-      // If resolved: mark resolved if it was active
-      const evaluateRule = (
-        alertId: string,
-        ruleType: string,
-        isViolated: boolean,
-        factory: () => AppAlert
-      ) => {
-        const todayKey = `${deviceId}:${ruleType}:${new Date().toDateString()}`;
-        const existing =
-          alertMap.get(alertId) ||
-          deviceAlertsRef.current.find(
-            (a) =>
-              (a.id === alertId || (a.deviceId === deviceId && a.type === ruleType)) &&
-              (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
-          ) ||
-          userAlertsRef.current.find(
-            (a) =>
-              (a.id === alertId || (a.deviceId === deviceId && a.type === ruleType)) &&
-              (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
-          );
-
-        const alreadyDispatchedToday =
-          createdTodayAlertKeysRef.current.has(todayKey) ||
-          createdTodayAlertKeysRef.current.has(alertId);
-
-        if (isViolated) {
-          if (existing) {
-            // Retain active alert without resetting createdAt or reinitializing
-            newLocalAlerts.push(existing);
-            alertMap.delete(alertId);
-          } else if (alreadyDispatchedToday) {
-            // An alert with the same type/ID already exists for today; do NOT spam duplicates
-            return;
-          } else {
-            // Newly triggered alert for today
-            const alert = factory();
-            newLocalAlerts.push(alert);
-            newlyCreatedAlerts.push(alert);
-            createdTodayAlertKeysRef.current.add(todayKey);
-            createdTodayAlertKeysRef.current.add(alertId);
+    unsub = listenToDeviceCommand(deviceId, (cmd) => {
+      if (cmd?.id === cmdId && cmd?.ack?.id === cmdId) {
+        if (cmd.ack.status === 'done') {
+          if (!hasResolved) {
+            hasResolved = true;
+            cleanup();
+            resolve(true);
           }
-        } else if (existing) {
-          // Condition resolved: soil moisture, temperature, bottle, etc. normalized
-          if (existing.status === 'active' || existing.status === 'unread') {
-            const resolvedAlert: AppAlert = {
-              ...existing,
-              status: 'resolved',
-            };
-            newLocalAlerts.push(resolvedAlert);
-            alertMap.delete(alertId);
-            // Notify Firebase RTDB that this alert is resolved
-            updateDeviceAlertInRTDB(deviceId, alertId, { status: 'resolved' });
-          } else {
-            newLocalAlerts.push(existing);
-            alertMap.delete(alertId);
+        } else if (cmd.ack.status === 'rejected' || cmd.ack.status === 'failed') {
+          if (!hasResolved) {
+            hasResolved = true;
+            cleanup();
+            resolve(false);
           }
-          notifiedAlertsRef.current.delete(alertId);
         }
+      }
+    });
+
+    timer = setTimeout(() => {
+      if (!hasResolved) {
+        hasResolved = true;
+        cleanup();
+        resolve(false);
+      }
+    }, (durationSec + 15) * 1000);
+
+    sendDeviceCommand(deviceId, { type: 'waterNow', durationSec }, cmdId).catch(() => {
+      if (!hasResolved) {
+        hasResolved = true;
+        cleanup();
+        resolve(false);
+      }
+    });
+  });
+}
+
+// ── Session-Level Alert Store Singleton ──────────────────────────────────
+interface AlertStoreState {
+  localAlerts: AppAlert[];
+  deviceAlerts: AppAlert[];
+  userAlerts: AppAlert[];
+  statusOverrides: Record<string, AlertStatus>;
+  dismissedIds: Set<string>;
+  setLocalAlerts: (alerts: AppAlert[]) => void;
+  setDeviceAlerts: (alerts: AppAlert[]) => void;
+  setUserAlerts: (alerts: AppAlert[]) => void;
+  setStatusOverride: (id: string, status: AlertStatus) => void;
+  setAllStatusOverrides: (overrides: Record<string, AlertStatus>) => void;
+  dismissId: (id: string) => void;
+}
+
+export const useAlertStore = create<AlertStoreState>((set) => ({
+  localAlerts: [],
+  deviceAlerts: [],
+  userAlerts: [],
+  statusOverrides: {},
+  dismissedIds: new Set<string>(),
+  setLocalAlerts: (alerts) => set({ localAlerts: alerts }),
+  setDeviceAlerts: (alerts) => set({ deviceAlerts: alerts }),
+  setUserAlerts: (alerts) => set({ userAlerts: alerts }),
+  setStatusOverride: (id, status) =>
+    set((state) => ({ statusOverrides: { ...state.statusOverrides, [id]: status } })),
+  setAllStatusOverrides: (overrides) =>
+    set((state) => ({ statusOverrides: { ...state.statusOverrides, ...overrides } })),
+  dismissId: (id) =>
+    set((state) => ({ dismissedIds: new Set(state.dismissedIds).add(id) })),
+}));
+
+// ── Singleton Evaluator & Realtime Listener Manager ──────────────────────
+let activeDevAlertsUnsub: (() => void) | null = null;
+let activeUserAlertsUnsub: (() => void) | null = null;
+let evalIntervalTimer: ReturnType<typeof setInterval> | null = null;
+let currentSubscribedDeviceId: string | null = null;
+let currentSubscribedUid: string | null = null;
+
+export interface UserAlertPrefs {
+  units?: 'C' | 'F';
+  quietHours?: {
+    enabled?: boolean;
+    start?: string | number;
+    end?: string | number;
+  };
+  alerts?: {
+    bottle?: boolean;
+    dry?: boolean;
+    wet?: boolean;
+    heat?: boolean;
+    offline?: boolean;
+    watered?: boolean;
+    [key: string]: boolean | undefined;
+  };
+}
+
+let currentUserPrefs: UserAlertPrefs | null = null;
+let userPrefsUnsub: (() => void) | null = null;
+
+function parseTimeToMinutes(val: unknown): number | null {
+  if (typeof val === 'number') {
+    if (isNaN(val) || val < 0 || val > 23) return null;
+    return val * 60;
+  }
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (!trimmed) return null;
+    if (trimmed.includes(':')) {
+      const parts = trimmed.split(':').map((p) => Number(p.trim()));
+      if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+        return parts[0] * 60 + parts[1];
+      }
+    } else {
+      const num = Number(trimmed);
+      if (!isNaN(num) && num >= 0 && num <= 23) {
+        return num * 60;
+      }
+    }
+  }
+  return null;
+}
+
+export function isQuietHours(
+  quietHours?: { enabled?: boolean; start?: string | number; end?: string | number },
+  now: Date = new Date()
+): boolean {
+  if (!quietHours) return false;
+  if (quietHours.enabled === false) return false;
+  if (quietHours.start === undefined || quietHours.start === null ||
+      quietHours.end === undefined || quietHours.end === null) {
+    return false;
+  }
+
+  const startMinutes = parseTimeToMinutes(quietHours.start);
+  const endMinutes = parseTimeToMinutes(quietHours.end);
+
+  if (startMinutes === null || endMinutes === null) {
+    return false;
+  }
+
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+
+  if (startMinutes <= endMinutes) {
+    return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+  } else {
+    // Overnight interval e.g. 22:00 to 07:00
+    return currentMinutes >= startMinutes || currentMinutes < endMinutes;
+  }
+}
+
+export function clearAlertSession() {
+  activeDevAlertsUnsub?.();
+  activeDevAlertsUnsub = null;
+  currentSubscribedDeviceId = null;
+  activeUserAlertsUnsub?.();
+  activeUserAlertsUnsub = null;
+  userPrefsUnsub?.();
+  userPrefsUnsub = null;
+  currentSubscribedUid = null;
+  currentUserPrefs = null;
+  notifiedAlerts.clear();
+  useAlertStore.getState().setUserAlerts([]);
+  useAlertStore.getState().setLocalAlerts([]);
+  useAlertStore.getState().setDeviceAlerts([]);
+  useAlertStore.getState().setAllStatusOverrides({});
+}
+
+const prevPumpState: Record<string, { pumpOn: boolean; moisture: number }> = {};
+const createdTodayAlertKeys = new Set<string>();
+const notifiedAlerts = new Set<string>();
+
+function runEvaluation() {
+  const state = useLiveDevice.getState();
+  const devices = state.devices;
+  const user = useSession.getState().user;
+  const now = Date.now();
+  const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
+  const weather = state.weather;
+
+  const currentLocalAlerts = useAlertStore.getState().localAlerts;
+  const alertMap = new Map<string, AppAlert>();
+  for (const a of currentLocalAlerts) {
+    alertMap.set(a.id, a);
+  }
+
+  const newLocalAlerts: AppAlert[] = [];
+  const newlyCreatedAlerts: AppAlert[] = [];
+
+  for (const dev of Object.values(devices)) {
+    const { id: deviceId, config, telemetry, status } = dev;
+    const plantName = config.plantName || config.name || 'Plant';
+    const location = config.location || 'indoor';
+    const isOutdoor = location === 'balcony' || location === 'terrace';
+    const locationLabel = location === 'balcony' ? 'Balcony' : location === 'terrace' ? 'Terrace' : 'Indoor';
+    const thresholds = config.thresholds;
+
+    const evaluateRule = (
+      alertId: string,
+      ruleType: string,
+      isViolated: boolean,
+      factory: () => AppAlert
+    ) => {
+      const todayKey = `${deviceId}:${ruleType}:${new Date().toDateString()}`;
+      const existing =
+        alertMap.get(alertId) ||
+        useAlertStore.getState().deviceAlerts.find(
+          (a) =>
+            (a.id === alertId || (a.deviceId === deviceId && a.type === ruleType)) &&
+            (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
+        ) ||
+        useAlertStore.getState().userAlerts.find(
+          (a) =>
+            (a.id === alertId || (a.deviceId === deviceId && a.type === ruleType)) &&
+            (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
+        );
+
+      const alreadyDispatchedToday =
+        createdTodayAlertKeys.has(todayKey) ||
+        createdTodayAlertKeys.has(alertId);
+
+      if (isViolated) {
+        if (existing) {
+          newLocalAlerts.push(existing);
+          alertMap.delete(alertId);
+        } else if (alreadyDispatchedToday) {
+          return;
+        } else {
+          const alert = factory();
+          newLocalAlerts.push(alert);
+          newlyCreatedAlerts.push(alert);
+          createdTodayAlertKeys.add(todayKey);
+          createdTodayAlertKeys.add(alertId);
+        }
+      } else if (existing) {
+        if (existing.status === 'active' || existing.status === 'unread') {
+          const resolvedAlert: AppAlert = {
+            ...existing,
+            status: 'resolved',
+          };
+          newLocalAlerts.push(resolvedAlert);
+          alertMap.delete(alertId);
+          updateDeviceAlertInRTDB(deviceId, alertId, { status: 'resolved' });
+        } else {
+          newLocalAlerts.push(existing);
+          alertMap.delete(alertId);
+        }
+        notifiedAlerts.delete(alertId);
+      }
+    };
+
+    // 1. Device Offline Check
+    const isOffline = !status.online || now - status.lastSeen > THREE_MINUTES_MS;
+    evaluateRule(`offline-${deviceId}`, 'offline', isOffline, () => {
+      const body = `${plantName} has not reported telemetry in over 3 minutes. Check power & Wi-Fi.`;
+      return {
+        id: `offline-${deviceId}`,
+        deviceId,
+        type: 'offline',
+        alertType: 'critical',
+        severity: 'critical',
+        title: 'Device Offline',
+        body,
+        message: body,
+        plantName,
+        createdAt: now,
+        ts: status.lastSeen || now,
+        timestamp: status.lastSeen || now,
+        status: 'active',
+        actionLabel: 'Check Settings',
       };
+    });
 
-      // 1. Device Offline Check
-      const isOffline = !status.online || now - status.lastSeen > THREE_MINUTES_MS;
-      evaluateRule(`offline-${deviceId}`, 'offline', isOffline, () => {
-        const body = `${plantName} has not reported telemetry in over 3 minutes. Check power & Wi-Fi.`;
-        return {
-          id: `offline-${deviceId}`,
-          deviceId,
-          type: 'offline',
-          alertType: 'critical',
-          severity: 'critical',
-          title: 'Device Offline',
-          body,
-          message: body,
-          plantName,
-          createdAt: now,
-          ts: status.lastSeen || now,
-          timestamp: status.lastSeen || now,
-          status: 'active',
-          actionLabel: 'Check Settings',
-        };
-      });
+    // 2. Low Water / Reservoir Level
+    const capacity = config.bottle?.capacityMl || 500;
+    const remaining = typeof config.bottle?.remainingMl === 'number' ? config.bottle.remainingMl : 500;
+    const bottlePercent = (remaining / capacity) * 100;
+    const isBottleEmpty = remaining <= 0 || bottlePercent < 5;
+    const isBottleLow = !isBottleEmpty && bottlePercent < 20;
 
-      // 2. Low Water / Reservoir Level
-      const capacity = config.bottle?.capacityMl || 500;
-      const remaining = typeof config.bottle?.remainingMl === 'number' ? config.bottle.remainingMl : 500;
-      const bottlePercent = (remaining / capacity) * 100;
-      const isBottleEmpty = remaining <= 0 || bottlePercent < 5;
-      const isBottleLow = !isBottleEmpty && bottlePercent < 20;
+    evaluateRule(`bottle-empty-${deviceId}`, 'bottle', isBottleEmpty, () => {
+      const body = `${plantName} reservoir is critically low (${Math.round(remaining)} ml). Auto-watering stopped.`;
+      return {
+        id: `bottle-empty-${deviceId}`,
+        deviceId,
+        type: 'bottle',
+        alertType: 'critical',
+        severity: 'critical',
+        title: 'Water Reservoir Empty',
+        body,
+        message: body,
+        plantName,
+        createdAt: now,
+        ts: now,
+        timestamp: now,
+        status: 'active',
+        actionLabel: 'I Refilled',
+      };
+    });
 
-      evaluateRule(`bottle-empty-${deviceId}`, 'bottle', isBottleEmpty, () => {
-        const body = `${plantName} reservoir is critically low (${Math.round(remaining)} ml). Auto-watering stopped.`;
-        return {
-          id: `bottle-empty-${deviceId}`,
+    evaluateRule(`bottle-low-${deviceId}`, 'bottle', isBottleLow, () => {
+      const body = `${plantName} reservoir is below 20% (${Math.round(remaining)} ml left). Please refill soon.`;
+      return {
+        id: `bottle-low-${deviceId}`,
+        deviceId,
+        type: 'bottle',
+        alertType: 'warning',
+        severity: 'warning',
+        title: 'Water Reservoir Low',
+        body,
+        message: body,
+        plantName,
+        createdAt: now,
+        ts: now,
+        timestamp: now,
+        status: 'active',
+        actionLabel: 'I Refilled',
+      };
+    });
+
+    // 2b. Pump Ran Without Moisture Rising
+    const prevPump = prevPumpState[deviceId];
+    let pumpFailedCondition = false;
+    if (prevPump && prevPump.pumpOn && !telemetry.pumpOn) {
+      if (telemetry.soilMoisture <= prevPump.moisture) {
+        pumpFailedCondition = true;
+      }
+    }
+    prevPumpState[deviceId] = {
+      pumpOn: telemetry.pumpOn,
+      moisture: telemetry.soilMoisture,
+    };
+
+    if (pumpFailedCondition) {
+      const failedId = `pump-failed-${deviceId}`;
+      const failedKey = `${deviceId}:pump-failed:${new Date().toDateString()}`;
+      const existingFailed =
+        alertMap.get(failedId) ||
+        useAlertStore.getState().deviceAlerts.find(
+          (a) => a.id === failedId && (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
+        ) ||
+        useAlertStore.getState().userAlerts.find(
+          (a) => a.id === failedId && (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
+        );
+
+      const alreadyDispatchedFailed =
+        createdTodayAlertKeys.has(failedKey) ||
+        createdTodayAlertKeys.has(failedId);
+
+      if (!existingFailed && !alreadyDispatchedFailed) {
+        const body = `${plantName}: Pump ran but soil moisture did not rise (${telemetry.soilMoisture}%). Possible empty reservoir or clogged tube.`;
+        const failedAlert: AppAlert = {
+          id: failedId,
           deviceId,
           type: 'bottle',
-          alertType: 'critical',
-          severity: 'critical',
-          title: 'Water Reservoir Empty',
-          body,
-          message: body,
-          plantName,
-          createdAt: now,
-          ts: now,
-          timestamp: now,
-          status: 'active',
-          actionLabel: 'I Refilled',
-        };
-      });
-
-      evaluateRule(`bottle-low-${deviceId}`, 'bottle', isBottleLow, () => {
-        const body = `${plantName} reservoir is below 20% (${Math.round(remaining)} ml left). Please refill soon.`;
-        return {
-          id: `bottle-low-${deviceId}`,
-          deviceId,
-          type: 'bottle',
           alertType: 'warning',
           severity: 'warning',
-          title: 'Water Reservoir Low',
+          title: 'Pump Ineffective',
           body,
           message: body,
           plantName,
@@ -250,102 +436,96 @@ export function useAlertEngine() {
           ts: now,
           timestamp: now,
           status: 'active',
-          actionLabel: 'I Refilled',
+          actionLabel: 'Check Reservoir',
         };
-      });
-
-      // 2b. Pump Ran Without Moisture Rising
-      const prevPump = prevPumpStateRef.current[deviceId];
-      let pumpFailedCondition = false;
-      if (prevPump && prevPump.pumpOn && !telemetry.pumpOn) {
-        if (telemetry.soilMoisture <= prevPump.moisture) {
-          pumpFailedCondition = true;
-        }
+        newLocalAlerts.push(failedAlert);
+        newlyCreatedAlerts.push(failedAlert);
+        createdTodayAlertKeys.add(failedKey);
+        createdTodayAlertKeys.add(failedId);
+        alertMap.delete(failedId);
+      } else if (existingFailed) {
+        newLocalAlerts.push(existingFailed);
+        alertMap.delete(failedId);
       }
-      prevPumpStateRef.current[deviceId] = {
-        pumpOn: telemetry.pumpOn,
-        moisture: telemetry.soilMoisture,
+    }
+
+    // 3. Soil Dry - Needs Water
+    const isSoilDry = telemetry.soilMoisture < thresholds.moistureMin;
+    evaluateRule(`dry-${deviceId}`, 'dry', isSoilDry, () => {
+      const body = `${plantName} soil is at ${telemetry.soilMoisture}%, below the ${thresholds.moistureMin}% min threshold. Needs water now.`;
+      return {
+        id: `dry-${deviceId}`,
+        deviceId,
+        type: 'dry',
+        alertType: 'warning',
+        severity: 'warning',
+        title: 'Soil Dry - Needs Water',
+        body,
+        message: body,
+        description: body,
+        plantName,
+        createdAt: now,
+        ts: now,
+        timestamp: now,
+        status: 'active',
+        actionLabel: 'Water Now',
       };
+    });
 
-      if (pumpFailedCondition) {
-        const failedId = `pump-failed-${deviceId}`;
-        const failedKey = `${deviceId}:pump-failed:${new Date().toDateString()}`;
-        const existingFailed =
-          alertMap.get(failedId) ||
-          deviceAlertsRef.current.find(
-            (a) => a.id === failedId && (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
-          ) ||
-          userAlertsRef.current.find(
-            (a) => a.id === failedId && (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
-          );
+    // 4. Over-Watering Risk
+    const isOverWatered = telemetry.soilMoisture > thresholds.moistureMax;
+    evaluateRule(`wet-max-${deviceId}`, 'wet', isOverWatered, () => {
+      const body = `${plantName} soil moisture is ${telemetry.soilMoisture}%, exceeding recommended ${thresholds.moistureMax}% max.`;
+      return {
+        id: `wet-max-${deviceId}`,
+        deviceId,
+        type: 'wet',
+        alertType: 'warning',
+        severity: 'warning',
+        title: 'Over-Watering Alert',
+        body,
+        message: body,
+        plantName,
+        createdAt: now,
+        ts: now,
+        timestamp: now,
+        status: 'active',
+      };
+    });
 
-        const alreadyDispatchedFailed =
-          createdTodayAlertKeysRef.current.has(failedKey) ||
-          createdTodayAlertKeysRef.current.has(failedId);
+    const isHighHumidityWetSoil =
+      telemetry.humidity > thresholds.humidityMax && telemetry.soilMoisture >= thresholds.moistureMin;
+    evaluateRule(`wet-humid-${deviceId}`, 'wet', isHighHumidityWetSoil, () => {
+      const body = `High air humidity (${telemetry.humidity}%) with wet soil (${telemetry.soilMoisture}%). Risk of fungal root rot on ${plantName}.`;
+      return {
+        id: `wet-humid-${deviceId}`,
+        deviceId,
+        type: 'wet',
+        alertType: 'warning',
+        severity: 'warning',
+        title: 'High Humidity & Wet Soil',
+        body,
+        message: body,
+        plantName,
+        createdAt: now,
+        ts: now,
+        timestamp: now,
+        status: 'active',
+      };
+    });
 
-        if (!existingFailed && !alreadyDispatchedFailed) {
-          const body = `${plantName}: Pump ran but soil moisture did not rise (${telemetry.soilMoisture}%). Possible empty reservoir or clogged tube.`;
-          const failedAlert: AppAlert = {
-            id: failedId,
-            deviceId,
-            type: 'bottle',
-            alertType: 'warning',
-            severity: 'warning',
-            title: 'Pump Ineffective',
-            body,
-            message: body,
-            plantName,
-            createdAt: now,
-            ts: now,
-            timestamp: now,
-            status: 'active',
-            actionLabel: 'Check Reservoir',
-          };
-          newLocalAlerts.push(failedAlert);
-          newlyCreatedAlerts.push(failedAlert);
-          createdTodayAlertKeysRef.current.add(failedKey);
-          createdTodayAlertKeysRef.current.add(failedId);
-          alertMap.delete(failedId);
-        } else if (existingFailed) {
-          newLocalAlerts.push(existingFailed);
-          alertMap.delete(failedId);
-        }
-      }
-
-      // 3. Soil Dry - Needs Water (warning alert whenever soilMoisture < moistureMin)
-      const isSoilDry = telemetry.soilMoisture < thresholds.moistureMin;
-      evaluateRule(`dry-${deviceId}`, 'dry', isSoilDry, () => {
-        const body = `${plantName} soil is at ${telemetry.soilMoisture}%, below the ${thresholds.moistureMin}% min threshold. Needs water now.`;
+    // 5. Extreme Temperature
+    if (isOutdoor) {
+      const isExtremeHeat = telemetry.temperature > thresholds.tempMax;
+      evaluateRule(`heat-${deviceId}`, 'heat', isExtremeHeat, () => {
+        const body = `Temperature is ${telemetry.temperature}°C on the ${locationLabel} (max: ${thresholds.tempMax}°C). Protect plant from intense heat.`;
         return {
-          id: `dry-${deviceId}`,
+          id: `heat-${deviceId}`,
           deviceId,
-          type: 'dry',
+          type: 'heat',
           alertType: 'warning',
           severity: 'warning',
-          title: 'Soil Dry - Needs Water',
-          body,
-          message: body,
-          description: body,
-          plantName,
-          createdAt: now,
-          ts: now,
-          timestamp: now,
-          status: 'active',
-          actionLabel: 'Water Now',
-        };
-      });
-
-      // 4. Over-Watering Risk
-      const isOverWatered = telemetry.soilMoisture > thresholds.moistureMax;
-      evaluateRule(`wet-max-${deviceId}`, 'wet', isOverWatered, () => {
-        const body = `${plantName} soil moisture is ${telemetry.soilMoisture}%, exceeding recommended ${thresholds.moistureMax}% max.`;
-        return {
-          id: `wet-max-${deviceId}`,
-          deviceId,
-          type: 'wet',
-          alertType: 'warning',
-          severity: 'warning',
-          title: 'Over-Watering Alert',
+          title: `Extreme Heat (${locationLabel})`,
           body,
           message: body,
           plantName,
@@ -356,17 +536,16 @@ export function useAlertEngine() {
         };
       });
 
-      const isHighHumidityWetSoil =
-        telemetry.humidity > thresholds.humidityMax && telemetry.soilMoisture >= thresholds.moistureMin;
-      evaluateRule(`wet-humid-${deviceId}`, 'wet', isHighHumidityWetSoil, () => {
-        const body = `High air humidity (${telemetry.humidity}%) with wet soil (${telemetry.soilMoisture}%). Risk of fungal root rot on ${plantName}.`;
+      const isExtremeCold = telemetry.temperature < 8;
+      evaluateRule(`cold-${deviceId}`, 'heat', isExtremeCold, () => {
+        const body = `Temperature dropped to ${telemetry.temperature}°C on the ${locationLabel}. Move ${plantName} indoors to prevent frost damage.`;
         return {
-          id: `wet-humid-${deviceId}`,
+          id: `cold-${deviceId}`,
           deviceId,
-          type: 'wet',
+          type: 'heat',
           alertType: 'warning',
           severity: 'warning',
-          title: 'High Humidity & Wet Soil',
+          title: `Extreme Cold (${locationLabel})`,
           body,
           message: body,
           plantName,
@@ -376,87 +555,17 @@ export function useAlertEngine() {
           status: 'active',
         };
       });
-
-      // 5. Extreme Temperature
-      if (isOutdoor) {
-        const isExtremeHeat = telemetry.temperature > thresholds.tempMax;
-        evaluateRule(`heat-${deviceId}`, 'heat', isExtremeHeat, () => {
-          const body = `Temperature is ${telemetry.temperature}°C on the ${locationLabel} (max: ${thresholds.tempMax}°C). Protect plant from intense heat.`;
-          return {
-            id: `heat-${deviceId}`,
-            deviceId,
-            type: 'heat',
-            alertType: 'warning',
-            severity: 'warning',
-            title: `Extreme Heat (${locationLabel})`,
-            body,
-            message: body,
-            plantName,
-            createdAt: now,
-            ts: now,
-            timestamp: now,
-            status: 'active',
-          };
-        });
-
-        const isExtremeCold = telemetry.temperature < 8;
-        evaluateRule(`cold-${deviceId}`, 'heat', isExtremeCold, () => {
-          const body = `Temperature dropped to ${telemetry.temperature}°C on the ${locationLabel}. Move ${plantName} indoors to prevent frost damage.`;
-          return {
-            id: `cold-${deviceId}`,
-            deviceId,
-            type: 'heat',
-            alertType: 'warning',
-            severity: 'warning',
-            title: `Extreme Cold (${locationLabel})`,
-            body,
-            message: body,
-            plantName,
-            createdAt: now,
-            ts: now,
-            timestamp: now,
-            status: 'active',
-          };
-        });
-      } else {
-        const isIndoorHeat = telemetry.temperature > thresholds.tempMax;
-        evaluateRule(`heat-${deviceId}`, 'heat', isIndoorHeat, () => {
-          const body = `Indoor temperature is ${telemetry.temperature}°C, above recommended ${thresholds.tempMax}°C.`;
-          return {
-            id: `heat-${deviceId}`,
-            deviceId,
-            type: 'heat',
-            alertType: 'warning',
-            severity: 'warning',
-            title: 'High Indoor Temperature',
-            body,
-            message: body,
-            plantName,
-            createdAt: now,
-            ts: now,
-            timestamp: now,
-            status: 'active',
-          };
-        });
-      }
-
-      // 6. Smart Terrace Rain Delay Notice
-      const isRainDelay =
-        location === 'terrace' &&
-        config.mode === 'auto' &&
-        Boolean(weather && weather.rainProbability > 70) &&
-        telemetry.soilMoisture < thresholds.moistureMin &&
-        telemetry.soilMoisture >= 15;
-
-      evaluateRule(`terrace-rain-delay-${deviceId}`, 'info', isRainDelay, () => {
-        const body = `${plantName} is on the Terrace. Auto-watering is temporarily delayed because rain probability is ${weather?.rainProbability ?? 0}%. Current soil moisture is ${telemetry.soilMoisture}%.`;
+    } else {
+      const isIndoorHeat = telemetry.temperature > thresholds.tempMax;
+      evaluateRule(`heat-${deviceId}`, 'heat', isIndoorHeat, () => {
+        const body = `Indoor temperature is ${telemetry.temperature}°C, above recommended ${thresholds.tempMax}°C.`;
         return {
-          id: `terrace-rain-delay-${deviceId}`,
+          id: `heat-${deviceId}`,
           deviceId,
-          type: 'info',
-          alertType: 'info',
-          severity: 'info',
-          title: 'Smart Terrace Rain Delay',
+          type: 'heat',
+          alertType: 'warning',
+          severity: 'warning',
+          title: 'High Indoor Temperature',
           body,
           message: body,
           plantName,
@@ -468,24 +577,56 @@ export function useAlertEngine() {
       });
     }
 
-    // Preserve any remaining alerts (e.g. historical pump failure or other custom alerts)
-    for (const remaining of alertMap.values()) {
-      newLocalAlerts.push(remaining);
+    // 6. Smart Terrace Rain Delay Notice
+    const isRainDelay =
+      location === 'terrace' &&
+      config.mode === 'auto' &&
+      Boolean(weather && weather.rainProbability > 70) &&
+      telemetry.soilMoisture < thresholds.moistureMin &&
+      telemetry.soilMoisture >= 15;
+
+    evaluateRule(`terrace-rain-delay-${deviceId}`, 'info', isRainDelay, () => {
+      const body = `${plantName} is on the Terrace. Auto-watering is temporarily delayed because rain probability is ${weather?.rainProbability ?? 0}%. Current soil moisture is ${telemetry.soilMoisture}%.`;
+      return {
+        id: `terrace-rain-delay-${deviceId}`,
+        deviceId,
+        type: 'info',
+        alertType: 'info',
+        severity: 'info',
+        title: 'Smart Terrace Rain Delay',
+        body,
+        message: body,
+        plantName,
+        createdAt: now,
+        ts: now,
+        timestamp: now,
+        status: 'active',
+      };
+    });
+  }
+
+  for (const remaining of alertMap.values()) {
+    newLocalAlerts.push(remaining);
+  }
+
+  useAlertStore.getState().setLocalAlerts(newLocalAlerts);
+
+  for (const na of newlyCreatedAlerts) {
+    saveDeviceAlertToRTDB(na.deviceId, na);
+    if (user) {
+      writeAlertToRTDB(user.uid, na);
     }
 
-    setLocalAlerts(newLocalAlerts);
+    if (!notifiedAlerts.has(na.id)) {
+      notifiedAlerts.add(na.id);
+      if (na.severity === 'critical' || na.severity === 'warning') {
+        const typeKey = na.type?.toLowerCase() || '';
+        const isEnabled = currentUserPrefs?.alerts
+          ? (currentUserPrefs.alerts as any)[typeKey] !== false
+          : true;
+        const inQuietHours = isQuietHours(currentUserPrefs?.quietHours);
 
-    // Save every newly generated alert immediately to Firebase RTDB at /devices/{deviceId}/alerts/{alertId}
-    for (const na of newlyCreatedAlerts) {
-      saveDeviceAlertToRTDB(na.deviceId, na);
-      if (user) {
-        writeAlertToRTDB(user.uid, na);
-      }
-
-      // Fire notification for warning/critical
-      if (!notifiedAlertsRef.current.has(na.id)) {
-        notifiedAlertsRef.current.add(na.id);
-        if (na.severity === 'critical' || na.severity === 'warning') {
+        if (isEnabled && !inQuietHours) {
           sendLocalNotification(na.title, na.body, {
             deviceId: na.deviceId,
             type: na.type,
@@ -494,131 +635,169 @@ export function useAlertEngine() {
         }
       }
     }
-  }, [devices, user]);
+  }
+}
 
-  // Realtime listener for hardware alerts stored in /devices/{deviceId}/alerts
-  // Do NOT wipe local active alerts when Firebase RTDB listener updates
-  useEffect(() => {
-    if (!activeDeviceId) return;
+function syncAlertSession(uid: string | null, activeDeviceId: string | null) {
+  if (currentSubscribedDeviceId !== activeDeviceId) {
+    activeDevAlertsUnsub?.();
+    activeDevAlertsUnsub = null;
+    currentSubscribedDeviceId = activeDeviceId;
 
-    const unsubscribe = listenToDeviceAlerts(activeDeviceId, (devAlerts: DeviceAlertRecord[]) => {
-      const mapped: AppAlert[] = devAlerts.map((da) => {
-        const tsVal = da.createdAt || da.timestamp || da.ts || Date.now();
-        const messageBody =
-          da.message && da.message.trim().length > 0
-            ? da.message.trim()
-            : da.description && da.description.trim().length > 0
-            ? da.description.trim()
-            : da.body && da.body.trim().length > 0
-            ? da.body.trim()
-            : 'Water level is low. Please refill the reservoir.';
-        const isLowWater = da.type === 'LOW_WATER' || da.type === 'critical';
-        const sev: AlertSeverity =
-          isLowWater || da.status === 'ACTIVE' || da.status === 'active' ? 'critical' : 'warning';
-        const statusVal: AlertStatus =
-          da.status === 'resolved' || da.status === 'RESOLVED' || da.status === 'read'
-            ? 'resolved'
-            : 'active';
+    if (activeDeviceId) {
+      const unsub = listenToDeviceAlerts(activeDeviceId, (devAlerts: DeviceAlertRecord[]) => {
+        const liveDev = useLiveDevice.getState().devices[activeDeviceId];
+        const mapped: AppAlert[] = devAlerts.map((da) => {
+          const tsVal = da.createdAt || da.timestamp || da.ts || Date.now();
+          const messageBody =
+            da.message && da.message.trim().length > 0
+              ? da.message.trim()
+              : da.description && da.description.trim().length > 0
+              ? da.description.trim()
+              : da.body && da.body.trim().length > 0
+              ? da.body.trim()
+              : 'Water level is low. Please refill the reservoir.';
+          const isLowWater = da.type === 'LOW_WATER' || da.type === 'critical';
+          const sev: AlertSeverity =
+            isLowWater || da.status === 'ACTIVE' || da.status === 'active' ? 'critical' : 'warning';
+          const statusVal: AlertStatus =
+            da.status === 'resolved' || da.status === 'RESOLVED' || da.status === 'read'
+              ? 'resolved'
+              : 'active';
 
-        return {
-          id: da.id,
-          severity: (da.severity as AlertSeverity) || sev,
-          alertType: (da.severity as AlertSeverity) || sev,
-          type: da.type || sev,
-          title: da.title?.trim() || (isLowWater ? 'Low Reservoir Water' : 'System Notice'),
-          body: messageBody,
-          message: messageBody,
-          description: da.description || messageBody,
-          plantName: devices[activeDeviceId]?.config?.plantName || 'Plant',
-          deviceId: activeDeviceId,
-          createdAt: tsVal,
-          ts: tsVal,
-          timestamp: tsVal,
-          status: statusVal,
-          actionLabel: da.actionLabel || (isLowWater ? 'I Refilled' : undefined),
-        };
+          return {
+            id: da.id,
+            severity: (da.severity as AlertSeverity) || sev,
+            alertType: (da.severity as AlertSeverity) || sev,
+            type: da.type || sev,
+            title: da.title?.trim() || (isLowWater ? 'Low Reservoir Water' : 'System Notice'),
+            body: messageBody,
+            message: messageBody,
+            description: da.description || messageBody,
+            plantName: liveDev?.config?.plantName || 'Plant',
+            deviceId: activeDeviceId,
+            createdAt: tsVal,
+            ts: tsVal,
+            timestamp: tsVal,
+            status: statusVal,
+            actionLabel: da.actionLabel || (isLowWater ? 'I Refilled' : undefined),
+          };
+        });
+        useAlertStore.getState().setDeviceAlerts(mapped);
+      });
+      activeDevAlertsUnsub = () => unsub();
+    } else {
+      useAlertStore.getState().setDeviceAlerts([]);
+    }
+  }
+
+  if (currentSubscribedUid !== uid) {
+    activeUserAlertsUnsub?.();
+    activeUserAlertsUnsub = null;
+    userPrefsUnsub?.();
+    userPrefsUnsub = null;
+    currentUserPrefs = null;
+    currentSubscribedUid = uid;
+
+    if (uid) {
+      // Listen to user preferences (quiet hours and alert toggles)
+      const prefsRef = ref(db, `users/${uid}/prefs`);
+      userPrefsUnsub = onValue(prefsRef, (snap) => {
+        if (snap.exists()) {
+          currentUserPrefs = snap.val() as UserAlertPrefs;
+        } else {
+          currentUserPrefs = null;
+        }
       });
 
-      setDeviceAlerts(mapped);
-    });
+      const unsub = listenToUserAlerts(uid, (cloudAlerts: CloudAlertRecord[]) => {
+        const currentDevs = useLiveDevice.getState().devices;
+        const mapped: AppAlert[] = cloudAlerts.map((ca) => {
+          const tsVal = ca.createdAt || ca.timestamp || ca.ts || Date.now();
+          const messageBody =
+            ca.message && ca.message.trim().length > 0
+              ? ca.message.trim()
+              : ca.description && ca.description.trim().length > 0
+              ? ca.description.trim()
+              : 'System alert notification.';
+          const sev: AlertSeverity =
+            ca.severity === 'critical' || ca.severity === 'warning' || ca.severity === 'info'
+              ? ca.severity
+              : ca.type === 'critical'
+              ? 'critical'
+              : ca.type === 'warning'
+              ? 'warning'
+              : 'info';
+          const statusVal: AlertStatus =
+            ca.read || ca.status === 'resolved' || ca.status === 'read' ? 'resolved' : 'active';
 
-    return () => unsubscribe();
-  }, [activeDeviceId, devices]);
-
-  // Realtime listener for user cloud alerts (/alerts/{uid})
-  useEffect(() => {
-    if (!user) return;
-
-    const unsubscribe = listenToUserAlerts(user.uid, (cloudAlerts: CloudAlertRecord[]) => {
-      const mapped: AppAlert[] = cloudAlerts.map((ca) => {
-        const tsVal = ca.createdAt || ca.timestamp || ca.ts || Date.now();
-        const messageBody =
-          ca.message && ca.message.trim().length > 0
-            ? ca.message.trim()
-            : ca.description && ca.description.trim().length > 0
-            ? ca.description.trim()
-            : 'System alert notification.';
-        const sev: AlertSeverity =
-          ca.severity === 'critical' || ca.severity === 'warning' || ca.severity === 'info'
-            ? ca.severity
-            : ca.type === 'critical'
-            ? 'critical'
-            : ca.type === 'warning'
-            ? 'warning'
-            : 'info';
-        const statusVal: AlertStatus =
-          ca.read || ca.status === 'resolved' || ca.status === 'read' ? 'resolved' : 'active';
-
-        return {
-          id: ca.id,
-          severity: sev,
-          alertType: sev,
-          type: ca.type || sev,
-          title: ca.title?.trim() || 'System Notice',
-          body: messageBody,
-          message: messageBody,
-          description: ca.description || messageBody,
-          plantName: devices[ca.deviceId]?.config?.plantName || 'Plant',
-          deviceId: ca.deviceId,
-          createdAt: tsVal,
-          ts: tsVal,
-          timestamp: tsVal,
-          status: statusVal,
-          actionLabel:
-            ca.type === 'bottle' || ca.type === 'LOW_WATER'
-              ? 'I Refilled'
-              : ca.type === 'dry'
-              ? 'Water Now'
-              : ca.type === 'offline'
-              ? 'Check Settings'
-              : undefined,
-        };
+          return {
+            id: ca.id,
+            severity: sev,
+            alertType: sev,
+            type: ca.type || sev,
+            title: ca.title?.trim() || 'System Notice',
+            body: messageBody,
+            message: messageBody,
+            description: ca.description || messageBody,
+            plantName: currentDevs[ca.deviceId]?.config?.plantName || 'Plant',
+            deviceId: ca.deviceId,
+            createdAt: tsVal,
+            ts: tsVal,
+            timestamp: tsVal,
+            status: statusVal,
+            actionLabel:
+              ca.type === 'bottle' || ca.type === 'LOW_WATER'
+                ? 'I Refilled'
+                : ca.type === 'dry'
+                ? 'Water Now'
+                : ca.type === 'offline'
+                ? 'Check Settings'
+                : undefined,
+          };
+        });
+        useAlertStore.getState().setUserAlerts(mapped);
       });
+      activeUserAlertsUnsub = () => unsub();
+    } else {
+      clearAlertSession();
+    }
+  }
 
-      setUserAlerts(mapped);
-    });
+  if (!evalIntervalTimer) {
+    evalIntervalTimer = setInterval(runEvaluation, 5000);
+    runEvaluation();
+  }
+}
 
-    return () => unsubscribe();
-  }, [user, devices]);
+// ── Main useAlertEngine Hook ─────────────────────────────────────────────
+export function useAlertEngine() {
+  const user = useSession((s) => s.user);
+  const activeDeviceId = useLiveDevice((s) => s.activeDeviceId);
 
-  // Evaluate on device changes or on a regular interval
+  const localAlerts = useAlertStore((s) => s.localAlerts);
+  const deviceAlerts = useAlertStore((s) => s.deviceAlerts);
+  const userAlerts = useAlertStore((s) => s.userAlerts);
+  const statusOverrides = useAlertStore((s) => s.statusOverrides);
+  const dismissedIds = useAlertStore((s) => s.dismissedIds);
+
+  const setStatusOverride = useAlertStore((s) => s.setStatusOverride);
+  const setAllStatusOverrides = useAlertStore((s) => s.setAllStatusOverrides);
+  const dismissId = useAlertStore((s) => s.dismissId);
+
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
   useEffect(() => {
-    const timeout = setTimeout(runLocalEvaluation, 0);
-    const timer = setInterval(runLocalEvaluation, 5000);
-    return () => {
-      clearTimeout(timeout);
-      clearInterval(timer);
-    };
-  }, [runLocalEvaluation]);
+    const timer = setInterval(() => setCurrentTime(Date.now()), 60000);
+    return () => clearInterval(timer);
+  }, []);
 
-  /**
-   * Combined Alerts:
-   * Merge incoming server alerts with locally generated real-time alerts using `id` as the unique key:
-   * `[...serverAlerts, ...localAlerts]`
-   * 7-day pruning filter guards against undefined timestamps:
-   * `alert.createdAt && (Date.now() - alert.createdAt <= 7 * 24 * 60 * 60 * 1000)`
-   * Do NOT auto-delete active, unresolved alerts regardless of age unless manually resolved by the user.
-   */
+  // Ensure singleton session manager is synchronized
+  useEffect(() => {
+    syncAlertSession(user?.uid ?? null, activeDeviceId || null);
+  }, [user?.uid, activeDeviceId]);
+
+  const isCloudSynced = Boolean(user);
+
   const retainedAlerts = useMemo(() => {
     const activeUserAlerts = user ? userAlerts : [];
     const serverAlerts = [...deviceAlerts, ...activeUserAlerts];
@@ -634,7 +813,6 @@ export function useAlertEngine() {
         map.set(a.id, alertWithOverride);
       } else {
         const existing = map.get(a.id)!;
-        // Merge without losing properties or active status
         const isResolved =
           override === 'resolved' ||
           override === 'read' ||
@@ -658,9 +836,7 @@ export function useAlertEngine() {
         if (ts < startOfTodayMs) return false;
 
         const isResolved = alert.status === 'resolved' || alert.status === 'read';
-        // Do NOT auto-delete active, unresolved alerts regardless of age unless manually resolved by the user
         if (!isResolved) return true;
-        // Guard against undefined timestamps
         return Boolean(alert.createdAt && currentTime - alert.createdAt <= SEVEN_DAYS_MS);
       })
       .sort(
@@ -669,10 +845,9 @@ export function useAlertEngine() {
       );
   }, [localAlerts, deviceAlerts, userAlerts, statusOverrides, dismissedIds, user, currentTime]);
 
-  // Actions
   const markRead = useCallback(
     (id: string) => {
-      setStatusOverrides((prev) => ({ ...prev, [id]: 'read' }));
+      setStatusOverride(id, 'read');
       const alert = retainedAlerts.find((a) => a.id === id);
       if (alert?.deviceId) {
         updateDeviceAlertInRTDB(alert.deviceId, id, { status: 'resolved' });
@@ -681,18 +856,13 @@ export function useAlertEngine() {
         markAlertReadInRTDB(user.uid, id);
       }
     },
-    [retainedAlerts, user, isCloudSynced]
+    [retainedAlerts, user, isCloudSynced, setStatusOverride]
   );
 
   const markAllRead = useCallback(() => {
-    setStatusOverrides((prev) => {
-      const next = { ...prev };
-      retainedAlerts.forEach((a) => {
-        next[a.id] = 'read';
-      });
-      return next;
-    });
+    const nextOverrides: Record<string, AlertStatus> = {};
     retainedAlerts.forEach((a) => {
+      nextOverrides[a.id] = 'read';
       if (a.deviceId) {
         updateDeviceAlertInRTDB(a.deviceId, a.id, { status: 'resolved' });
       }
@@ -700,15 +870,19 @@ export function useAlertEngine() {
         markAlertReadInRTDB(user.uid, a.id);
       }
     });
-  }, [retainedAlerts, user, isCloudSynced]);
+    setAllStatusOverrides(nextOverrides);
+  }, [retainedAlerts, user, isCloudSynced, setAllStatusOverrides]);
 
-  const snooze = useCallback((id: string) => {
-    setStatusOverrides((prev) => ({ ...prev, [id]: 'snoozed' }));
-  }, []);
+  const snooze = useCallback(
+    (id: string) => {
+      setStatusOverride(id, 'snoozed');
+    },
+    [setStatusOverride]
+  );
 
   const dismiss = useCallback(
     (id: string) => {
-      setDismissedIds((prev) => new Set(prev).add(id));
+      dismissId(id);
       const alert = retainedAlerts.find((a) => a.id === id);
       if (alert?.deviceId) {
         deleteDeviceAlertFromRTDB(alert.deviceId, id);
@@ -717,22 +891,26 @@ export function useAlertEngine() {
         deleteAlertFromRTDB(user.uid, id);
       }
     },
-    [retainedAlerts, user, isCloudSynced]
+    [retainedAlerts, user, isCloudSynced, dismissId]
   );
 
   const handleAction = useCallback(
-    (alert: AppAlert) => {
+    async (alert: AppAlert) => {
       if (alert.type === 'bottle' || alert.type === 'LOW_WATER') {
-        refillBottle();
-        markRead(alert.id);
+        const confirmed = await useLiveDevice.getState().refillBottle(alert.deviceId);
+        if (confirmed) {
+          markRead(alert.id);
+        }
       } else if (alert.type === 'dry') {
-        triggerWaterNow(5);
-        markRead(alert.id);
+        const confirmed = await executeWaterForDevice(alert.deviceId, 5);
+        if (confirmed) {
+          markRead(alert.id);
+        }
       } else {
         markRead(alert.id);
       }
     },
-    [refillBottle, triggerWaterNow, markRead]
+    [markRead]
   );
 
   const unreadAlerts = useMemo(
@@ -766,6 +944,6 @@ export function useAlertEngine() {
     snooze,
     dismiss,
     handleAction,
-    evaluateNow: runLocalEvaluation,
+    evaluateNow: runEvaluation,
   };
 }

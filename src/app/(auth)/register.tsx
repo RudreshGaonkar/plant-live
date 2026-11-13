@@ -19,8 +19,8 @@ import { z } from 'zod';
 import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
 import { ref, set, serverTimestamp } from 'firebase/database';
 import { auth, db } from '@/services/firebase';
-import { useSession } from '@/store/useSession';
 import { useAppTheme } from '@/theme';
+import { LegalPoliciesModal, LegalPolicyType } from '@/components';
 
 const registerSchema = z
   .object({
@@ -38,9 +38,12 @@ type RegisterFormData = z.infer<typeof registerSchema>;
 
 export default function RegisterScreen() {
   const { colors, radii } = useAppTheme();
-  const { enterDemoMode } = useSession();
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [policyModal, setPolicyModal] = useState<{ visible: boolean; type: LegalPolicyType }>({
+    visible: false,
+    type: 'terms',
+  });
 
   const {
     control,
@@ -79,7 +82,7 @@ export default function RegisterScreen() {
         },
         prefs: {
           units: 'C',
-          quietHours: { start: 22, end: 7 },
+          quietHours: { enabled: true, start: '22:00', end: '07:00' },
           alerts: {
             bottle: true,
             dry: true,
@@ -99,11 +102,6 @@ export default function RegisterScreen() {
     } finally {
       setIsSubmitting(false);
     }
-  };
-
-  const handleDemoMode = () => {
-    enterDemoMode();
-    router.replace('/(tabs)/home');
   };
 
   return (
@@ -383,6 +381,25 @@ export default function RegisterScreen() {
               )}
             </TouchableOpacity>
 
+            {/* Terms and Privacy policy disclaimer */}
+            <View style={styles.policyRow}>
+              <Text style={[styles.policyText, { color: colors.textMuted }]}>
+                By signing up, you agree to our{' '}
+              </Text>
+              <TouchableOpacity onPress={() => setPolicyModal({ visible: true, type: 'terms' })}>
+                <Text style={[styles.policyLink, { color: colors.palette.forest }]}>
+                  Terms & Conditions
+                </Text>
+              </TouchableOpacity>
+              <Text style={[styles.policyText, { color: colors.textMuted }]}> and </Text>
+              <TouchableOpacity onPress={() => setPolicyModal({ visible: true, type: 'privacy' })}>
+                <Text style={[styles.policyLink, { color: colors.palette.forest }]}>
+                  Privacy Policy
+                </Text>
+              </TouchableOpacity>
+              <Text style={[styles.policyText, { color: colors.textMuted }]}>.</Text>
+            </View>
+
             {/* Switch to Login */}
             <View style={styles.switchAuthRow}>
               <Text style={[styles.switchAuthText, { color: colors.textMuted }]}>
@@ -400,31 +417,14 @@ export default function RegisterScreen() {
               </TouchableOpacity>
             </View>
           </View>
-
-          {/* Demo Button */}
-          <TouchableOpacity
-            style={[
-              styles.demoButton,
-              {
-                backgroundColor: colors.palette.lime,
-                borderColor: colors.palette.forest,
-                borderRadius: radii.full,
-              },
-            ]}
-            onPress={handleDemoMode}
-          >
-            <Ionicons name="play" size={16} color={colors.palette.forest} />
-            <Text
-              style={[
-                styles.demoButtonText,
-                { color: colors.palette.forest, fontWeight: '700' },
-              ]}
-            >
-              Or Try Demo Mode without an Account
-            </Text>
-          </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <LegalPoliciesModal
+        visible={policyModal.visible}
+        type={policyModal.type}
+        onClose={() => setPolicyModal((prev) => ({ ...prev, visible: false }))}
+      />
     </SafeAreaView>
   );
 }
@@ -539,16 +539,22 @@ const styles = StyleSheet.create({
   switchAuthLink: {
     fontSize: 14,
   },
-  demoButton: {
-    marginTop: 20,
+  policyRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    flexWrap: 'wrap',
     justifyContent: 'center',
-    height: 48,
-    borderWidth: 1,
-    gap: 6,
+    alignItems: 'center',
+    marginTop: 18,
+    paddingHorizontal: 8,
   },
-  demoButtonText: {
-    fontSize: 14,
+  policyText: {
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  policyLink: {
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '700',
+    textDecorationLine: 'underline',
   },
 });

@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import * as Device from 'expo-device';
-import { ref, onValue, set, remove, push, off, query, limitToLast } from 'firebase/database';
+import { ref, onValue, set, remove, push, query, limitToLast } from 'firebase/database';
 import { db } from './firebase';
 
 type ExpoNotificationsType = typeof import('expo-notifications');
@@ -223,7 +223,7 @@ export function listenToUserAlerts(
     }
   });
 
-  return () => off(alertsQuery, 'value', unsubscribe);
+  return () => unsubscribe();
 }
 
 /**

@@ -6,9 +6,12 @@ import {
   ScrollView,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { ref, onValue } from 'firebase/database';
+import { db } from '@/services/firebase';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice, WaterLog, DeviceRecord } from '@/store/useLiveDevice';
-import { listenToDeviceHistory, DeviceHistoryRecord } from '@/services/devices';
+import { useSession } from '@/store/useSession';
+import { listenToDeviceHistory, listenToWaterLogs, DeviceHistoryRecord } from '@/services/devices';
 import { DayRibbon, TimeWindow } from '@/components/DayRibbon';
 import {
   TelemetryChart,
@@ -20,6 +23,10 @@ import {
 import { InsightCardCarousel, InsightCardData } from '@/components/InsightCardCarousel';
 import { EventTimeline } from '@/components/EventTimeline';
 
+const toDisplayTemp = (tempC: number, unit: 'C' | 'F') => {
+  return unit === 'F' ? Math.round((tempC * 9) / 5 + 32) : tempC;
+};
+
 /**
  * Builds continuous historical telemetry data points.
  * Combines real RTDB history (if available) with realistic diurnal curves and watering step-ups.
@@ -30,7 +37,8 @@ function generateHistoricalSeries(
   realHistory: DeviceHistoryRecord[],
   timeWindow: TimeWindow,
   chartWidth: number,
-  chartHeight: number
+  chartHeight: number,
+  tempUnit: 'C' | 'F' = 'C'
 ): Record<ChartMetricKey, ChartDataPoint[]> {
   const now = Date.now();
   const windowHours = timeWindow === '24h' ? 24 : 168; // 24h or 7 days
@@ -109,12 +117,15 @@ function generateHistoricalSeries(
       const amplitude = location === 'terrace' ? 5 : 3;
       tempVal = Math.round(baseTemp + diurnalSine * amplitude);
     }
-    const tempY = chartHeight - (Math.max(0, Math.min(50, tempVal)) / 50) * chartHeight;
+    const displayTempVal = toDisplayTemp(tempVal, tempUnit);
+    const minT = tempUnit === 'F' ? 32 : 0;
+    const maxT = tempUnit === 'F' ? 122 : 50;
+    const tempY = chartHeight - (Math.max(0, Math.min(maxT - minT, displayTempVal - minT)) / (maxT - minT)) * chartHeight;
     tempPoints.push({
       x,
       y: tempY,
       ts: ptTs,
-      val: tempVal,
+      val: displayTempVal,
     });
 
     // 3. Humidity Calculation (Inversely related to temperature / peaks at dawn)
@@ -166,7 +177,8 @@ function generateHistoricalSeries(
  */
 function buildRuleBasedInsights(
   device: DeviceRecord,
-  waterLogs: WaterLog[]
+  waterLogs: WaterLog[],
+  tempUnit: 'C' | 'F' = 'C'
 ): InsightCardData[] {
   const { config, telemetry } = device;
   const plantName = config.plantName || config.name || 'Your plant';
@@ -242,12 +254,14 @@ function buildRuleBasedInsights(
   }
 
   // Insight 4: Temperature Safety Zone
+  const displayCurrentTemp = toDisplayTemp(telemetry.temperature, tempUnit);
+  const displayMaxTemp = toDisplayTemp(config.thresholds.tempMax, tempUnit);
   if (telemetry.temperature > config.thresholds.tempMax - 2) {
     list.push({
       id: 'ins-temp',
       category: 'Heat Watch',
       title: 'Warm Afternoon Alert',
-      body: `Temperature neared ${telemetry.temperature}°C. The system prefers early morning watering to avoid scalding delicate feeder roots in warm soil.`,
+      body: `Temperature neared ${displayCurrentTemp}°${tempUnit}. The system prefers early morning watering to avoid scalding delicate feeder roots in warm soil.`,
       icon: 'thermometer',
       tint: 'blush',
     });
@@ -256,7 +270,7 @@ function buildRuleBasedInsights(
       id: 'ins-temp',
       category: 'Thermal Health',
       title: 'Comfortable Temp Range',
-      body: `Ambient temperature (${telemetry.temperature}°C) remained comfortably within safe bounds (limit: ${config.thresholds.tempMax}°C).`,
+      body: `Ambient temperature (${displayCurrentTemp}°${tempUnit}) remained comfortably within safe bounds (limit: ${displayMaxTemp}°${tempUnit}).`,
       icon: 'happy',
       tint: 'mint',
     });
@@ -270,17 +284,49 @@ export default function HistoryScreen() {
   const { colors, spacing } = useAppTheme();
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
   const waterLogs = useLiveDevice((s) => s.waterLogs);
+  const user = useSession((s) => s.user);
+  const [tempUnit, setTempUnit] = useState<'C' | 'F'>('C');
+
+  useEffect(() => {
+    if (!user?.uid) return;
+    const unitsRef = ref(db, `users/${user.uid}/prefs/units`);
+    const unsub = onValue(unitsRef, (snap) => {
+      const val = snap.val();
+      if (val === 'C' || val === 'F') {
+        setTempUnit(val);
+      }
+    });
+    return () => unsub();
+  }, [user?.uid]);
 
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('24h');
   const [activeMetric, setActiveMetric] = useState<ChartMetricKey>('moisture');
   const [scrubFraction, setScrubFraction] = useState<number>(1.0); // 1.0 = newest
   const [realHistory, setRealHistory] = useState<DeviceHistoryRecord[]>([]);
+  const [prevDeviceId, setPrevDeviceId] = useState<string | undefined>(device?.id);
+
+  // Stale chart samples are cleared immediately on device switch
+  if (device?.id !== prevDeviceId) {
+    setPrevDeviceId(device?.id);
+    setRealHistory([]);
+  }
 
   // Persistent live listener to RTDB history for the active device
   useEffect(() => {
     if (!device?.id) return;
     const unsubscribe = listenToDeviceHistory(device.id, (records) => {
       setRealHistory(records);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [device?.id]);
+
+  // Subscribe to waterLogs independently when opening History directly
+  useEffect(() => {
+    if (!device?.id) return;
+    const unsubscribe = listenToWaterLogs(device.id, (logs) => {
+      useLiveDevice.setState({ waterLogs: logs });
     });
     return () => unsubscribe();
   }, [device?.id]);
@@ -304,9 +350,10 @@ export default function HistoryScreen() {
       realHistory,
       timeWindow,
       CHART_WIDTH,
-      CHART_HEIGHT
+      CHART_HEIGHT,
+      tempUnit
     );
-  }, [device, waterLogs, realHistory, timeWindow]);
+  }, [device, waterLogs, realHistory, timeWindow, tempUnit]);
 
   const currentPoints = seriesMap[activeMetric];
 
@@ -334,15 +381,15 @@ export default function HistoryScreen() {
   // Rule-based insight cards — hoisted ABOVE early return
   const insights = useMemo(() => {
     if (!device) return [];
-    return buildRuleBasedInsights(device, waterLogs);
-  }, [device, waterLogs]);
+    return buildRuleBasedInsights(device, waterLogs, tempUnit);
+  }, [device, waterLogs, tempUnit]);
 
   if (!device) {
     return (
       <View style={[styles.safeArea, { backgroundColor: colors.background, paddingTop: insets.top + 12 }]}>
         <View style={styles.emptyContainer}>
           <Text style={[styles.emptyText, { color: colors.textMuted }]}>
-            No device paired. Connect a plant device to view history.
+            No controller paired. Connect a plant controller to view history.
           </Text>
         </View>
       </View>
@@ -354,7 +401,7 @@ export default function HistoryScreen() {
     activeMetric === 'moisture'
       ? '%'
       : activeMetric === 'temp'
-      ? '°C'
+      ? `°${tempUnit}`
       : activeMetric === 'humidity'
       ? '%'
       : device.config.sensors.lightMode === 'digital'

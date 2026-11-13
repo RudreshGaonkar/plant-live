@@ -48,7 +48,7 @@ export const offlineSweep = onSchedule(
             updates[`devices/${deviceId}/status/online`] = false;
           }
 
-          const uid = owners[deviceId];
+          const uid = device.meta?.ownerUid || owners[deviceId];
           if (uid) {
             const plantName =
               device.config?.plantName || device.config?.name || deviceId;

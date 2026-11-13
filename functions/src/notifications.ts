@@ -24,8 +24,8 @@ export interface UserPrefs {
   units?: 'C' | 'F';
   quietHours?: {
     enabled?: boolean;
-    start?: string; // "22:00"
-    end?: string;   // "07:00"
+    start?: string | number; // "22:00" or legacy 22
+    end?: string | number;   // "07:00" or legacy 7
   };
   alerts?: {
     bottle?: boolean;
@@ -39,6 +39,29 @@ export interface UserPrefs {
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
+function parseTimeToMinutes(val: unknown): number | null {
+  if (typeof val === 'number') {
+    if (isNaN(val) || val < 0 || val > 23) return null;
+    return val * 60;
+  }
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (!trimmed) return null;
+    if (trimmed.includes(':')) {
+      const parts = trimmed.split(':').map((p) => Number(p.trim()));
+      if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+        return parts[0] * 60 + parts[1];
+      }
+    } else {
+      const num = Number(trimmed);
+      if (!isNaN(num) && num >= 0 && num <= 23) {
+        return num * 60;
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Checks if the current time falls inside quiet hours.
  */
@@ -48,17 +71,19 @@ export function isQuietHours(
 ): boolean {
   if (!quietHours) return false;
   if (quietHours.enabled === false) return false;
-  if (!quietHours.start || !quietHours.end) return false;
+  if (quietHours.start === undefined || quietHours.start === null ||
+      quietHours.end === undefined || quietHours.end === null) {
+    return false;
+  }
 
-  const [startHour, startMin] = quietHours.start.split(':').map(Number);
-  const [endHour, endMin] = quietHours.end.split(':').map(Number);
-  if (isNaN(startHour) || isNaN(startMin) || isNaN(endHour) || isNaN(endMin)) {
+  const startMinutes = parseTimeToMinutes(quietHours.start);
+  const endMinutes = parseTimeToMinutes(quietHours.end);
+
+  if (startMinutes === null || endMinutes === null) {
     return false;
   }
 
   const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  const startMinutes = startHour * 60 + startMin;
-  const endMinutes = endHour * 60 + endMin;
 
   if (startMinutes <= endMinutes) {
     return currentMinutes >= startMinutes && currentMinutes < endMinutes;
@@ -106,18 +131,26 @@ export async function dispatchAlert(
     lastMessage: message,
   });
 
-  // 2. Write alert record to RTDB
-  const alertRef = adminDb.ref(`alerts/${uid}`).push();
-  await alertRef.set({
+  // 2. Write alert record to RTDB (unified user alerts path with legacy fallback mirror)
+  const alertRef = adminDb.ref(`users/${uid}/alerts`).push();
+  const alertRecord = {
     id: alertRef.key,
     ts: now,
+    createdAt: now,
+    timestamp: now,
     deviceId,
     type,
     severity,
     title,
     message,
     read: false,
-  });
+  };
+  await alertRef.set(alertRecord);
+  try {
+    if (alertRef.key) {
+      await adminDb.ref(`alerts/${uid}/${alertRef.key}`).set(alertRecord);
+    }
+  } catch {}
 
   // 3. Read user preferences
   const prefsSnap = await adminDb.ref(`users/${uid}/prefs`).once('value');

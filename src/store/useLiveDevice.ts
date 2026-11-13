@@ -121,6 +121,7 @@ export interface WeatherData {
 export interface LiveDeviceStore {
   devices: Record<string, DeviceRecord>;
   activeDeviceId: string;
+  wateringDeviceId: string | null;
   waterLogs: WaterLog[];
   isWateringActive: boolean;
   isWatering: boolean;
@@ -131,7 +132,7 @@ export interface LiveDeviceStore {
   
   // Actions
   setActiveDeviceId: (id: string) => void;
-  triggerWaterNow: (durationSec?: number) => void;
+  triggerWaterNow: (durationSec?: number, deviceId?: string) => void;
   resetWateringState: (targetDeviceId?: string) => void;
   stopWatering: (targetDeviceId?: string) => void;
   toggleMode: () => void | Promise<void>;
@@ -259,6 +260,7 @@ let activeWateringTimer: ReturnType<typeof setInterval> | null = null;
 export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   devices: {},
   activeDeviceId: '',
+  wateringDeviceId: null,
   waterLogs: [],
   isWateringActive: false,
   isWatering: false,
@@ -268,7 +270,20 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   weatherLoading: false,
 
   setActiveDeviceId: (id) => {
-    set({ activeDeviceId: id });
+    const { devices, wateringDeviceId, isWateringActive } = get();
+    const dev = devices[id];
+    const devPumpOn = Boolean(dev?.telemetry?.pumpOn || dev?.telemetry?.isPumpActive);
+    const isThisDeviceWatering = wateringDeviceId === id ? isWateringActive : devPumpOn;
+
+    set({
+      activeDeviceId: id,
+      isWateringActive: isThisDeviceWatering,
+      isWatering: isThisDeviceWatering,
+      ...(!isThisDeviceWatering && {
+        wateringSecondsLeft: 0,
+        isCommandPending: false,
+      }),
+    });
     const uid = auth.currentUser?.uid;
     if (uid) {
       if (id) {
@@ -297,6 +312,7 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
       isWatering: false,
       isCommandPending: false,
       wateringSecondsLeft: 0,
+      wateringDeviceId: null,
       devices: {
         ...devices,
         [targetId]: {
@@ -319,20 +335,21 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     get().resetWateringState(targetDeviceId);
   },
 
-  triggerWaterNow: (durationSec = 5) => {
+  triggerWaterNow: (durationSec = 5, deviceId?: string) => {
     if (activeWateringTimer) {
       clearInterval(activeWateringTimer);
       activeWateringTimer = null;
     }
 
     const { activeDeviceId, devices } = get();
-    const targetId = activeDeviceId || 'leaf-node-01';
+    const targetId = deviceId || activeDeviceId || 'leaf-node-01';
     console.log('[LeafLink] Active Device ID:', targetId);
     const active = devices[targetId] || createDefaultDeviceRecord(targetId);
 
     // Optimistic activation of pump state locally
     set({
       activeDeviceId: targetId,
+      wateringDeviceId: targetId,
       isWateringActive: true,
       isWatering: true,
       isCommandPending: true,
@@ -375,29 +392,18 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
           clearInterval(activeWateringTimer);
           activeWateringTimer = null;
         }
-        
+
         const stateNow = get();
         const dev = stateNow.devices[targetId];
         if (!dev) return;
 
-        const newMoisture = Math.min(100, dev.telemetry.soilMoisture + 15);
-
-        const newLog: WaterLog = {
-          id: `log-${Date.now()}`,
-          ts: Date.now(),
-          trigger: 'manual',
-          durationSec,
-          moistureBefore: dev.telemetry.soilMoisture,
-          moistureAfter: newMoisture,
-          note: 'Manual pump trigger',
-        };
-
+        // Controller is single source of truth: no simulated moisture additions or client water log writes
         set({
           isWateringActive: false,
           isWatering: false,
           isCommandPending: false,
           wateringSecondsLeft: 0,
-          waterLogs: [newLog, ...stateNow.waterLogs],
+          wateringDeviceId: null,
           devices: {
             ...stateNow.devices,
             [targetId]: {
@@ -410,8 +416,6 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
                 ...dev.telemetry,
                 pumpOn: false,
                 isPumpActive: false,
-                soilMoisture: newMoisture,
-                ts: Date.now(),
               },
               command: {
                 id: `cmd-${Date.now()}`,
@@ -543,7 +547,12 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
               if (timeoutHandle) clearTimeout(timeoutHandle);
               unsubscribe();
 
-              // Confirm refill in store now that hardware acknowledged done
+              // Confirm refill in store using actual applied capacity returned/confirmed by controller
+              const appliedCapacity =
+                typeof ack.capacityMl === 'number' && ack.capacityMl > 0
+                  ? ack.capacityMl
+                  : validatedCapacity;
+
               const currentDevices = get().devices;
               const cur = currentDevices[targetId] || active;
               set({
@@ -553,24 +562,25 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
                     ...cur,
                     config: {
                       ...cur.config,
-                      bottleCapacityMl: validatedCapacity,
-                      remainingMl: validatedCapacity,
+                      bottleCapacityMl: appliedCapacity,
+                      remainingMl: appliedCapacity,
                       bottle: {
                         ...cur.config.bottle,
-                        capacityMl: validatedCapacity,
-                        remainingMl: validatedCapacity,
+                        capacityMl: appliedCapacity,
+                        remainingMl: appliedCapacity,
                       },
                     },
                     command: {
                       id: uniqueId,
                       type: 'refilled',
-                      capacityMl: validatedCapacity,
+                      capacityMl: appliedCapacity,
                       requestedAt: cur.command?.requestedAt || Date.now(),
                       status: 'done',
                       ack: {
                         id: uniqueId,
                         status: 'done',
                         ts: ack.ts || Date.now(),
+                        ...(typeof ack.capacityMl === 'number' ? { capacityMl: ack.capacityMl } : {}),
                       },
                     },
                   },
@@ -643,9 +653,7 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
         id: uniqueId,
         type: 'refilled',
         capacityMl: validatedCapacity,
-        status: 'pending',
         requestedAt: Date.now(),
-        ack: { id: uniqueId, status: 'pending', ts: Date.now() },
       }).catch(() => fail('refill_write_failed'));
     });
   },
@@ -829,6 +837,11 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
       resolvedRemaining = Math.round((active.telemetry.waterLevel * resolvedCapacity) / 100);
     } else if (!active.isConfigHydrated && currentBottle.capacityMl === 0) {
       // First snapshot arrival with no prior hydration: initialize remaining to capacity
+      resolvedRemaining = resolvedCapacity;
+    }
+
+    // Reconcile remaining water volume if bottle size is lowered below current remaining volume
+    if (resolvedRemaining > resolvedCapacity) {
       resolvedRemaining = resolvedCapacity;
     }
 

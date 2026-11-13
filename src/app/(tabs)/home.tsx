@@ -20,6 +20,7 @@ import {
   Dimensions,
   TouchableOpacity,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -73,7 +74,7 @@ export default function HomeScreen() {
   const toggleMode = useLiveDevice((s) => s.toggleMode);
   const refillBottle = useLiveDevice((s) => s.refillBottle);
   const waterLogs = useLiveDevice((s) => s.waterLogs);
-  const { triggerWaterNow } = useCommand();
+  const { triggerWaterNow, stage } = useCommand();
 
   const [gardenStripOpen, setGardenStripOpen] = useState(false);
 
@@ -128,10 +129,10 @@ export default function HomeScreen() {
             <Ionicons name="leaf-outline" size={56} color={colors.palette.forest} />
           </View>
           <Text style={[styles.emptyTitle, { color: colors.palette.ink }]}>
-            Unpaired Hardware
+            Unpaired Controller
           </Text>
           <Text style={[styles.emptySubtitle, { color: colors.palette.sage }]}>
-            No device is currently paired under your account. Pair your ESP8266 plant companion to start live monitoring.
+            No controller is currently paired under your account. Pair your plant controller to start live monitoring.
           </Text>
           <TouchableOpacity
             style={[
@@ -149,7 +150,7 @@ export default function HomeScreen() {
               color={colors.palette.white}
               style={{ marginRight: 8 }}
             />
-            <Text style={styles.addBtnText}>Pair Hardware</Text>
+            <Text style={styles.addBtnText}>Pair Controller</Text>
           </TouchableOpacity>
         </View>
       </LinearGradient>
@@ -187,14 +188,14 @@ export default function HomeScreen() {
 
   // Manual watering trigger with unified command hook
   const handleManualWatering = async () => {
-    console.log('[LeafLink] Active Device ID:', device.id);
+    console.log('[LeafLink] Active Controller ID:', device.id);
     await triggerWaterNow(5);
   };
 
   const handleRemoveFromSwitcher = (deviceId: string, plantName: string) => {
     if (!user?.uid) return;
     Alert.alert(
-      'Remove Device',
+      'Remove Controller',
       `Are you sure you want to remove ${plantName} (${deviceId})?`,
       [
         { text: 'Cancel', style: 'cancel' },
@@ -209,13 +210,13 @@ export default function HomeScreen() {
                 deviceId,
                 plantName
               );
-              Alert.alert('Device Removed', `${plantName} (${deviceId}) was successfully removed.`);
+              Alert.alert('Controller Removed', `${plantName} (${deviceId}) was successfully removed.`);
               if (!res.nextDeviceId) {
                 setGardenStripOpen(false);
                 router.replace('/add-device');
               }
             } catch (err: any) {
-              Alert.alert('Error', err?.message || 'Failed to remove device.');
+              Alert.alert('Error', err?.message || 'Failed to remove controller.');
             }
           },
         },
@@ -361,23 +362,27 @@ export default function HomeScreen() {
             testID="manual-watering-btn"
             accessibilityLabel="Manual watering"
             activeOpacity={0.8}
-            disabled={isWatering || isPumpActive}
+            disabled={isWatering || isPumpActive || stage === 'sent'}
             onPress={handleManualWatering}
             style={[
               styles.iconPill,
               {
-                backgroundColor: isWatering || isPumpActive
+                backgroundColor: isWatering || isPumpActive || stage === 'sent'
                   ? colors.palette.forest
                   : `${colors.palette.white}CC`,
                 borderRadius: radii.full,
               },
             ]}
           >
-            <Ionicons
-              name={isWatering || isPumpActive ? 'water' : 'water-outline'}
-              size={18}
-              color={isWatering || isPumpActive ? colors.palette.white : colors.palette.forest}
-            />
+            {stage === 'sent' ? (
+              <ActivityIndicator size="small" color={colors.palette.white} />
+            ) : (
+              <Ionicons
+                name={isWatering || isPumpActive ? 'water' : 'water-outline'}
+                size={18}
+                color={isWatering || isPumpActive ? colors.palette.white : colors.palette.forest}
+              />
+            )}
           </TouchableOpacity>
 
           {/* Alerts bell */}

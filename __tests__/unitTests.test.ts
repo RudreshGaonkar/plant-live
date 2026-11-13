@@ -318,6 +318,7 @@ describe('Unit Tests: Manual Watering Safety Bypass & Payload', () => {
     const remainingMl = 400;
 
     // Check that button is never disabled when moisture is 100%
+    expect(soilMoisture).toBe(100);
     const isButtonDisabled = isWateringActive || (cooldownSecondsLeft > 0) || (remainingMl <= 20);
     expect(isButtonDisabled).toBe(false);
 
@@ -340,6 +341,7 @@ describe('Unit Tests: Water Level Detection & Event Trigger Payload', () => {
     const deviceId = 'leaf-node-01';
     const now = Date.now();
     const alertPayload = {
+      deviceId,
       type: 'LOW_WATER',
       title: 'Low Reservoir Water',
       message: 'Water level is low. Please refill the reservoir.',

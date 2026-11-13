@@ -6,10 +6,11 @@ import {
   updateProfile,
   updatePassword,
 } from 'firebase/auth';
-import { ref, get as fbGet } from 'firebase/database';
+import { ref, get as fbGet, update } from 'firebase/database';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { auth, db } from '@/services/firebase';
 import { useLiveDevice } from '@/store/useLiveDevice';
+import { clearAlertSession } from '@/hooks/useAlertEngine';
 
 export interface UserProfile {
   uid: string;
@@ -66,6 +67,14 @@ export const useSession = create<SessionState>((set, get) => ({
   updateUserDisplayName: async (displayName: string) => {
     if (auth.currentUser) {
       await updateProfile(auth.currentUser, { displayName });
+      try {
+        await update(ref(db, `users/${auth.currentUser.uid}/profile`), {
+          name: displayName,
+          displayName,
+        });
+      } catch (err) {
+        console.warn('[Session] Failed to sync display name to RTDB:', err);
+      }
     }
     set((state) => ({
       user: state.user ? { ...state.user, displayName } : null,
@@ -117,6 +126,7 @@ export const useSession = create<SessionState>((set, get) => ({
       console.warn('[Session] Sign out error:', err);
     }
     useLiveDevice.getState().clearDeviceState();
+    clearAlertSession();
     set({ user: null, activeDeviceId: '', isDemoMode: false, isLoading: false, isAuthReady: true });
   },
 

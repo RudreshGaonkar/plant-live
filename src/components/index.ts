@@ -18,3 +18,4 @@ export * from './AlertCard';
 export * from './SoilCalibration';
 export * from './BottleRail';
 export * from './WeatherWidget';
+export * from './LegalPoliciesModal';
