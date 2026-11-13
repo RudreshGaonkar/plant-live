@@ -6,12 +6,12 @@
  * - Info: lime
  * uiLayout.md Section 6
  */
-import React, { useState, useEffect } from 'react';
+import React, { useMemo } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  ScrollView,
+  FlatList,
   TouchableOpacity,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -54,16 +54,12 @@ const SEVERITY_COLORS: Record<
   },
 };
 
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-
 export default function AlertsScreen() {
   const { colors, radii, spacing } = useAppTheme();
   const {
     alerts,
     unreadAlerts,
     criticalAlerts,
-    warningAlerts,
-    infoAlerts,
     markRead,
     markAllRead,
     snooze,
@@ -71,220 +67,215 @@ export default function AlertsScreen() {
     isCloudSynced,
   } = useAlertEngine();
 
-  // 7-day pruning filter guards against undefined timestamps
-  // Do NOT auto-delete active, unresolved alerts regardless of age unless manually resolved by the user
-  const [currentTime, setCurrentTime] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(Date.now()), 60000);
-    return () => clearInterval(timer);
-  }, []);
+  const getAlertTime = (alert: AppAlert) =>
+    alert.timestamp ?? alert.createdAt ?? alert.ts ?? 0;
 
-  const isRetained = (alert: AppAlert) => {
-    const isResolved = alert.status === 'resolved' || alert.status === 'read';
-    if (!isResolved) return true;
-    return Boolean(alert.createdAt && (currentTime - alert.createdAt <= SEVEN_DAYS_MS));
+  // Filter displayed alerts strictly to today only (timestamp >= startOfTodayMs), sorted newest-first
+  const startOfTodayMs = useMemo(() => new Date().setHours(0, 0, 0, 0), []);
+
+  const todayAlerts = useMemo(() => {
+    return alerts
+      .filter((alert) => getAlertTime(alert) >= startOfTodayMs)
+      .sort((a, b) => getAlertTime(b) - getAlertTime(a));
+  }, [alerts, startOfTodayMs]);
+
+  // Cap rendered items to max 25 items
+  const cappedAlerts = useMemo(() => todayAlerts.slice(0, 25), [todayAlerts]);
+
+  const todayUnread = useMemo(
+    () => unreadAlerts.filter((a) => getAlertTime(a) >= startOfTodayMs),
+    [unreadAlerts, startOfTodayMs]
+  );
+
+  const todayCritical = useMemo(
+    () => criticalAlerts.filter((a) => getAlertTime(a) >= startOfTodayMs),
+    [criticalAlerts, startOfTodayMs]
+  );
+
+  const renderItem = ({ item }: { item: AppAlert }) => {
+    const isResolved =
+      item.status === 'resolved' || item.status === 'read' || item.status === 'snoozed';
+
+    if (isResolved) {
+      return (
+        <View
+          key={item.id}
+          style={[
+            styles.readCard,
+            {
+              backgroundColor: `${colors.palette.white}80`,
+              borderRadius: radii.md,
+              borderColor: colors.border,
+            },
+          ]}
+        >
+          <Ionicons
+            name="checkmark-circle-outline"
+            size={16}
+            color={colors.palette.sage}
+          />
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.cardTitle, { color: colors.textMuted }]}>
+              {item.title?.trim() || 'System Notice'}
+            </Text>
+            <Text style={[styles.cardTime, { color: colors.textMuted }]}>
+              {formatTime(item.ts ?? item.timestamp ?? item.createdAt)}
+            </Text>
+          </View>
+        </View>
+      );
+    }
+
+    return (
+      <SwipeableAlertCard
+        key={item.id}
+        alert={item}
+        onMarkRead={() => markRead(item.id)}
+        onSnooze={() => snooze(item.id)}
+        onAction={() => handleAction(item)}
+        colors={colors}
+        radii={radii}
+      />
+    );
   };
 
-  const retainedAlerts = alerts.filter(isRetained);
-  const retainedUnread = unreadAlerts.filter(isRetained);
-  const retainedCritical = criticalAlerts.filter(isRetained);
-  const retainedWarning = warningAlerts.filter(isRetained);
-  const retainedInfo = infoAlerts.filter(isRetained);
+  const listHeader = (
+    <View style={styles.headerWrap}>
+      {/* Header */}
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Text style={[styles.title, { color: colors.text }]}>Alerts</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 5,
+              paddingHorizontal: 8,
+              paddingVertical: 4,
+              borderRadius: radii.sm,
+              backgroundColor: isCloudSynced ? `${colors.palette.forest}15` : `${colors.palette.sage}20`,
+            }}
+          >
+            <Ionicons
+              name={isCloudSynced ? 'cloud-done-outline' : 'hardware-chip-outline'}
+              size={12}
+              color={isCloudSynced ? colors.palette.forest : colors.palette.sage}
+            />
+            <Text
+              style={{
+                fontSize: 10,
+                fontWeight: '700',
+                color: isCloudSynced ? colors.palette.forest : colors.palette.sage,
+              }}
+            >
+              {isCloudSynced ? 'Cloud Synced' : 'Local Engine'}
+            </Text>
+          </View>
+          {todayUnread.length > 0 && (
+            <TouchableOpacity onPress={markAllRead}>
+              <Text style={{ fontSize: 12, fontWeight: '700', color: colors.palette.forest }}>
+                Mark all read
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+      <Text style={[styles.subtitle, { color: colors.textMuted }]}>
+        {todayUnread.length > 0
+          ? `${todayUnread.length} item${todayUnread.length > 1 ? 's' : ''} need your attention`
+          : 'All caught up'}
+      </Text>
 
-  const readAlerts = retainedAlerts.filter((a) => a.status === 'resolved' || a.status === 'read' || a.status === 'snoozed');
-  const isEmpty = retainedAlerts.length === 0 || retainedUnread.length === 0;
+      {/* Pinned critical banner */}
+      {todayCritical.length > 0 && (
+        <View
+          style={[
+            styles.criticalBanner,
+            {
+              backgroundColor: '#FFECEC',
+              borderRadius: radii.card,
+              borderColor: colors.palette.critical,
+            },
+          ]}
+        >
+          <Ionicons
+            name="alert-circle"
+            size={20}
+            color={colors.palette.critical}
+          />
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.bannerTitle, { color: colors.palette.critical }]}>
+              {todayCritical[0].title?.trim() || 'System Notice'}
+            </Text>
+            <Text style={[styles.bannerBody, { color: '#8B3040' }]}>
+              {todayCritical[0].message?.trim() ||
+                todayCritical[0].description?.trim() ||
+                todayCritical[0].body?.trim() ||
+                'Critical system notice.'}
+            </Text>
+          </View>
+          {todayCritical[0].actionLabel && (
+            <TouchableOpacity
+              style={[
+                styles.bannerAction,
+                {
+                  backgroundColor: colors.palette.critical,
+                  borderRadius: radii.md,
+                },
+              ]}
+              onPress={() => handleAction(todayCritical[0])}
+            >
+              <Text style={styles.bannerActionText}>
+                {todayCritical[0].actionLabel}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+    </View>
+  );
+
+  const listEmpty = (
+    <Animated.View
+      entering={FadeIn.delay(200)}
+      style={styles.emptyState}
+    >
+      <View
+        style={[
+          styles.emptyIconWrap,
+          { backgroundColor: colors.palette.mint },
+        ]}
+      >
+        <Ionicons
+          name="leaf"
+          size={40}
+          color={colors.palette.forest}
+        />
+      </View>
+      <Text style={[styles.emptyTitle, { color: colors.text }]}>
+        All calm
+      </Text>
+      <Text style={[styles.emptyBody, { color: colors.textMuted }]}>
+        Your plant is happy and healthy. No alerts to review.
+      </Text>
+    </Animated.View>
+  );
 
   return (
     <SafeAreaView
       style={[styles.safeArea, { backgroundColor: colors.background }]}
     >
-      <ScrollView
+      <FlatList
+        data={cappedAlerts}
+        keyExtractor={(item) => item.id}
+        renderItem={renderItem}
+        ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+        ListHeaderComponent={listHeader}
+        ListEmptyComponent={listEmpty}
+        ListFooterComponent={<View style={{ height: 120 }} />}
         contentContainerStyle={[styles.container, { padding: spacing.md }]}
         showsVerticalScrollIndicator={false}
-      >
-        {/* Header */}
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Text style={[styles.title, { color: colors.text }]}>Alerts</Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 5,
-                paddingHorizontal: 8,
-                paddingVertical: 4,
-                borderRadius: radii.sm,
-                backgroundColor: isCloudSynced ? `${colors.palette.forest}15` : `${colors.palette.sage}20`,
-              }}
-            >
-              <Ionicons
-                name={isCloudSynced ? 'cloud-done-outline' : 'hardware-chip-outline'}
-                size={12}
-                color={isCloudSynced ? colors.palette.forest : colors.palette.sage}
-              />
-              <Text
-                style={{
-                  fontSize: 10,
-                  fontWeight: '700',
-                  color: isCloudSynced ? colors.palette.forest : colors.palette.sage,
-                }}
-              >
-                {isCloudSynced ? 'Cloud Synced' : 'Local Engine'}
-              </Text>
-            </View>
-            {retainedUnread.length > 0 && (
-              <TouchableOpacity onPress={markAllRead}>
-                <Text style={{ fontSize: 12, fontWeight: '700', color: colors.palette.forest }}>
-                  Mark all read
-                </Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        </View>
-        <Text style={[styles.subtitle, { color: colors.textMuted }]}>
-          {retainedUnread.length > 0
-            ? `${retainedUnread.length} item${retainedUnread.length > 1 ? 's' : ''} need your attention`
-            : 'All caught up'}
-        </Text>
-
-        {/* Empty state */}
-        {isEmpty && (
-          <Animated.View
-            entering={FadeIn.delay(200)}
-            style={styles.emptyState}
-          >
-            <View
-              style={[
-                styles.emptyIconWrap,
-                { backgroundColor: colors.palette.mint },
-              ]}
-            >
-              <Ionicons
-                name="leaf"
-                size={40}
-                color={colors.palette.forest}
-              />
-            </View>
-            <Text style={[styles.emptyTitle, { color: colors.text }]}>
-              All calm
-            </Text>
-            <Text style={[styles.emptyBody, { color: colors.textMuted }]}>
-              Your plant is happy and healthy. No alerts to review.
-            </Text>
-          </Animated.View>
-        )}
-
-        {/* Pinned critical banner */}
-        {retainedCritical.length > 0 && (
-          <View
-            style={[
-              styles.criticalBanner,
-              {
-                backgroundColor: '#FFECEC',
-                borderRadius: radii.card,
-                borderColor: colors.palette.critical,
-              },
-            ]}
-          >
-            <Ionicons
-              name="alert-circle"
-              size={20}
-              color={colors.palette.critical}
-            />
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.bannerTitle, { color: colors.palette.critical }]}>
-                {retainedCritical[0].title?.trim() || 'System Notice'}
-              </Text>
-              <Text style={[styles.bannerBody, { color: '#8B3040' }]}>
-                {retainedCritical[0].message?.trim() ||
-                  retainedCritical[0].description?.trim() ||
-                  retainedCritical[0].body?.trim() ||
-                  'Critical system notice.'}
-              </Text>
-            </View>
-            {retainedCritical[0].actionLabel && (
-              <TouchableOpacity
-                style={[
-                  styles.bannerAction,
-                  {
-                    backgroundColor: colors.palette.critical,
-                    borderRadius: radii.md,
-                  },
-                ]}
-                onPress={() => handleAction(retainedCritical[0])}
-              >
-                <Text style={styles.bannerActionText}>
-                  {retainedCritical[0].actionLabel}
-                </Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        )}
-
-        {/* Severity groups */}
-        {[
-          { label: 'Critical', alerts: retainedCritical, severity: 'critical' as AlertSeverity },
-          { label: 'Warning', alerts: retainedWarning, severity: 'warning' as AlertSeverity },
-          { label: 'Info', alerts: retainedInfo, severity: 'info' as AlertSeverity },
-        ].map(({ label, alerts: groupAlerts, severity }) =>
-          groupAlerts.length > 0 ? (
-            <View key={severity} style={styles.group}>
-              <Text style={[styles.groupLabel, { color: colors.textMuted }]}>
-                {label}
-              </Text>
-              {groupAlerts.map((alert) => (
-                <SwipeableAlertCard
-                  key={alert.id}
-                  alert={alert}
-                  onMarkRead={() => markRead(alert.id)}
-                  onSnooze={() => snooze(alert.id)}
-                  onAction={() => handleAction(alert)}
-                  colors={colors}
-                  radii={radii}
-                />
-              ))}
-            </View>
-          ) : null
-        )}
-
-        {/* Read / snoozed section */}
-        {readAlerts.length > 0 && (
-          <View style={styles.group}>
-            <Text style={[styles.groupLabel, { color: colors.textMuted }]}>
-              Resolved
-            </Text>
-            {readAlerts.map((alert) => (
-              <View
-                key={alert.id}
-                style={[
-                  styles.readCard,
-                  {
-                    backgroundColor: `${colors.palette.white}80`,
-                    borderRadius: radii.md,
-                    borderColor: colors.border,
-                  },
-                ]}
-              >
-                <Ionicons
-                  name="checkmark-circle-outline"
-                  size={16}
-                  color={colors.palette.sage}
-                />
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.cardTitle, { color: colors.textMuted }]}>
-                    {alert.title?.trim() || 'System Notice'}
-                  </Text>
-                  <Text style={[styles.cardTime, { color: colors.textMuted }]}>
-                    {formatTime(alert.ts ?? alert.timestamp)}
-                  </Text>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
-
-        <View style={{ height: 120 }} />
-      </ScrollView>
+      />
     </SafeAreaView>
   );
 }
@@ -441,6 +432,7 @@ function formatTime(ts: number | undefined): string {
 const styles = StyleSheet.create({
   safeArea: { flex: 1 },
   container: { paddingBottom: 120 },
+  headerWrap: { marginBottom: 12 },
   title: { fontSize: 28, fontWeight: '800', letterSpacing: -0.5, marginBottom: 4 },
   subtitle: { fontSize: 14, fontWeight: '400', marginBottom: 20 },
   emptyState: { alignItems: 'center', paddingVertical: 60, gap: 14 },

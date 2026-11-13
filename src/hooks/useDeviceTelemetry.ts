@@ -29,7 +29,6 @@ export function useDeviceTelemetry(customDeviceId?: string): UseDeviceTelemetryR
   const targetId = customDeviceId || activeDeviceId || 'leaf-node-01';
 
   const device = useLiveDevice((s) => s.devices[targetId]);
-  const isWateringActive = useLiveDevice((s) => s.isWateringActive);
 
   useEffect(() => {
     if (!targetId) return;
@@ -50,18 +49,12 @@ export function useDeviceTelemetry(customDeviceId?: string): UseDeviceTelemetryR
         const control = snapshot.val();
         useLiveDevice.setState((prev) => {
           const cur = prev.devices[targetId] || createDefaultDeviceRecord(targetId);
-          const isPump = Boolean(control?.pumpState || cur.telemetry.isPumpActive || cur.telemetry.pumpOn);
           return {
             devices: {
               ...prev.devices,
               [targetId]: {
                 ...cur,
                 control: { ...cur.control, ...control },
-                telemetry: {
-                  ...cur.telemetry,
-                  isPumpActive: isPump,
-                  pumpOn: isPump,
-                },
               },
             },
           };
@@ -92,12 +85,12 @@ export function useDeviceTelemetry(customDeviceId?: string): UseDeviceTelemetryR
   }), [initialTs]);
 
   const telemetry = device?.telemetry || defaultTelemetry;
-  const isPumpActive = Boolean(
-    telemetry.isPumpActive ||
-    telemetry.pumpOn ||
-    device?.control?.pumpState ||
-    isWateringActive
-  );
+  const ackStatus = device?.command?.ack?.status;
+  const isTerminalAck = ackStatus === 'done' || ackStatus === 'failed' || ackStatus === 'rejected';
+
+  const isPumpActive =
+    !isTerminalAck &&
+    Boolean(telemetry.isPumpActive === true || telemetry.pumpOn === true);
 
   return {
     telemetry,

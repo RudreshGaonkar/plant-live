@@ -118,15 +118,21 @@ export function useAlerts(customDeviceId?: string): UseAlertsReturn {
       }
     }
 
+    const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
+
     return Array.from(alertMap.values())
       .filter((alert) => {
+        const ts = alert.timestamp ?? alert.createdAt ?? alert.ts ?? 0;
+        // Strictly filter to today only
+        if (ts < startOfTodayMs) return false;
+
         const isResolved = alert.status === 'resolved' || alert.status === 'read';
         // Do NOT auto-delete active, unresolved alerts regardless of age unless manually resolved by the user
         if (!isResolved) return true;
         // Guard against undefined timestamps: alert.createdAt && (currentTime - alert.createdAt <= 7 * 24 * 60 * 60 * 1000)
         return Boolean(alert.createdAt && currentTime - alert.createdAt <= SEVEN_DAYS_MS);
       })
-      .sort((a, b) => (b.createdAt || b.timestamp || b.ts || 0) - (a.createdAt || a.timestamp || a.ts || 0));
+      .sort((a, b) => (b.timestamp || b.createdAt || b.ts || 0) - (a.timestamp || a.createdAt || a.ts || 0));
   }, [serverAlerts, localAlerts, currentTime]);
 
   const unreadAlerts = useMemo(

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { ref, set as fbSet, onValue } from 'firebase/database';
-import { db } from '@/services/firebase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { db, auth } from '@/services/firebase';
 import { updateDeviceConfigInRTDB } from '@/services/devices';
 
 export type PlantLocation = 'balcony' | 'terrace' | 'indoor';
@@ -123,6 +124,8 @@ export interface LiveDeviceStore {
   activeDeviceId: string;
   waterLogs: WaterLog[];
   isWateringActive: boolean;
+  isWatering: boolean;
+  isCommandPending: boolean;
   wateringSecondsLeft: number;
   weather: WeatherData | null;
   weatherLoading: boolean;
@@ -130,6 +133,8 @@ export interface LiveDeviceStore {
   // Actions
   setActiveDeviceId: (id: string) => void;
   triggerWaterNow: (durationSec?: number) => void;
+  resetWateringState: (targetDeviceId?: string) => void;
+  stopWatering: (targetDeviceId?: string) => void;
   toggleMode: () => void | Promise<void>;
   refillBottle: (deviceId?: string) => Promise<boolean> | void;
   clearDeviceState: () => void;
@@ -249,18 +254,77 @@ export const createDefaultDeviceRecord = (id: string = 'leaf-node-01'): DeviceRe
   },
 });
 
+let activeWateringTimer: ReturnType<typeof setInterval> | null = null;
+
 export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   devices: {},
-  activeDeviceId: 'leaf-node-01',
+  activeDeviceId: '',
   waterLogs: [],
   isWateringActive: false,
+  isWatering: false,
+  isCommandPending: false,
   wateringSecondsLeft: 0,
   weather: null,
   weatherLoading: false,
 
-  setActiveDeviceId: (id) => set({ activeDeviceId: id }),
+  setActiveDeviceId: (id) => {
+    set({ activeDeviceId: id });
+    const uid = auth.currentUser?.uid;
+    if (uid) {
+      if (id) {
+        AsyncStorage.setItem(`@plant_live_active_device_${uid}`, id).catch((err) => {
+          console.warn('[LiveDevice] Failed to persist activeDeviceId to AsyncStorage:', err);
+        });
+      } else {
+        AsyncStorage.removeItem(`@plant_live_active_device_${uid}`).catch((err) => {
+          console.warn('[LiveDevice] Failed to remove activeDeviceId from AsyncStorage:', err);
+        });
+      }
+    }
+  },
+
+  resetWateringState: (targetDeviceId?: string) => {
+    if (activeWateringTimer) {
+      clearInterval(activeWateringTimer);
+      activeWateringTimer = null;
+    }
+    const { activeDeviceId, devices } = get();
+    const targetId = targetDeviceId || activeDeviceId || 'leaf-node-01';
+    const active = devices[targetId] || createDefaultDeviceRecord(targetId);
+
+    set({
+      isWateringActive: false,
+      isWatering: false,
+      isCommandPending: false,
+      wateringSecondsLeft: 0,
+      devices: {
+        ...devices,
+        [targetId]: {
+          ...active,
+          control: {
+            ...active.control,
+            pumpState: false,
+          },
+          telemetry: {
+            ...active.telemetry,
+            pumpOn: false,
+            isPumpActive: false,
+          },
+        },
+      },
+    });
+  },
+
+  stopWatering: (targetDeviceId?: string) => {
+    get().resetWateringState(targetDeviceId);
+  },
 
   triggerWaterNow: (durationSec = 5) => {
+    if (activeWateringTimer) {
+      clearInterval(activeWateringTimer);
+      activeWateringTimer = null;
+    }
+
     const { activeDeviceId, devices } = get();
     const targetId = activeDeviceId || 'leaf-node-01';
     console.log('[LeafLink] Active Device ID:', targetId);
@@ -270,6 +334,8 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     set({
       activeDeviceId: targetId,
       isWateringActive: true,
+      isWatering: true,
+      isCommandPending: true,
       wateringSecondsLeft: durationSec,
       devices: {
         ...devices,
@@ -302,10 +368,13 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
       },
     });
 
-    const interval = setInterval(() => {
+    activeWateringTimer = setInterval(() => {
       const currentSeconds = get().wateringSecondsLeft;
       if (currentSeconds <= 1) {
-        clearInterval(interval);
+        if (activeWateringTimer) {
+          clearInterval(activeWateringTimer);
+          activeWateringTimer = null;
+        }
         
         const stateNow = get();
         const dev = stateNow.devices[targetId];
@@ -325,12 +394,18 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
 
         set({
           isWateringActive: false,
+          isWatering: false,
+          isCommandPending: false,
           wateringSecondsLeft: 0,
           waterLogs: [newLog, ...stateNow.waterLogs],
           devices: {
             ...stateNow.devices,
             [targetId]: {
               ...dev,
+              control: {
+                ...dev.control,
+                pumpState: false,
+              },
               telemetry: {
                 ...dev.telemetry,
                 pumpOn: false,
@@ -679,13 +754,38 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     const { activeDeviceId, devices } = get();
     const targetId = targetDeviceId || activeDeviceId || 'leaf-node-01';
     const active = devices[targetId] || createDefaultDeviceRecord(targetId);
-    const isPump = telemetry.isPumpActive ?? telemetry.pumpOn ?? active.telemetry.isPumpActive ?? false;
+
+    const incomingActive = telemetry.isPumpActive;
+    const incomingOn = telemetry.pumpOn;
+
+    let isPump: boolean;
+    if (incomingActive !== undefined || incomingOn !== undefined) {
+      isPump = Boolean(incomingActive === true || incomingOn === true);
+    } else {
+      isPump = Boolean(active.telemetry.isPumpActive || active.telemetry.pumpOn);
+    }
+
+    // Immediately cancel pending local watering interval and reset flags if pump transitions to false
+    if (!isPump || incomingOn === false || incomingActive === false) {
+      if (activeWateringTimer) {
+        clearInterval(activeWateringTimer);
+        activeWateringTimer = null;
+      }
+    }
 
     set({
+      isWateringActive: isPump,
+      isWatering: isPump,
+      isCommandPending: isPump ? get().isCommandPending : false,
+      wateringSecondsLeft: isPump ? get().wateringSecondsLeft : 0,
       devices: {
         ...devices,
         [targetId]: {
           ...active,
+          control: {
+            ...active.control,
+            pumpState: isPump ? active.control?.pumpState : false,
+          },
           telemetry: {
             ...active.telemetry,
             ...telemetry,
@@ -771,12 +871,21 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     const newDevices = { ...devices };
     delete newDevices[id];
     const remainingKeys = Object.keys(newDevices);
+    const nextActiveId = remainingKeys.includes(activeDeviceId)
+      ? activeDeviceId
+      : (remainingKeys[0] ?? '');
     set({
       devices: newDevices,
-      activeDeviceId: remainingKeys.includes(activeDeviceId)
-        ? activeDeviceId
-        : (remainingKeys[0] ?? ''),
+      activeDeviceId: nextActiveId,
     });
+    const uid = auth.currentUser?.uid;
+    if (uid) {
+      if (nextActiveId) {
+        AsyncStorage.setItem(`@plant_live_active_device_${uid}`, nextActiveId).catch(() => {});
+      } else {
+        AsyncStorage.removeItem(`@plant_live_active_device_${uid}`).catch(() => {});
+      }
+    }
   },
 
   addDevice: (newDevice) => {
@@ -787,6 +896,12 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
       },
       activeDeviceId: newDevice.id,
     }));
+    const uid = auth.currentUser?.uid;
+    if (uid && newDevice.id) {
+      AsyncStorage.setItem(`@plant_live_active_device_${uid}`, newDevice.id).catch((err) => {
+        console.warn('[LiveDevice] Failed to persist activeDeviceId in addDevice:', err);
+      });
+    }
   },
 
   setOnlineStatus: (online) => {

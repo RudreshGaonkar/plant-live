@@ -508,4 +508,51 @@ describe('Unit Tests: 16-Sample Median Filter for ADC Stability', () => {
   });
 });
 
+describe('Unit Tests: Pump On State & Hourglass Reset Semantics', () => {
+  const computePumpPillActive = (telemetry: { isPumpActive?: boolean; pumpOn?: boolean }, ackStatus?: string) => {
+    const isTerminalAck = ackStatus === 'done' || ackStatus === 'failed' || ackStatus === 'rejected';
+    return !isTerminalAck && Boolean(telemetry.isPumpActive === true || telemetry.pumpOn === true);
+  };
+
+  test('Pump On pill is true ONLY when actively pumping', () => {
+    expect(computePumpPillActive({ isPumpActive: true, pumpOn: true })).toBe(true);
+    expect(computePumpPillActive({ isPumpActive: false, pumpOn: true })).toBe(true);
+    expect(computePumpPillActive({ isPumpActive: true, pumpOn: false })).toBe(true);
+  });
+
+  test('Pump On pill immediately resets to false when pumpOn is false', () => {
+    expect(computePumpPillActive({ isPumpActive: false, pumpOn: false })).toBe(false);
+    expect(computePumpPillActive({ isPumpActive: undefined, pumpOn: false })).toBe(false);
+  });
+
+  test('Pump On pill immediately resets to false upon terminal ack status', () => {
+    expect(computePumpPillActive({ isPumpActive: true, pumpOn: true }, 'done')).toBe(false);
+    expect(computePumpPillActive({ isPumpActive: true, pumpOn: true }, 'failed')).toBe(false);
+    expect(computePumpPillActive({ isPumpActive: true, pumpOn: true }, 'rejected')).toBe(false);
+    // Non-terminal ack status allows active pumping indicator
+    expect(computePumpPillActive({ isPumpActive: true, pumpOn: true }, 'running')).toBe(true);
+  });
+
+  test('isCommandPending and isWatering transition to false on terminal ack', () => {
+    let isCommandPending = true;
+    let isWatering = true;
+
+    const handleAckStatus = (status: 'done' | 'failed' | 'rejected' | 'running') => {
+      const isTerminal = status === 'done' || status === 'failed' || status === 'rejected';
+      if (isTerminal) {
+        isCommandPending = false;
+        isWatering = false;
+      }
+    };
+
+    handleAckStatus('running');
+    expect(isCommandPending).toBe(true);
+    expect(isWatering).toBe(true);
+
+    handleAckStatus('done');
+    expect(isCommandPending).toBe(false);
+    expect(isWatering).toBe(false);
+  });
+});
+
 

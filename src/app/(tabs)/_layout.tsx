@@ -20,7 +20,6 @@ export default function TabLayout() {
   const isAuthReady = useSession((s) => s.isAuthReady);
 
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
-  const isWateringActive = useLiveDevice((s) => s.isWateringActive);
   const { unreadCount } = useAlertEngine();
 
   // Guard protected tab routes when !user && isAuthReady
@@ -32,13 +31,14 @@ export default function TabLayout() {
     return null;
   }
 
-  // Live pump state bound to Firebase telemetry.isPumpActive and control.pumpState
-  const isPumpActive = Boolean(
-    device?.telemetry?.isPumpActive ||
-    device?.telemetry?.pumpOn ||
-    device?.control?.pumpState ||
-    isWateringActive
-  );
+  const ackStatus = device?.command?.ack?.status;
+  const isTerminalAck = ackStatus === 'done' || ackStatus === 'failed' || ackStatus === 'rejected';
+
+  // Live pump state: reflects ONLY active pumping and immediately resets to idle
+  // as soon as telemetry.pumpOn becomes false or /command/ack/status reaches "done", "failed", or "rejected"
+  const isPumpActive =
+    !isTerminalAck &&
+    Boolean(device?.telemetry?.isPumpActive === true || device?.telemetry?.pumpOn === true);
 
   // Derive active route from segments
   const activeRoute = segments[segments.length - 1] ?? 'home';

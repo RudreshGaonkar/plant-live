@@ -76,6 +76,19 @@ export function useAlertEngine() {
     localAlertsRef.current = localAlerts;
   }, [localAlerts]);
 
+  const deviceAlertsRef = useRef<AppAlert[]>([]);
+  useEffect(() => {
+    deviceAlertsRef.current = deviceAlerts;
+  }, [deviceAlerts]);
+
+  const userAlertsRef = useRef<AppAlert[]>([]);
+  useEffect(() => {
+    userAlertsRef.current = userAlerts;
+  }, [userAlerts]);
+
+  // Set of alert keys already created or dispatched today to prevent 5-second tick spam
+  const createdTodayAlertKeysRef = useRef<Set<string>>(new Set());
+
   const [currentTime, setCurrentTime] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(Date.now()), 60000);
@@ -91,6 +104,7 @@ export function useAlertEngine() {
    */
   const runLocalEvaluation = useCallback(() => {
     const now = Date.now();
+    const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
     const weather = useLiveDevice.getState().weather;
     const currentAlerts = [...localAlertsRef.current];
     const alertMap = new Map<string, AppAlert>();
@@ -110,25 +124,47 @@ export function useAlertEngine() {
       const thresholds = config.thresholds;
 
       // Helper to evaluate an alert rule condition:
-      // If violated: retain existing or generate new with createdAt: Date.now()
+      // If violated: retain existing or generate new for today; do NOT spam duplicates every 5s tick
       // If resolved: mark resolved if it was active
       const evaluateRule = (
         alertId: string,
+        ruleType: string,
         isViolated: boolean,
         factory: () => AppAlert
       ) => {
-        const existing = alertMap.get(alertId);
+        const todayKey = `${deviceId}:${ruleType}:${new Date().toDateString()}`;
+        const existing =
+          alertMap.get(alertId) ||
+          deviceAlertsRef.current.find(
+            (a) =>
+              (a.id === alertId || (a.deviceId === deviceId && a.type === ruleType)) &&
+              (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
+          ) ||
+          userAlertsRef.current.find(
+            (a) =>
+              (a.id === alertId || (a.deviceId === deviceId && a.type === ruleType)) &&
+              (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
+          );
+
+        const alreadyDispatchedToday =
+          createdTodayAlertKeysRef.current.has(todayKey) ||
+          createdTodayAlertKeysRef.current.has(alertId);
 
         if (isViolated) {
           if (existing) {
             // Retain active alert without resetting createdAt or reinitializing
             newLocalAlerts.push(existing);
             alertMap.delete(alertId);
+          } else if (alreadyDispatchedToday) {
+            // An alert with the same type/ID already exists for today; do NOT spam duplicates
+            return;
           } else {
-            // Newly triggered alert
+            // Newly triggered alert for today
             const alert = factory();
             newLocalAlerts.push(alert);
             newlyCreatedAlerts.push(alert);
+            createdTodayAlertKeysRef.current.add(todayKey);
+            createdTodayAlertKeysRef.current.add(alertId);
           }
         } else if (existing) {
           // Condition resolved: soil moisture, temperature, bottle, etc. normalized
@@ -151,7 +187,7 @@ export function useAlertEngine() {
 
       // 1. Device Offline Check
       const isOffline = !status.online || now - status.lastSeen > THREE_MINUTES_MS;
-      evaluateRule(`offline-${deviceId}`, isOffline, () => {
+      evaluateRule(`offline-${deviceId}`, 'offline', isOffline, () => {
         const body = `${plantName} has not reported telemetry in over 3 minutes. Check power & Wi-Fi.`;
         return {
           id: `offline-${deviceId}`,
@@ -178,7 +214,7 @@ export function useAlertEngine() {
       const isBottleEmpty = remaining <= 0 || bottlePercent < 5;
       const isBottleLow = !isBottleEmpty && bottlePercent < 20;
 
-      evaluateRule(`bottle-empty-${deviceId}`, isBottleEmpty, () => {
+      evaluateRule(`bottle-empty-${deviceId}`, 'bottle', isBottleEmpty, () => {
         const body = `${plantName} reservoir is critically low (${Math.round(remaining)} ml). Auto-watering stopped.`;
         return {
           id: `bottle-empty-${deviceId}`,
@@ -198,7 +234,7 @@ export function useAlertEngine() {
         };
       });
 
-      evaluateRule(`bottle-low-${deviceId}`, isBottleLow, () => {
+      evaluateRule(`bottle-low-${deviceId}`, 'bottle', isBottleLow, () => {
         const body = `${plantName} reservoir is below 20% (${Math.round(remaining)} ml left). Please refill soon.`;
         return {
           id: `bottle-low-${deviceId}`,
@@ -233,8 +269,21 @@ export function useAlertEngine() {
 
       if (pumpFailedCondition) {
         const failedId = `pump-failed-${deviceId}`;
-        const existingFailed = alertMap.get(failedId);
-        if (!existingFailed || existingFailed.status !== 'active') {
+        const failedKey = `${deviceId}:pump-failed:${new Date().toDateString()}`;
+        const existingFailed =
+          alertMap.get(failedId) ||
+          deviceAlertsRef.current.find(
+            (a) => a.id === failedId && (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
+          ) ||
+          userAlertsRef.current.find(
+            (a) => a.id === failedId && (a.timestamp ?? a.createdAt ?? a.ts ?? 0) >= startOfTodayMs
+          );
+
+        const alreadyDispatchedFailed =
+          createdTodayAlertKeysRef.current.has(failedKey) ||
+          createdTodayAlertKeysRef.current.has(failedId);
+
+        if (!existingFailed && !alreadyDispatchedFailed) {
           const body = `${plantName}: Pump ran but soil moisture did not rise (${telemetry.soilMoisture}%). Possible empty reservoir or clogged tube.`;
           const failedAlert: AppAlert = {
             id: failedId,
@@ -254,13 +303,18 @@ export function useAlertEngine() {
           };
           newLocalAlerts.push(failedAlert);
           newlyCreatedAlerts.push(failedAlert);
+          createdTodayAlertKeysRef.current.add(failedKey);
+          createdTodayAlertKeysRef.current.add(failedId);
+          alertMap.delete(failedId);
+        } else if (existingFailed) {
+          newLocalAlerts.push(existingFailed);
           alertMap.delete(failedId);
         }
       }
 
       // 3. Soil Dry - Needs Water (warning alert whenever soilMoisture < moistureMin)
       const isSoilDry = telemetry.soilMoisture < thresholds.moistureMin;
-      evaluateRule(`dry-${deviceId}`, isSoilDry, () => {
+      evaluateRule(`dry-${deviceId}`, 'dry', isSoilDry, () => {
         const body = `${plantName} soil is at ${telemetry.soilMoisture}%, below the ${thresholds.moistureMin}% min threshold. Needs water now.`;
         return {
           id: `dry-${deviceId}`,
@@ -283,7 +337,7 @@ export function useAlertEngine() {
 
       // 4. Over-Watering Risk
       const isOverWatered = telemetry.soilMoisture > thresholds.moistureMax;
-      evaluateRule(`wet-max-${deviceId}`, isOverWatered, () => {
+      evaluateRule(`wet-max-${deviceId}`, 'wet', isOverWatered, () => {
         const body = `${plantName} soil moisture is ${telemetry.soilMoisture}%, exceeding recommended ${thresholds.moistureMax}% max.`;
         return {
           id: `wet-max-${deviceId}`,
@@ -304,7 +358,7 @@ export function useAlertEngine() {
 
       const isHighHumidityWetSoil =
         telemetry.humidity > thresholds.humidityMax && telemetry.soilMoisture >= thresholds.moistureMin;
-      evaluateRule(`wet-humid-${deviceId}`, isHighHumidityWetSoil, () => {
+      evaluateRule(`wet-humid-${deviceId}`, 'wet', isHighHumidityWetSoil, () => {
         const body = `High air humidity (${telemetry.humidity}%) with wet soil (${telemetry.soilMoisture}%). Risk of fungal root rot on ${plantName}.`;
         return {
           id: `wet-humid-${deviceId}`,
@@ -326,7 +380,7 @@ export function useAlertEngine() {
       // 5. Extreme Temperature
       if (isOutdoor) {
         const isExtremeHeat = telemetry.temperature > thresholds.tempMax;
-        evaluateRule(`heat-${deviceId}`, isExtremeHeat, () => {
+        evaluateRule(`heat-${deviceId}`, 'heat', isExtremeHeat, () => {
           const body = `Temperature is ${telemetry.temperature}°C on the ${locationLabel} (max: ${thresholds.tempMax}°C). Protect plant from intense heat.`;
           return {
             id: `heat-${deviceId}`,
@@ -346,7 +400,7 @@ export function useAlertEngine() {
         });
 
         const isExtremeCold = telemetry.temperature < 8;
-        evaluateRule(`cold-${deviceId}`, isExtremeCold, () => {
+        evaluateRule(`cold-${deviceId}`, 'heat', isExtremeCold, () => {
           const body = `Temperature dropped to ${telemetry.temperature}°C on the ${locationLabel}. Move ${plantName} indoors to prevent frost damage.`;
           return {
             id: `cold-${deviceId}`,
@@ -366,7 +420,7 @@ export function useAlertEngine() {
         });
       } else {
         const isIndoorHeat = telemetry.temperature > thresholds.tempMax;
-        evaluateRule(`heat-${deviceId}`, isIndoorHeat, () => {
+        evaluateRule(`heat-${deviceId}`, 'heat', isIndoorHeat, () => {
           const body = `Indoor temperature is ${telemetry.temperature}°C, above recommended ${thresholds.tempMax}°C.`;
           return {
             id: `heat-${deviceId}`,
@@ -394,7 +448,7 @@ export function useAlertEngine() {
         telemetry.soilMoisture < thresholds.moistureMin &&
         telemetry.soilMoisture >= 15;
 
-      evaluateRule(`terrace-rain-delay-${deviceId}`, isRainDelay, () => {
+      evaluateRule(`terrace-rain-delay-${deviceId}`, 'info', isRainDelay, () => {
         const body = `${plantName} is on the Terrace. Auto-watering is temporarily delayed because rain probability is ${weather?.rainProbability ?? 0}%. Current soil moisture is ${telemetry.soilMoisture}%.`;
         return {
           id: `terrace-rain-delay-${deviceId}`,
@@ -595,8 +649,14 @@ export function useAlertEngine() {
       }
     }
 
+    const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
+
     return Array.from(map.values())
       .filter((alert) => {
+        const ts = alert.timestamp ?? alert.createdAt ?? alert.ts ?? 0;
+        // Strictly filter to today only
+        if (ts < startOfTodayMs) return false;
+
         const isResolved = alert.status === 'resolved' || alert.status === 'read';
         // Do NOT auto-delete active, unresolved alerts regardless of age unless manually resolved by the user
         if (!isResolved) return true;
@@ -605,7 +665,7 @@ export function useAlertEngine() {
       })
       .sort(
         (a, b) =>
-          (b.createdAt || b.ts || b.timestamp || 0) - (a.createdAt || a.ts || a.timestamp || 0)
+          (b.timestamp ?? b.createdAt ?? b.ts ?? 0) - (a.timestamp ?? a.createdAt ?? a.ts ?? 0)
       );
   }, [localAlerts, deviceAlerts, userAlerts, statusOverrides, dismissedIds, user, currentTime]);
 

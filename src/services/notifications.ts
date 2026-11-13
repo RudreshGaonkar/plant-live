@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import * as Device from 'expo-device';
-import { ref, onValue, set, remove, push, off } from 'firebase/database';
+import { ref, onValue, set, remove, push, off, query, limitToLast } from 'firebase/database';
 import { db } from './firebase';
 
 type ExpoNotificationsType = typeof import('expo-notifications');
@@ -152,18 +152,21 @@ export async function cleanupOldUserAlertsFromRTDB(uid: string) {
 }
 
 /**
- * Attaches a realtime listener to `alerts/{uid}` with 7-day retention enforcement.
+ * Attaches a realtime listener to `users/{uid}/alerts` (and legacy `alerts/{uid}`)
+ * with query limitToLast(50) and 7-day retention enforcement.
  * Active unresolved alerts are preserved regardless of age.
  */
 export function listenToUserAlerts(
   uid: string,
   onAlerts: (alerts: CloudAlertRecord[]) => void
 ) {
-  const alertsRef = ref(db, `alerts/${uid}`);
+  // Primary path: /users/{uid}/alerts with limitToLast(50)
+  const userAlertsRef = ref(db, `users/${uid}/alerts`);
+  const alertsQuery = query(userAlertsRef, limitToLast(50));
   // Execute database cleanup for expired alerts
   cleanupOldUserAlertsFromRTDB(uid);
 
-  const unsubscribe = onValue(alertsRef, (snapshot) => {
+  const unsubscribe = onValue(alertsQuery, (snapshot) => {
     if (snapshot.exists()) {
       const data = snapshot.val();
       const list: CloudAlertRecord[] = Object.keys(data)
@@ -189,11 +192,38 @@ export function listenToUserAlerts(
       list.sort((a, b) => (b.createdAt || b.ts || b.timestamp || 0) - (a.createdAt || a.ts || a.timestamp || 0));
       onAlerts(list);
     } else {
-      onAlerts([]);
+      // Legacy path fallback: /alerts/{uid} with limitToLast(50)
+      const legacyRef = query(ref(db, `alerts/${uid}`), limitToLast(50));
+      onValue(legacyRef, (legacySnap) => {
+        if (legacySnap.exists()) {
+          const data = legacySnap.val();
+          const list: CloudAlertRecord[] = Object.keys(data)
+            .map((key) => {
+              const item = data[key];
+              const tsVal = item.createdAt || item.ts || item.timestamp || Date.now();
+              return {
+                id: key,
+                ...item,
+                createdAt: tsVal,
+                ts: tsVal,
+                timestamp: item.timestamp || tsVal,
+              };
+            })
+            .filter((item) => {
+              const isResolved = item.read || item.status === 'resolved' || item.status === 'read';
+              if (!isResolved) return true;
+              return Boolean(item.createdAt && (Date.now() - item.createdAt <= SEVEN_DAYS_MS));
+            });
+          list.sort((a, b) => (b.createdAt || b.ts || b.timestamp || 0) - (a.createdAt || a.ts || a.timestamp || 0));
+          onAlerts(list);
+        } else {
+          onAlerts([]);
+        }
+      }, { onlyOnce: true });
     }
   });
 
-  return () => off(alertsRef, 'value', unsubscribe);
+  return () => off(alertsQuery, 'value', unsubscribe);
 }
 
 /**
@@ -201,8 +231,11 @@ export function listenToUserAlerts(
  */
 export async function markAlertReadInRTDB(uid: string, alertId: string) {
   try {
-    const alertRef = ref(db, `alerts/${uid}/${alertId}/read`);
+    const alertRef = ref(db, `users/${uid}/alerts/${alertId}/read`);
     await set(alertRef, true);
+    try {
+      await set(ref(db, `alerts/${uid}/${alertId}/read`), true);
+    } catch {}
   } catch (err) {
     console.warn('Failed to mark alert as read:', err);
   }
@@ -213,32 +246,41 @@ export async function markAlertReadInRTDB(uid: string, alertId: string) {
  */
 export async function deleteAlertFromRTDB(uid: string, alertId: string) {
   try {
-    const alertRef = ref(db, `alerts/${uid}/${alertId}`);
+    const alertRef = ref(db, `users/${uid}/alerts/${alertId}`);
     await remove(alertRef);
+    try {
+      await remove(ref(db, `alerts/${uid}/${alertId}`));
+    } catch {}
   } catch (err) {
     console.warn('Failed to delete alert:', err);
   }
 }
 
 /**
- * Appends a new alert to RTDB `alerts/{uid}`.
+ * Appends a new alert to RTDB `users/{uid}/alerts` (and mirrors to `alerts/{uid}`).
  */
 export async function writeAlertToRTDB(
   uid: string,
   alert: Omit<CloudAlertRecord, 'id'>
 ): Promise<string | null> {
   try {
-    const alertsRef = ref(db, `alerts/${uid}`);
+    const alertsRef = ref(db, `users/${uid}/alerts`);
     const newRef = push(alertsRef);
     const now = Date.now();
     const createdAt = alert.createdAt || alert.ts || alert.timestamp || now;
-    await set(newRef, {
+    const payload = {
       ...alert,
       createdAt,
       ts: createdAt,
       timestamp: createdAt,
       id: newRef.key,
-    });
+    };
+    await set(newRef, payload);
+    try {
+      if (newRef.key) {
+        await set(ref(db, `alerts/${uid}/${newRef.key}`), payload);
+      }
+    } catch {}
     return newRef.key;
   } catch (err) {
     console.warn('Failed to write alert to RTDB:', err);

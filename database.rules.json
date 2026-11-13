@@ -15,6 +15,9 @@
     "devices": {
       "$deviceId": {
         ".read": "auth != null",
+        "meta": {
+          ".write": "auth != null"
+        },
         "alerts": {
           ".write": "auth != null"
         },
@@ -32,6 +35,26 @@
         },
         "status": {
           ".write": "auth != null"
+        }
+      }
+    },
+    "auditLogs": {
+      "$deviceId": {
+        ".read": "auth != null",
+        ".write": "auth != null && !data.exists()",
+        "$logId": {
+          ".read": "auth != null",
+          ".write": "auth != null && !data.exists()"
+        }
+      }
+    },
+    "userAuditLogs": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid && !data.exists()",
+        "$logId": {
+          ".read": "auth != null && auth.uid === $uid",
+          ".write": "auth != null && auth.uid === $uid && !data.exists()"
         }
       }
     },

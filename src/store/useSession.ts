@@ -92,7 +92,23 @@ export const useSession = create<SessionState>((set, get) => ({
     });
   },
 
-  setActiveDeviceId: (deviceId: string) => set({ activeDeviceId: deviceId }),
+  setActiveDeviceId: (deviceId: string) => {
+    const user = get().user;
+    const uid = user?.uid || auth.currentUser?.uid;
+    if (uid) {
+      if (deviceId) {
+        AsyncStorage.setItem(`@plant_live_active_device_${uid}`, deviceId).catch((err) =>
+          console.warn('[Session] Failed to persist activeDeviceId to AsyncStorage:', err)
+        );
+      } else {
+        AsyncStorage.removeItem(`@plant_live_active_device_${uid}`).catch((err) =>
+          console.warn('[Session] Failed to remove activeDeviceId from AsyncStorage:', err)
+        );
+      }
+    }
+    useLiveDevice.getState().setActiveDeviceId(deviceId);
+    set({ activeDeviceId: deviceId });
+  },
 
   signOut: async () => {
     try {
@@ -128,7 +144,24 @@ export const useSession = create<SessionState>((set, get) => ({
                 ? Object.keys(val).filter((k) => Boolean(val[k]))
                 : [];
             if (deviceIds.length > 0) {
-              pairedDeviceId = deviceIds[0];
+              let storedActiveId: string | null = null;
+              try {
+                storedActiveId = await AsyncStorage.getItem(
+                  `@plant_live_active_device_${firebaseUser.uid}`
+                );
+              } catch (storageErr) {
+                console.warn('[Session] Failed to read stored activeDeviceId:', storageErr);
+              }
+
+              if (storedActiveId && deviceIds.includes(storedActiveId)) {
+                pairedDeviceId = storedActiveId;
+              } else {
+                pairedDeviceId = deviceIds[0];
+                AsyncStorage.setItem(
+                  `@plant_live_active_device_${firebaseUser.uid}`,
+                  pairedDeviceId
+                ).catch(() => {});
+              }
             }
           }
         } catch (err) {
@@ -137,6 +170,8 @@ export const useSession = create<SessionState>((set, get) => ({
 
         if (pairedDeviceId) {
           useLiveDevice.getState().setActiveDeviceId(pairedDeviceId);
+        } else {
+          useLiveDevice.getState().setActiveDeviceId('');
         }
 
         set({

@@ -1,4 +1,16 @@
-import { ref, onValue, set, update, push, remove, query, limitToLast } from 'firebase/database';
+import {
+  ref,
+  onValue,
+  set,
+  update,
+  push,
+  remove,
+  query,
+  limitToLast,
+  get as fbGet,
+  serverTimestamp,
+} from 'firebase/database';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db, auth } from './firebase';
 import {
   DeviceConfig,
@@ -6,7 +18,9 @@ import {
   DeviceStatus,
   DeviceCommand,
   WaterLog,
+  useLiveDevice,
 } from '@/store/useLiveDevice';
+import { useSession } from '@/store/useSession';
 
 /**
  * Attaches a realtime listener to `devices/{deviceId}/telemetry`
@@ -369,10 +383,11 @@ export const listenToDeviceAlerts = (
   onData: (alerts: DeviceAlertRecord[]) => void
 ) => {
   const alertsRef = ref(db, `devices/${deviceId}/alerts`);
+  const alertsQuery = query(alertsRef, limitToLast(50));
   // Trigger cleanup routine for expired resolved items older than 7 days
   cleanupOldDeviceAlertsFromRTDB(deviceId);
 
-  const unsubscribe = onValue(alertsRef, (snapshot) => {
+  const unsubscribe = onValue(alertsQuery, (snapshot) => {
     if (snapshot.exists()) {
       const data = snapshot.val();
       const list: DeviceAlertRecord[] = Object.keys(data)
@@ -436,4 +451,114 @@ export const listenToDeviceAlerts = (
   return () => unsubscribe();
 };
 
+/**
+ * Removes a device with database audit logging.
+ * 1. First pushes an immutable audit record to /auditLogs/{deviceId} and /userAuditLogs/{uid}
+ * 2. Removes /users/{uid}/devices/{deviceId} and clears /devices/{deviceId}/meta/ownerUid (if owned by uid)
+ *    without wiping historical telemetry or audit logs.
+ * 3. Clears activeDeviceId from AsyncStorage and useLiveDevice, then switches to the next
+ *    remaining paired device or returns null if none remain.
+ */
+export async function removeDeviceWithAudit(
+  uid: string,
+  userEmail: string | null,
+  deviceId: string,
+  plantName?: string
+): Promise<{ nextDeviceId: string | null; remainingCount: number }> {
+  if (!uid || !deviceId) {
+    throw new Error('User ID and Device ID are required to remove a device.');
+  }
 
+  const effectivePlantName = plantName || 'Unnamed Plant';
+
+  // 1. First push immutable audit records
+  const auditRecord = {
+    action: 'DEVICE_REMOVED',
+    deviceId,
+    plantName: effectivePlantName,
+    deletedByUid: uid,
+    deletedByEmail: userEmail || 'unknown',
+    timestamp: serverTimestamp(),
+  };
+
+  try {
+    const deviceAuditRef = push(ref(db, `auditLogs/${deviceId}`));
+    await set(deviceAuditRef, auditRecord);
+  } catch (err) {
+    console.warn(`[removeDeviceWithAudit] Failed to write device audit log for ${deviceId}:`, err);
+  }
+
+  try {
+    const userAuditRef = push(ref(db, `userAuditLogs/${uid}`));
+    await set(userAuditRef, auditRecord);
+  } catch (err) {
+    console.warn(`[removeDeviceWithAudit] Failed to write user audit log for ${uid}:`, err);
+  }
+
+  // 2. Remove /users/{uid}/devices/{deviceId}
+  try {
+    await remove(ref(db, `users/${uid}/devices/${deviceId}`));
+  } catch (err) {
+    console.warn(`[removeDeviceWithAudit] Failed to remove user device association:`, err);
+  }
+
+  // Clear /devices/{deviceId}/meta/ownerUid (if owned by uid) without wiping historical telemetry or audit logs
+  try {
+    const metaOwnerRef = ref(db, `devices/${deviceId}/meta/ownerUid`);
+    const snap = await fbGet(metaOwnerRef);
+    if (snap.exists() && snap.val() === uid) {
+      await remove(metaOwnerRef);
+    }
+  } catch (err) {
+    console.warn(`[removeDeviceWithAudit] Failed to clear device meta ownerUid for ${deviceId}:`, err);
+  }
+
+  // Also clear /owners/{deviceId} if owned by uid
+  try {
+    const ownerRef = ref(db, `owners/${deviceId}`);
+    const ownerSnap = await fbGet(ownerRef);
+    if (ownerSnap.exists() && ownerSnap.val() === uid) {
+      await remove(ownerRef);
+    }
+  } catch (err) {
+    console.warn(`[removeDeviceWithAudit] Failed to clear owner entry for ${deviceId}:`, err);
+  }
+
+  // 3. Clear activeDeviceId and update remaining devices
+  let remainingDeviceIds: string[] = [];
+  try {
+    const userDevRef = ref(db, `users/${uid}/devices`);
+    const devSnap = await fbGet(userDevRef);
+    if (devSnap.exists()) {
+      const val = devSnap.val();
+      remainingDeviceIds =
+        typeof val === 'object' && val !== null
+          ? Object.keys(val).filter((k) => Boolean(val[k]))
+          : [];
+    }
+  } catch (err) {
+    console.warn('[removeDeviceWithAudit] Failed to fetch remaining devices from RTDB:', err);
+    remainingDeviceIds = Object.keys(useLiveDevice.getState().devices).filter((id) => id !== deviceId);
+  }
+
+  // Remove device from live store
+  useLiveDevice.getState().removeDevice(deviceId);
+
+  const nextDeviceId = remainingDeviceIds.length > 0 ? remainingDeviceIds[0] : null;
+
+  if (nextDeviceId) {
+    useLiveDevice.getState().setActiveDeviceId(nextDeviceId);
+    useSession.getState().setActiveDeviceId(nextDeviceId);
+    await AsyncStorage.setItem(`@plant_live_active_device_${uid}`, nextDeviceId).catch((err) => {
+      console.warn('[removeDeviceWithAudit] Failed to persist next deviceId to AsyncStorage:', err);
+    });
+  } else {
+    useLiveDevice.getState().setActiveDeviceId('');
+    useSession.getState().setActiveDeviceId('');
+    await AsyncStorage.removeItem(`@plant_live_active_device_${uid}`).catch((err) => {
+      console.warn('[removeDeviceWithAudit] Failed to remove activeDeviceId from AsyncStorage:', err);
+    });
+  }
+
+  return { nextDeviceId, remainingCount: remainingDeviceIds.length };
+}

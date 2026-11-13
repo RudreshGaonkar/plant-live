@@ -19,6 +19,7 @@ import {
   StyleSheet,
   Dimensions,
   TouchableOpacity,
+  Alert,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -46,6 +47,7 @@ import { VitalsSheet } from '@/components/VitalsSheet';
 import { GardenStrip } from '@/components/GardenStrip';
 import { WeatherWidget } from '@/components/WeatherWidget';
 import { useWeather } from '@/hooks/useWeather';
+import { removeDeviceWithAudit } from '@/services/devices';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -174,18 +176,51 @@ export default function HomeScreen() {
 
   const plantDisplayName = config.name || config.plantName || 'Plant';
 
-  // Real-time pump active state bound to telemetry.isPumpActive and control.pumpState
-  const isPumpActive = Boolean(
-    telemetry.isPumpActive ||
-    telemetry.pumpOn ||
-    device?.control?.pumpState ||
-    isWatering
-  );
+  const ackStatus = device?.command?.ack?.status;
+  const isTerminalAck = ackStatus === 'done' || ackStatus === 'failed' || ackStatus === 'rejected';
+
+  // Real-time pump active state: reflects ONLY active pumping and immediately resets to idle
+  // as soon as telemetry.pumpOn becomes false or /command/ack/status reaches "done", "failed", or "rejected"
+  const isPumpActive =
+    !isTerminalAck &&
+    Boolean(telemetry.isPumpActive === true || telemetry.pumpOn === true);
 
   // Manual watering trigger with unified command hook
   const handleManualWatering = async () => {
     console.log('[LeafLink] Active Device ID:', device.id);
     await triggerWaterNow(5);
+  };
+
+  const handleRemoveFromSwitcher = (deviceId: string, plantName: string) => {
+    if (!user?.uid) return;
+    Alert.alert(
+      'Remove Device',
+      `Are you sure you want to remove ${plantName} (${deviceId})?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const res = await removeDeviceWithAudit(
+                user.uid,
+                user.email,
+                deviceId,
+                plantName
+              );
+              Alert.alert('Device Removed', `${plantName} (${deviceId}) was successfully removed.`);
+              if (!res.nextDeviceId) {
+                setGardenStripOpen(false);
+                router.replace('/add-device');
+              }
+            } catch (err: any) {
+              Alert.alert('Error', err?.message || 'Failed to remove device.');
+            }
+          },
+        },
+      ]
+    );
   };
 
   return (
@@ -326,12 +361,12 @@ export default function HomeScreen() {
             testID="manual-watering-btn"
             accessibilityLabel="Manual watering"
             activeOpacity={0.8}
-            disabled={isWatering}
+            disabled={isWatering || isPumpActive}
             onPress={handleManualWatering}
             style={[
               styles.iconPill,
               {
-                backgroundColor: isWatering
+                backgroundColor: isWatering || isPumpActive
                   ? colors.palette.forest
                   : `${colors.palette.white}CC`,
                 borderRadius: radii.full,
@@ -339,9 +374,9 @@ export default function HomeScreen() {
             ]}
           >
             <Ionicons
-              name={isWatering ? 'water' : 'water-outline'}
+              name={isWatering || isPumpActive ? 'water' : 'water-outline'}
               size={18}
-              color={isWatering ? colors.palette.white : colors.palette.forest}
+              color={isWatering || isPumpActive ? colors.palette.white : colors.palette.forest}
             />
           </TouchableOpacity>
 
@@ -402,6 +437,7 @@ export default function HomeScreen() {
             activeDeviceId={activeDeviceId}
             onSelect={setActiveDeviceId}
             onClose={() => setGardenStripOpen(false)}
+            onRemove={handleRemoveFromSwitcher}
           />
         </Animated.View>
       )}

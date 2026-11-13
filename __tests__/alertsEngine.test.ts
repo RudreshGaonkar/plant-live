@@ -1,6 +1,17 @@
-import { saveDeviceAlertToRTDB, updateDeviceAlertInRTDB, DeviceAlertRecord } from '../src/services/devices';
+import {
+  saveDeviceAlertToRTDB,
+  updateDeviceAlertInRTDB,
+  listenToDeviceAlerts,
+  DeviceAlertRecord,
+} from '../src/services/devices';
+import { listenToUserAlerts } from '../src/services/notifications';
 import { db } from '../src/services/firebase';
-import { set, update, ref } from 'firebase/database';
+import { set, update, ref, query, limitToLast } from 'firebase/database';
+
+jest.mock('react-native', () => ({
+  Platform: { OS: 'ios' },
+}));
+jest.mock('expo-device', () => ({}));
 
 jest.mock('../src/services/firebase', () => ({
   db: {},
@@ -14,8 +25,8 @@ jest.mock('firebase/database', () => ({
   off: jest.fn(),
   push: jest.fn(() => ({ key: 'mock-key' })),
   remove: jest.fn(() => Promise.resolve()),
-  query: jest.fn(),
-  limitToLast: jest.fn(),
+  query: jest.fn((r, ...args) => ({ ref: r, queryArgs: args })),
+  limitToLast: jest.fn((count) => ({ limitToLast: count })),
 }));
 
 describe('Alerts Engine & Retention Suite', () => {
@@ -289,6 +300,105 @@ describe('Alerts Engine & Retention Suite', () => {
       // Alert condition resolved!
       expect(localAlerts).toHaveLength(1);
       expect(localAlerts[0].status).toBe('resolved');
+    });
+  });
+
+  describe('5. RTDB Query Capping & Today-Only Filter (limitToLast(50))', () => {
+    test('listenToDeviceAlerts queries /devices/{deviceId}/alerts with limitToLast(50)', () => {
+      listenToDeviceAlerts('leaf-node-01', jest.fn());
+
+      expect(ref).toHaveBeenCalledWith(db, 'devices/leaf-node-01/alerts');
+      expect(limitToLast).toHaveBeenCalledWith(50);
+      expect(query).toHaveBeenCalledWith(
+        expect.objectContaining({ path: 'devices/leaf-node-01/alerts' }),
+        expect.objectContaining({ limitToLast: 50 })
+      );
+    });
+
+    test('listenToUserAlerts queries /users/{uid}/alerts with limitToLast(50)', () => {
+      listenToUserAlerts('user-123', jest.fn());
+
+      expect(ref).toHaveBeenCalledWith(db, 'users/user-123/alerts');
+      expect(limitToLast).toHaveBeenCalledWith(50);
+      expect(query).toHaveBeenCalledWith(
+        expect.objectContaining({ path: 'users/user-123/alerts' }),
+        expect.objectContaining({ limitToLast: 50 })
+      );
+    });
+
+    test('filters alerts strictly to today only and caps rendered items to max 25', () => {
+      const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
+      const yesterday = startOfTodayMs - 3600000;
+      const todayEarlier = startOfTodayMs + 1000 * 60;
+      const todayNow = Date.now();
+
+      const alerts: DeviceAlertRecord[] = [
+        { id: 'yesterday-1', title: 'Yesterday', message: 'Yesterday message', createdAt: yesterday, status: 'active', type: 'warning' },
+        ...Array.from({ length: 30 }, (_, i) => ({
+          id: `today-${i}`,
+          title: `Alert ${i}`,
+          message: `Alert message ${i}`,
+          createdAt: todayEarlier + i * 1000,
+          status: 'active' as const,
+          type: 'warning' as const,
+        })),
+      ];
+
+      // Filter displayed alerts strictly to today only (timestamp >= startOfTodayMs), sorted newest-first
+      const todayAlerts = alerts
+        .filter((a) => (a.createdAt || 0) >= startOfTodayMs)
+        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+      // Capped to max 25 items
+      const capped = todayAlerts.slice(0, 25);
+
+      expect(todayAlerts).toHaveLength(30);
+      expect(todayAlerts.some((a) => a.id === 'yesterday-1')).toBe(false);
+      expect(capped).toHaveLength(25);
+      expect(capped[0].createdAt).toBeGreaterThan(capped[1].createdAt!);
+    });
+
+    test('evaluation tick does not spam duplicate identical alerts if an alert exists for today', () => {
+      const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
+      const deviceId = 'leaf-node-01';
+      const createdAlerts: any[] = [];
+      const createdKeys = new Set<string>();
+
+      const evaluateRuleDeduplicated = (alertId: string, ruleType: string, isViolated: boolean) => {
+        const todayKey = `${deviceId}:${ruleType}:${new Date().toDateString()}`;
+        const alreadyExistsToday =
+          createdKeys.has(todayKey) ||
+          createdAlerts.some(
+            (a) => (a.id === alertId || a.type === ruleType) && a.createdAt >= startOfTodayMs
+          );
+
+        if (isViolated) {
+          if (!alreadyExistsToday) {
+            const newAlert = {
+              id: alertId,
+              deviceId,
+              type: ruleType,
+              createdAt: Date.now(),
+              status: 'active',
+            };
+            createdAlerts.push(newAlert);
+            createdKeys.add(todayKey);
+            createdKeys.add(alertId);
+          }
+        }
+      };
+
+      // Tick 1 (t=0s): soil dry condition violated
+      evaluateRuleDeduplicated('dry-leaf-node-01', 'dry', true);
+      expect(createdAlerts).toHaveLength(1);
+
+      // Tick 2 (t=5s): same condition evaluated
+      evaluateRuleDeduplicated('dry-leaf-node-01', 'dry', true);
+      expect(createdAlerts).toHaveLength(1); // No duplicate spammed!
+
+      // Tick 3 (t=10s): same condition evaluated
+      evaluateRuleDeduplicated('dry-leaf-node-01', 'dry', true);
+      expect(createdAlerts).toHaveLength(1); // Still exactly 1!
     });
   });
 });

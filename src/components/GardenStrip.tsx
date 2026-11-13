@@ -31,6 +31,7 @@ interface GardenStripProps {
   activeDeviceId: string;
   onSelect: (id: string) => void;
   onClose: () => void;
+  onRemove?: (id: string, plantName: string) => void;
 }
 
 export function GardenStrip({
@@ -38,6 +39,7 @@ export function GardenStrip({
   activeDeviceId,
   onSelect,
   onClose,
+  onRemove,
 }: GardenStripProps) {
   const { colors, radii } = useAppTheme();
 
@@ -113,13 +115,42 @@ export function GardenStrip({
               ]}
               accessibilityLabel={`Switch to ${device.config.plantName}`}
             >
-              {/* Status dot */}
-              <View
-                style={[
-                  styles.statusDot,
-                  { backgroundColor: STATUS_DOTS[health] },
-                ]}
-              />
+              {/* Header row: Status dot + Unpair/Remove button if multiple devices exist */}
+              <View style={styles.cardHeaderRow}>
+                <View
+                  style={[
+                    styles.statusDot,
+                    { backgroundColor: STATUS_DOTS[health] },
+                  ]}
+                />
+                {devices.length > 1 && onRemove && (
+                  <TouchableOpacity
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    onPress={(e) => {
+                      e.stopPropagation?.();
+                      onRemove(
+                        device.id,
+                        device.config.plantName || device.config.name || 'Plant'
+                      );
+                    }}
+                    style={[
+                      styles.unpairBtn,
+                      {
+                        backgroundColor: isActive
+                          ? 'rgba(255, 255, 255, 0.25)'
+                          : 'rgba(235, 87, 87, 0.15)',
+                      },
+                    ]}
+                    accessibilityLabel={`Remove ${device.config.plantName || device.id}`}
+                  >
+                    <Ionicons
+                      name="trash-outline"
+                      size={12}
+                      color={isActive ? colors.palette.white : colors.palette.critical}
+                    />
+                  </TouchableOpacity>
+                )}
+              </View>
               <Text
                 style={[
                   styles.cardName,
@@ -220,11 +251,23 @@ const styles = StyleSheet.create({
     gap: 4,
     borderWidth: 1.5,
   },
+  cardHeaderRow: {
+    width: '100%',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  unpairBtn: {
+    padding: 3,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   statusDot: {
     width: 10,
     height: 10,
     borderRadius: 5,
-    marginBottom: 4,
   },
   cardName: {
     fontSize: 12,

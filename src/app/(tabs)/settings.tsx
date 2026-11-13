@@ -24,7 +24,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice, LightMode } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
-import { updateDeviceConfigInRTDB } from '@/services/devices';
+import { updateDeviceConfigInRTDB, removeDeviceWithAudit } from '@/services/devices';
 import {
   PlantPassportHeader,
   SliderControl,
@@ -49,11 +49,11 @@ export default function SettingsScreen() {
   const updateConfig = useLiveDevice((s) => s.updateConfig);
   const updateCalibration = useLiveDevice((s) => s.updateCalibration);
   const refillBottle = useLiveDevice((s) => s.refillBottle);
-  const removeDevice = useLiveDevice((s) => s.removeDevice);
 
   // Calibration Wizard modal state
   const [calibrationModalOpen, setCalibrationModalOpen] = useState<boolean>(false);
   const [isRefilling, setIsRefilling] = useState<boolean>(false);
+  const [isRemovingDevice, setIsRemovingDevice] = useState<boolean>(false);
 
   // User Profile Form States
   const [displayNameDraft, setDisplayNameDraft] = useState<string | null>(null);
@@ -201,18 +201,36 @@ export default function SettingsScreen() {
   };
 
   const handleRemoveDevice = () => {
-    if (!device) return;
+    if (!device || !user?.uid) return;
+    const plantName = device.config.plantName || device.config.name || 'Plant';
+    const deviceId = device.id;
+
     Alert.alert(
       'Remove Device',
-      `Are you sure you want to unpair "${device.config.name || 'this plant'}"? Telemetry listeners will be disconnected.`,
+      `Are you sure you want to remove ${plantName} (${deviceId})?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Remove',
           style: 'destructive',
-          onPress: () => {
-            removeDevice(device.id);
-            Alert.alert('Device Removed', 'Device unpaired successfully.');
+          onPress: async () => {
+            try {
+              setIsRemovingDevice(true);
+              const result = await removeDeviceWithAudit(
+                user.uid,
+                user.email,
+                deviceId,
+                plantName
+              );
+              Alert.alert('Device Removed', `${plantName} (${deviceId}) was successfully removed.`);
+              if (!result.nextDeviceId) {
+                router.replace('/add-device');
+              }
+            } catch (err: any) {
+              Alert.alert('Error', err?.message || 'Failed to remove device.');
+            } finally {
+              setIsRemovingDevice(false);
+            }
           },
         },
       ]
@@ -875,23 +893,39 @@ export default function SettingsScreen() {
                   </Text>
                 </TouchableOpacity>
 
-                {/* Action: Remove Device */}
+                {/* Action: Remove / Unpair Device */}
                 <TouchableOpacity
+                  testID="remove-device-btn"
+                  accessibilityRole="button"
+                  accessibilityLabel="Remove or unpair this plant device"
                   onPress={handleRemoveDevice}
+                  disabled={isRemovingDevice}
                   style={[
                     styles.actionBtnOutlineFull,
                     {
-                      borderColor: colors.palette.warningBorder,
-                      backgroundColor: 'rgba(248, 215, 218, 0.25)',
+                      borderColor: colors.palette.critical,
+                      backgroundColor: 'rgba(235, 87, 87, 0.12)',
                       borderRadius: radii.sm,
-                      marginTop: 8,
+                      marginTop: 10,
+                      paddingVertical: 12,
                     },
                   ]}
                 >
-                  <Ionicons name="trash-outline" size={16} color={colors.palette.warningText} />
-                  <Text style={[styles.actionBtnText, { color: colors.palette.warningText }]}>
-                    Unpair & Remove Device
-                  </Text>
+                  {isRemovingDevice ? (
+                    <ActivityIndicator size="small" color={colors.palette.critical} />
+                  ) : (
+                    <>
+                      <Ionicons name="trash-outline" size={16} color={colors.palette.critical} />
+                      <Text
+                        style={[
+                          styles.actionBtnText,
+                          { color: colors.palette.critical, fontWeight: '700' },
+                        ]}
+                      >
+                        Remove / Unpair Device
+                      </Text>
+                    </>
+                  )}
                 </TouchableOpacity>
               </View>
             )}

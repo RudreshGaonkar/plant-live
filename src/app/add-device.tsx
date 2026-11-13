@@ -36,6 +36,7 @@ import Animated, {
   FadeOut,
 } from 'react-native-reanimated';
 import { ref, set } from 'firebase/database';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db } from '@/services/firebase';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice, PlantLocation, DeviceRecord } from '@/store/useLiveDevice';
@@ -310,9 +311,15 @@ export default function AddDeviceScreen() {
       },
     };
 
-    // Commit to local store
+    // Commit to local store & persistence
     addDevice(newRecord);
+    useLiveDevice.getState().setActiveDeviceId(devId);
     setActiveDeviceId(devId);
+    if (user?.uid) {
+      await AsyncStorage.setItem(`@plant_live_active_device_${user.uid}`, devId).catch((err) => {
+        console.warn('[AddDevice] Failed to persist active device ID to AsyncStorage:', err);
+      });
+    }
 
     // Sync to RTDB
     try {
