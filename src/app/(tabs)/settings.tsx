@@ -36,6 +36,7 @@ import { useAppTheme } from '@/theme';
 import { useLiveDevice } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
 import { updateDeviceConfigInRTDB, removeDeviceWithAudit } from '@/services/devices';
+import { changePasswordSchema, mapAuthError } from '@/utils/authValidation';
 import {
   PlantPassportHeader,
   SliderControl,
@@ -263,12 +264,10 @@ export default function SettingsScreen() {
 
   // Password Update Handler
   const handleSavePassword = async () => {
-    if (!newPassword || newPassword.length < 6) {
-      Alert.alert('Invalid Password', 'New password must be at least 6 characters.');
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      Alert.alert('Mismatch', 'New password and confirmation password do not match.');
+    const parseResult = changePasswordSchema.safeParse({ newPassword, confirmPassword });
+    if (!parseResult.success) {
+      const firstError = parseResult.error.issues[0]?.message || 'Please check your passwords.';
+      Alert.alert('Invalid Password', firstError);
       return;
     }
 
@@ -281,14 +280,8 @@ export default function SettingsScreen() {
       Alert.alert('Password Changed', 'Your account password has been updated securely.');
     } catch (err: any) {
       console.warn('[Settings] Password update error:', err);
-      if (err?.code === 'auth/requires-recent-login') {
-        Alert.alert(
-          'Re-authentication Required',
-          'For security reasons, please log out and sign back in before modifying your password.'
-        );
-      } else {
-        Alert.alert('Update Failed', err?.message || 'Failed to change password.');
-      }
+      const friendlyMessage = mapAuthError(err, 'Failed to change password.');
+      Alert.alert('Update Failed', friendlyMessage);
     } finally {
       setIsUpdatingPassword(false);
     }
@@ -1595,6 +1588,10 @@ export default function SettingsScreen() {
                 placeholder="Enter new password"
                 placeholderTextColor={colors.palette.sage}
                 secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+                autoComplete="new-password"
+                textContentType="newPassword"
                 style={[
                   styles.modalTextInput,
                   {
@@ -1615,6 +1612,10 @@ export default function SettingsScreen() {
                 placeholder="Re-type new password"
                 placeholderTextColor={colors.palette.sage}
                 secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+                autoComplete="new-password"
+                textContentType="newPassword"
                 style={[
                   styles.modalTextInput,
                   {

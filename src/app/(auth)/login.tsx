@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -13,24 +13,20 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useForm, Controller } from 'react-hook-form';
+import { useForm, Controller, FieldErrors } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { auth } from '@/services/firebase';
 import { useAppTheme } from '@/theme';
-
-const loginSchema = z.object({
-  email: z.string().email('Please enter a valid email address'),
-  password: z.string().min(6, 'Password must be at least 6 characters'),
-});
-
-type LoginFormData = z.infer<typeof loginSchema>;
+import { loginSchema, LoginFormData, mapAuthError } from '@/utils/authValidation';
 
 export default function LoginScreen() {
   const { colors, radii } = useAppTheme();
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const emailInputRef = useRef<TextInput>(null);
+  const passwordInputRef = useRef<TextInput>(null);
 
   const {
     control,
@@ -39,6 +35,7 @@ export default function LoginScreen() {
     formState: { errors },
   } = useForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
+    mode: 'onBlur',
     defaultValues: {
       email: '',
       password: '',
@@ -49,15 +46,28 @@ export default function LoginScreen() {
     setAuthError(null);
     setIsSubmitting(true);
     try {
-      await signInWithEmailAndPassword(auth, data.email.trim(), data.password);
+      const trimmedEmail = data.email.trim();
+      await signInWithEmailAndPassword(auth, trimmedEmail, data.password);
       router.replace('/(tabs)/home');
     } catch (err: unknown) {
-      const errorMsg =
-        err instanceof Error ? err.message : 'Failed to sign in. Please check your credentials.';
+      const errorMsg = mapAuthError(err, 'Failed to sign in. Please check your credentials.');
       setAuthError(errorMsg);
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handlePressSubmit = () => {
+    handleSubmit(
+      onSubmit,
+      (formErrors: FieldErrors<LoginFormData>) => {
+        if (formErrors.email) {
+          emailInputRef.current?.focus();
+        } else if (formErrors.password) {
+          passwordInputRef.current?.focus();
+        }
+      }
+    )();
   };
 
   return (
@@ -151,10 +161,14 @@ export default function LoginScreen() {
                       style={styles.inputIcon}
                     />
                     <TextInput
+                      ref={emailInputRef}
                       style={[styles.input, { color: colors.text }]}
                       placeholder="gardener@example.com"
                       placeholderTextColor={colors.palette.sage}
                       autoCapitalize="none"
+                      autoCorrect={false}
+                      autoComplete="email"
+                      textContentType="emailAddress"
                       keyboardType="email-address"
                       onBlur={onBlur}
                       onChangeText={onChange}
@@ -198,11 +212,15 @@ export default function LoginScreen() {
                       style={styles.inputIcon}
                     />
                     <TextInput
+                      ref={passwordInputRef}
                       style={[styles.input, { color: colors.text }]}
                       placeholder="••••••••"
                       placeholderTextColor={colors.palette.sage}
                       secureTextEntry
                       autoCapitalize="none"
+                      autoCorrect={false}
+                      autoComplete="current-password"
+                      textContentType="password"
                       onBlur={onBlur}
                       onChangeText={onChange}
                       value={value}
@@ -227,7 +245,7 @@ export default function LoginScreen() {
                   opacity: isSubmitting ? 0.7 : 1,
                 },
               ]}
-              onPress={handleSubmit(onSubmit)}
+              onPress={handlePressSubmit}
               disabled={isSubmitting}
             >
               {isSubmitting ? (
@@ -242,26 +260,28 @@ export default function LoginScreen() {
               )}
             </TouchableOpacity>
 
-            {/* Quick Fill Seeded Account Button */}
-            <TouchableOpacity
-              style={{
-                borderColor: colors.palette.forest,
-                borderRadius: radii.full,
-                marginTop: 10,
-                paddingVertical: 10,
-                alignItems: 'center',
-                borderWidth: 1,
-                backgroundColor: `${colors.palette.lime}20`,
-              }}
-              onPress={() => {
-                setValue('email', 'demo@leaflink.local');
-                setValue('password', 'leaflink123');
-              }}
-            >
-              <Text style={{ color: colors.palette.forest, fontWeight: '700', fontSize: 13 }}>
-                Fill Test Account (demo@leaflink.local)
-              </Text>
-            </TouchableOpacity>
+            {/* Quick Fill Seeded Account Button - strictly Dev & QA only */}
+            {__DEV__ && (
+              <TouchableOpacity
+                style={{
+                  borderColor: colors.palette.forest,
+                  borderRadius: radii.full,
+                  marginTop: 10,
+                  paddingVertical: 10,
+                  alignItems: 'center',
+                  borderWidth: 1,
+                  backgroundColor: `${colors.palette.lime}20`,
+                }}
+                onPress={() => {
+                  setValue('email', 'demo@leaflink.local', { shouldValidate: true });
+                  setValue('password', 'leaflink123', { shouldValidate: true });
+                }}
+              >
+                <Text style={{ color: colors.palette.forest, fontWeight: '700', fontSize: 13 }}>
+                  Fill Demo Account (demo@leaflink.local)
+                </Text>
+              </TouchableOpacity>
+            )}
 
             {/* Sign Up Navigation */}
             <View style={styles.switchAuthRow}>
@@ -394,40 +414,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   switchAuthLink: {
-    fontSize: 14,
-  },
-  demoCard: {
-    marginTop: 24,
-    padding: 18,
-    borderWidth: 1.5,
-  },
-  demoContent: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 12,
-    marginBottom: 14,
-  },
-  demoTextWrap: {
-    flex: 1,
-  },
-  demoTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    marginBottom: 2,
-  },
-  demoDesc: {
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  demoButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 44,
-    borderWidth: 1,
-    gap: 6,
-  },
-  demoButtonText: {
     fontSize: 14,
   },
 });

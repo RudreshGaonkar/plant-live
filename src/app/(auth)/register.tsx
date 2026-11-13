@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -13,37 +13,29 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useForm, Controller } from 'react-hook-form';
+import { useForm, Controller, FieldErrors } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
 import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
-import { ref, set, serverTimestamp } from 'firebase/database';
+import { ref, get, set, serverTimestamp } from 'firebase/database';
 import { auth, db } from '@/services/firebase';
 import { useAppTheme } from '@/theme';
 import { LegalPoliciesModal, LegalPolicyType } from '@/components';
-
-const registerSchema = z
-  .object({
-    name: z.string().min(2, 'Name must be at least 2 characters'),
-    email: z.string().email('Please enter a valid email address'),
-    password: z.string().min(6, 'Password must be at least 6 characters'),
-    confirmPassword: z.string(),
-  })
-  .refine((data) => data.password === data.confirmPassword, {
-    message: 'Passwords do not match',
-    path: ['confirmPassword'],
-  });
-
-type RegisterFormData = z.infer<typeof registerSchema>;
+import { registerSchema, RegisterFormData, mapAuthError } from '@/utils/authValidation';
 
 export default function RegisterScreen() {
   const { colors, radii } = useAppTheme();
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isProvisioningRetry, setIsProvisioningRetry] = useState(false);
   const [policyModal, setPolicyModal] = useState<{ visible: boolean; type: LegalPolicyType }>({
     visible: false,
     type: 'terms',
   });
+
+  const nameInputRef = useRef<TextInput>(null);
+  const emailInputRef = useRef<TextInput>(null);
+  const passwordInputRef = useRef<TextInput>(null);
+  const confirmPasswordInputRef = useRef<TextInput>(null);
 
   const {
     control,
@@ -51,6 +43,7 @@ export default function RegisterScreen() {
     formState: { errors },
   } = useForm<RegisterFormData>({
     resolver: zodResolver(registerSchema),
+    mode: 'onBlur',
     defaultValues: {
       name: '',
       email: '',
@@ -59,49 +52,112 @@ export default function RegisterScreen() {
     },
   });
 
+  const completeUserSetup = async (uid: string, name: string, email: string) => {
+    const userRef = ref(db, `users/${uid}`);
+    let existingProfile: Record<string, unknown> = {};
+    let existingPrefs: Record<string, unknown> = {};
+
+    try {
+      const snap = await get(userRef);
+      if (snap.exists()) {
+        const val = snap.val() || {};
+        if (val.profile && typeof val.profile === 'object') {
+          existingProfile = val.profile;
+        }
+        if (val.prefs && typeof val.prefs === 'object') {
+          existingPrefs = val.prefs;
+        }
+      }
+    } catch {
+      // Continue even if pre-fetch fails
+    }
+
+    await set(userRef, {
+      profile: {
+        name,
+        displayName: name,
+        email,
+        createdAt: serverTimestamp(),
+        ...existingProfile,
+      },
+      prefs: {
+        units: 'C',
+        quietHours: { enabled: true, start: '22:00', end: '07:00' },
+        alerts: {
+          bottle: true,
+          dry: true,
+          wet: true,
+          heat: true,
+          offline: true,
+          watered: true,
+        },
+        ...existingPrefs,
+      },
+    });
+  };
+
   const onSubmit = async (data: RegisterFormData) => {
     setAuthError(null);
     setIsSubmitting(true);
+    const trimmedEmail = data.email.trim();
+    const trimmedName = data.name.trim();
+
     try {
+      let currentUser = auth.currentUser;
+
+      // If user account is already created (e.g. earlier attempt reached Auth but failed RTDB setup)
+      if (currentUser && currentUser.email?.toLowerCase() === trimmedEmail.toLowerCase()) {
+        // Skip user creation and resume setup
+        await updateProfile(currentUser, { displayName: trimmedName });
+        await completeUserSetup(currentUser.uid, trimmedName, trimmedEmail);
+        setIsProvisioningRetry(false);
+        router.replace('/(tabs)/home');
+        return;
+      }
+
+      // Create new Auth account
       const userCredential = await createUserWithEmailAndPassword(
         auth,
-        data.email.trim(),
+        trimmedEmail,
         data.password
       );
+      currentUser = userCredential.user;
 
-      await updateProfile(userCredential.user, {
-        displayName: data.name.trim(),
-      });
-
-      const userRef = ref(db, `users/${userCredential.user.uid}`);
-      await set(userRef, {
-        profile: {
-          name: data.name.trim(),
-          email: data.email.trim(),
-          createdAt: serverTimestamp(),
-        },
-        prefs: {
-          units: 'C',
-          quietHours: { enabled: true, start: '22:00', end: '07:00' },
-          alerts: {
-            bottle: true,
-            dry: true,
-            wet: true,
-            heat: true,
-            offline: true,
-            watered: true,
-          },
-        },
-      });
-
-      router.replace('/(tabs)/home');
+      try {
+        await updateProfile(currentUser, { displayName: trimmedName });
+        await completeUserSetup(currentUser.uid, trimmedName, trimmedEmail);
+        setIsProvisioningRetry(false);
+        router.replace('/(tabs)/home');
+      } catch (setupErr) {
+        console.warn('[Register] Account created but setup incomplete:', setupErr);
+        setIsProvisioningRetry(true);
+        setAuthError(
+          'Your account was created, but completing profile setup failed. Please tap "Complete Setup" to finish.'
+        );
+      }
     } catch (err: unknown) {
-      const errorMsg =
-        err instanceof Error ? err.message : 'Registration failed. Please try again.';
+      const errorMsg = mapAuthError(err, 'Registration failed. Please try again.');
       setAuthError(errorMsg);
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handlePressSubmit = () => {
+    handleSubmit(
+      onSubmit,
+      (formErrors: FieldErrors<RegisterFormData>) => {
+        if (formErrors.name) {
+          nameInputRef.current?.focus();
+        } else if (formErrors.email) {
+          emailInputRef.current?.focus();
+        } else if (formErrors.password) {
+          passwordInputRef.current?.focus();
+        } else if (formErrors.confirmPassword) {
+          confirmPasswordInputRef.current?.focus();
+        }
+      }
+    )();
   };
 
   return (
@@ -197,10 +253,14 @@ export default function RegisterScreen() {
                       style={styles.inputIcon}
                     />
                     <TextInput
+                      ref={nameInputRef}
                       style={[styles.input, { color: colors.text }]}
                       placeholder="Jane Doe"
                       placeholderTextColor={colors.palette.sage}
                       autoCapitalize="words"
+                      autoCorrect={false}
+                      autoComplete="name"
+                      textContentType="name"
                       onBlur={onBlur}
                       onChangeText={onChange}
                       value={value}
@@ -243,10 +303,14 @@ export default function RegisterScreen() {
                       style={styles.inputIcon}
                     />
                     <TextInput
+                      ref={emailInputRef}
                       style={[styles.input, { color: colors.text }]}
                       placeholder="gardener@example.com"
                       placeholderTextColor={colors.palette.sage}
                       autoCapitalize="none"
+                      autoCorrect={false}
+                      autoComplete="email"
+                      textContentType="emailAddress"
                       keyboardType="email-address"
                       onBlur={onBlur}
                       onChangeText={onChange}
@@ -290,11 +354,15 @@ export default function RegisterScreen() {
                       style={styles.inputIcon}
                     />
                     <TextInput
+                      ref={passwordInputRef}
                       style={[styles.input, { color: colors.text }]}
                       placeholder="••••••••"
                       placeholderTextColor={colors.palette.sage}
                       secureTextEntry
                       autoCapitalize="none"
+                      autoCorrect={false}
+                      autoComplete="new-password"
+                      textContentType="newPassword"
                       onBlur={onBlur}
                       onChangeText={onChange}
                       value={value}
@@ -337,11 +405,15 @@ export default function RegisterScreen() {
                       style={styles.inputIcon}
                     />
                     <TextInput
+                      ref={confirmPasswordInputRef}
                       style={[styles.input, { color: colors.text }]}
                       placeholder="••••••••"
                       placeholderTextColor={colors.palette.sage}
                       secureTextEntry
                       autoCapitalize="none"
+                      autoCorrect={false}
+                      autoComplete="new-password"
+                      textContentType="newPassword"
                       onBlur={onBlur}
                       onChangeText={onChange}
                       value={value}
@@ -366,7 +438,7 @@ export default function RegisterScreen() {
                   opacity: isSubmitting ? 0.7 : 1,
                 },
               ]}
-              onPress={handleSubmit(onSubmit)}
+              onPress={handlePressSubmit}
               disabled={isSubmitting}
             >
               {isSubmitting ? (
@@ -374,7 +446,7 @@ export default function RegisterScreen() {
               ) : (
                 <>
                   <Text style={[styles.primaryButtonText, { color: colors.palette.white }]}>
-                    Create Account
+                    {isProvisioningRetry ? 'Complete Setup' : 'Create Account'}
                   </Text>
                   <Ionicons name="arrow-forward" size={18} color={colors.palette.white} />
                 </>
@@ -453,7 +525,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   title: {
-    fontSize: 24,
+    fontSize: 26,
     fontWeight: '800',
     letterSpacing: -0.5,
   },
@@ -520,41 +592,38 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     height: 50,
-    marginTop: 10,
+    marginTop: 12,
     gap: 8,
   },
   primaryButtonText: {
     fontSize: 16,
     fontWeight: '700',
   },
+  policyRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 14,
+  },
+  policyText: {
+    fontSize: 12,
+  },
+  policyLink: {
+    fontSize: 12,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
   switchAuthRow: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    marginTop: 16,
+    marginTop: 18,
   },
   switchAuthText: {
     fontSize: 14,
   },
   switchAuthLink: {
     fontSize: 14,
-  },
-  policyRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 18,
-    paddingHorizontal: 8,
-  },
-  policyText: {
-    fontSize: 12,
-    lineHeight: 18,
-  },
-  policyLink: {
-    fontSize: 12,
-    lineHeight: 18,
-    fontWeight: '700',
-    textDecorationLine: 'underline',
   },
 });
