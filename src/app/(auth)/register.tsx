@@ -17,12 +17,87 @@ import * as SplashScreen from 'expo-splash-screen';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useForm, Controller, FieldErrors } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
+import { createUserWithEmailAndPassword, updateProfile, sendEmailVerification } from 'firebase/auth';
 import { ref, get, set, serverTimestamp } from 'firebase/database';
 import { auth, db } from '@/services/firebase';
 import { useAppTheme } from '@/theme';
 import { LegalPoliciesModal, LegalPolicyType } from '@/components';
 import { registerSchema, RegisterFormData, mapAuthError } from '@/utils/authValidation';
+
+export const completeUserSetup = async (uid: string, name: string, email: string) => {
+  const userRef = ref(db, `users/${uid}`);
+  let existingProfile: Record<string, unknown> = {};
+  let existingPrefs: Record<string, unknown> = {};
+
+  try {
+    const snap = await get(userRef);
+    if (snap.exists()) {
+      const val = snap.val() || {};
+      if (val.profile && typeof val.profile === 'object') {
+        existingProfile = val.profile;
+      }
+      if (val.prefs && typeof val.prefs === 'object') {
+        existingPrefs = val.prefs;
+      }
+    }
+  } catch {
+    // Continue even if pre-fetch fails
+  }
+
+  await set(userRef, {
+    profile: {
+      name,
+      displayName: name,
+      email,
+      createdAt: serverTimestamp(),
+      ...existingProfile,
+    },
+    prefs: {
+      units: 'C',
+      quietHours: { enabled: true, start: '22:00', end: '07:00' },
+      alerts: {
+        bottle: true,
+        dry: true,
+        wet: true,
+        heat: true,
+        offline: true,
+        watered: true,
+      },
+      ...existingPrefs,
+    },
+  });
+};
+
+export const registerUserWithEmail = async (
+  data: RegisterFormData,
+  deps?: {
+    setupUser?: typeof completeUserSetup;
+  }
+) => {
+  const trimmedEmail = data.email.trim();
+  const trimmedName = data.name.trim();
+
+  // Create new Auth account
+  const userCredential = await createUserWithEmailAndPassword(
+    auth,
+    trimmedEmail,
+    data.password
+  );
+  const currentUser = userCredential.user;
+
+  // Send email verification with non-fatal error handling
+  try {
+    await sendEmailVerification(currentUser);
+  } catch (sendErr) {
+    console.warn('[Register] Failed to send verification email (non-fatal):', sendErr);
+  }
+
+  await updateProfile(currentUser, { displayName: trimmedName });
+  const setupFn = deps?.setupUser || completeUserSetup;
+  await setupFn(currentUser.uid, trimmedName, trimmedEmail);
+
+  return currentUser;
+};
 
 export default function RegisterScreen() {
   const { colors, radii } = useAppTheme();
@@ -35,7 +110,7 @@ export default function RegisterScreen() {
   });
 
   useEffect(() => {
-    SplashScreen.hideAsync().catch(() => {});
+    SplashScreen.hideAsync().catch(() => { });
   }, []);
 
   const nameInputRef = useRef<TextInput>(null);
@@ -58,50 +133,6 @@ export default function RegisterScreen() {
     },
   });
 
-  const completeUserSetup = async (uid: string, name: string, email: string) => {
-    const userRef = ref(db, `users/${uid}`);
-    let existingProfile: Record<string, unknown> = {};
-    let existingPrefs: Record<string, unknown> = {};
-
-    try {
-      const snap = await get(userRef);
-      if (snap.exists()) {
-        const val = snap.val() || {};
-        if (val.profile && typeof val.profile === 'object') {
-          existingProfile = val.profile;
-        }
-        if (val.prefs && typeof val.prefs === 'object') {
-          existingPrefs = val.prefs;
-        }
-      }
-    } catch {
-      // Continue even if pre-fetch fails
-    }
-
-    await set(userRef, {
-      profile: {
-        name,
-        displayName: name,
-        email,
-        createdAt: serverTimestamp(),
-        ...existingProfile,
-      },
-      prefs: {
-        units: 'C',
-        quietHours: { enabled: true, start: '22:00', end: '07:00' },
-        alerts: {
-          bottle: true,
-          dry: true,
-          wet: true,
-          heat: true,
-          offline: true,
-          watered: true,
-        },
-        ...existingPrefs,
-      },
-    });
-  };
-
   const onSubmit = async (data: RegisterFormData) => {
     setAuthError(null);
     setIsSubmitting(true);
@@ -121,25 +152,23 @@ export default function RegisterScreen() {
         return;
       }
 
-      // Create new Auth account
-      const userCredential = await createUserWithEmailAndPassword(
-        auth,
-        trimmedEmail,
-        data.password
-      );
-      currentUser = userCredential.user;
-
       try {
-        await updateProfile(currentUser, { displayName: trimmedName });
-        await completeUserSetup(currentUser.uid, trimmedName, trimmedEmail);
+        await registerUserWithEmail(data);
         setIsProvisioningRetry(false);
         router.replace('/(tabs)/home');
-      } catch (setupErr) {
-        console.warn('[Register] Account created but setup incomplete:', setupErr);
-        setIsProvisioningRetry(true);
-        setAuthError(
-          'Your account was created, but completing profile setup failed. Please tap "Complete Setup" to finish.'
-        );
+      } catch (innerErr: unknown) {
+        if (
+          auth.currentUser &&
+          auth.currentUser.email?.toLowerCase() === trimmedEmail.toLowerCase()
+        ) {
+          console.warn('[Register] Account created but setup incomplete:', innerErr);
+          setIsProvisioningRetry(true);
+          setAuthError(
+            'Your account was created, but completing profile setup failed. Please tap "Complete Setup" to finish.'
+          );
+          return;
+        }
+        throw innerErr;
       }
     } catch (err: unknown) {
       const errorMsg = mapAuthError(err, 'Registration failed. Please try again.');
@@ -150,365 +179,365 @@ export default function RegisterScreen() {
   };
 
   const handlePressSubmit = () => {
-    handleSubmit(
-      onSubmit,
-      (formErrors: FieldErrors<RegisterFormData>) => {
-        if (formErrors.name) {
-          nameInputRef.current?.focus();
-        } else if (formErrors.email) {
-          emailInputRef.current?.focus();
-        } else if (formErrors.password) {
-          passwordInputRef.current?.focus();
-        } else if (formErrors.confirmPassword) {
-          confirmPasswordInputRef.current?.focus();
-        }
+  handleSubmit(
+    onSubmit,
+    (formErrors: FieldErrors<RegisterFormData>) => {
+      if (formErrors.name) {
+        nameInputRef.current?.focus();
+      } else if (formErrors.email) {
+        emailInputRef.current?.focus();
+      } else if (formErrors.password) {
+        passwordInputRef.current?.focus();
+      } else if (formErrors.confirmPassword) {
+        confirmPasswordInputRef.current?.focus();
       }
-    )();
-  };
+    }
+  )();
+};
 
-  return (
-    <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.keyboardView}
+return (
+  <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={styles.keyboardView}
+    >
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
       >
-        <ScrollView
-          contentContainerStyle={styles.scrollContent}
-          keyboardShouldPersistTaps="handled"
-        >
-          {/* Header */}
-          <View style={styles.brandHeader}>
-            <View
-              style={[
-                styles.logoWrap,
-                { backgroundColor: '#16221A', borderRadius: 18 },
-              ]}
-            >
-              <Image
-                source={require('@/assets/images/leaflink-mark.png')}
-                style={{ width: 40, height: 40 }}
-                resizeMode="contain"
-              />
-            </View>
-            <Text style={[styles.title, { color: colors.text }]}>
-              Create LeafLink Account
-            </Text>
-            <Text style={[styles.subtitle, { color: colors.textMuted }]}>
-              Start caring for your plants smarter
-            </Text>
-          </View>
-
-          {/* Form Card */}
+        {/* Header */}
+        <View style={styles.brandHeader}>
           <View
             style={[
-              styles.card,
-              {
-                backgroundColor: colors.surface,
-                borderRadius: radii.hero,
-                borderColor: colors.border,
-              },
+              styles.logoWrap,
+              { backgroundColor: '#16221A', borderRadius: 18 },
             ]}
           >
-            <Text style={[styles.cardTitle, { color: colors.text }]}>Register</Text>
+            <Image
+              source={require('@/assets/images/leaflink-mark.png')}
+              style={{ width: 40, height: 40 }}
+              resizeMode="contain"
+            />
+          </View>
+          <Text style={[styles.title, { color: colors.text }]}>
+            Create LeafLink Account
+          </Text>
+          <Text style={[styles.subtitle, { color: colors.textMuted }]}>
+            Start caring for your plants smarter
+          </Text>
+        </View>
 
-            {authError && (
-              <View
-                style={[
-                  styles.errorBanner,
-                  {
-                    backgroundColor: colors.palette.blush,
-                    borderRadius: radii.sm,
-                    borderColor: colors.palette.warningBorder,
-                  },
-                ]}
-              >
-                <Ionicons
-                  name="alert-circle"
-                  size={18}
-                  color={colors.palette.warningText}
-                />
-                <Text
-                  style={[styles.errorBannerText, { color: colors.palette.warningText }]}
-                >
-                  {authError}
-                </Text>
-              </View>
-            )}
+        {/* Form Card */}
+        <View
+          style={[
+            styles.card,
+            {
+              backgroundColor: colors.surface,
+              borderRadius: radii.hero,
+              borderColor: colors.border,
+            },
+          ]}
+        >
+          <Text style={[styles.cardTitle, { color: colors.text }]}>Register</Text>
 
-            {/* Name Field */}
-            <View style={styles.fieldGroup}>
-              <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>
-                Full Name
-              </Text>
-              <Controller
-                control={control}
-                name="name"
-                render={({ field: { onChange, onBlur, value } }) => (
-                  <View
-                    style={[
-                      styles.inputContainer,
-                      {
-                        backgroundColor: colors.palette.mist,
-                        borderColor: errors.name
-                          ? colors.palette.warningBorder
-                          : colors.border,
-                        borderRadius: radii.md,
-                      },
-                    ]}
-                  >
-                    <Ionicons
-                      name="person-outline"
-                      size={20}
-                      color={colors.textMuted}
-                      style={styles.inputIcon}
-                    />
-                    <TextInput
-                      ref={nameInputRef}
-                      style={[styles.input, { color: colors.text }]}
-                      placeholder="Jane Doe"
-                      placeholderTextColor={colors.palette.sage}
-                      autoCapitalize="words"
-                      autoCorrect={false}
-                      autoComplete="name"
-                      textContentType="name"
-                      onBlur={onBlur}
-                      onChangeText={onChange}
-                      value={value}
-                    />
-                  </View>
-                )}
-              />
-              {errors.name && (
-                <Text style={[styles.fieldError, { color: colors.palette.warningText }]}>
-                  {errors.name.message}
-                </Text>
-              )}
-            </View>
-
-            {/* Email Field */}
-            <View style={styles.fieldGroup}>
-              <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>
-                Email Address
-              </Text>
-              <Controller
-                control={control}
-                name="email"
-                render={({ field: { onChange, onBlur, value } }) => (
-                  <View
-                    style={[
-                      styles.inputContainer,
-                      {
-                        backgroundColor: colors.palette.mist,
-                        borderColor: errors.email
-                          ? colors.palette.warningBorder
-                          : colors.border,
-                        borderRadius: radii.md,
-                      },
-                    ]}
-                  >
-                    <Ionicons
-                      name="mail-outline"
-                      size={20}
-                      color={colors.textMuted}
-                      style={styles.inputIcon}
-                    />
-                    <TextInput
-                      ref={emailInputRef}
-                      style={[styles.input, { color: colors.text }]}
-                      placeholder="gardener@example.com"
-                      placeholderTextColor={colors.palette.sage}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      autoComplete="email"
-                      textContentType="emailAddress"
-                      keyboardType="email-address"
-                      onBlur={onBlur}
-                      onChangeText={onChange}
-                      value={value}
-                    />
-                  </View>
-                )}
-              />
-              {errors.email && (
-                <Text style={[styles.fieldError, { color: colors.palette.warningText }]}>
-                  {errors.email.message}
-                </Text>
-              )}
-            </View>
-
-            {/* Password Field */}
-            <View style={styles.fieldGroup}>
-              <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>
-                Password
-              </Text>
-              <Controller
-                control={control}
-                name="password"
-                render={({ field: { onChange, onBlur, value } }) => (
-                  <View
-                    style={[
-                      styles.inputContainer,
-                      {
-                        backgroundColor: colors.palette.mist,
-                        borderColor: errors.password
-                          ? colors.palette.warningBorder
-                          : colors.border,
-                        borderRadius: radii.md,
-                      },
-                    ]}
-                  >
-                    <Ionicons
-                      name="lock-closed-outline"
-                      size={20}
-                      color={colors.textMuted}
-                      style={styles.inputIcon}
-                    />
-                    <TextInput
-                      ref={passwordInputRef}
-                      style={[styles.input, { color: colors.text }]}
-                      placeholder="••••••••"
-                      placeholderTextColor={colors.palette.sage}
-                      secureTextEntry
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      autoComplete="new-password"
-                      textContentType="newPassword"
-                      onBlur={onBlur}
-                      onChangeText={onChange}
-                      value={value}
-                    />
-                  </View>
-                )}
-              />
-              {errors.password && (
-                <Text style={[styles.fieldError, { color: colors.palette.warningText }]}>
-                  {errors.password.message}
-                </Text>
-              )}
-            </View>
-
-            {/* Confirm Password Field */}
-            <View style={styles.fieldGroup}>
-              <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>
-                Confirm Password
-              </Text>
-              <Controller
-                control={control}
-                name="confirmPassword"
-                render={({ field: { onChange, onBlur, value } }) => (
-                  <View
-                    style={[
-                      styles.inputContainer,
-                      {
-                        backgroundColor: colors.palette.mist,
-                        borderColor: errors.confirmPassword
-                          ? colors.palette.warningBorder
-                          : colors.border,
-                        borderRadius: radii.md,
-                      },
-                    ]}
-                  >
-                    <Ionicons
-                      name="shield-checkmark-outline"
-                      size={20}
-                      color={colors.textMuted}
-                      style={styles.inputIcon}
-                    />
-                    <TextInput
-                      ref={confirmPasswordInputRef}
-                      style={[styles.input, { color: colors.text }]}
-                      placeholder="••••••••"
-                      placeholderTextColor={colors.palette.sage}
-                      secureTextEntry
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      autoComplete="new-password"
-                      textContentType="newPassword"
-                      onBlur={onBlur}
-                      onChangeText={onChange}
-                      value={value}
-                    />
-                  </View>
-                )}
-              />
-              {errors.confirmPassword && (
-                <Text style={[styles.fieldError, { color: colors.palette.warningText }]}>
-                  {errors.confirmPassword.message}
-                </Text>
-              )}
-            </View>
-
-            {/* Submit Button */}
-            <TouchableOpacity
+          {authError && (
+            <View
               style={[
-                styles.primaryButton,
+                styles.errorBanner,
                 {
-                  backgroundColor: colors.palette.forest,
-                  borderRadius: radii.full,
-                  opacity: isSubmitting ? 0.7 : 1,
+                  backgroundColor: colors.palette.blush,
+                  borderRadius: radii.sm,
+                  borderColor: colors.palette.warningBorder,
                 },
               ]}
-              onPress={handlePressSubmit}
-              disabled={isSubmitting}
             >
-              {isSubmitting ? (
-                <ActivityIndicator color={colors.palette.white} />
-              ) : (
-                <>
-                  <Text style={[styles.primaryButtonText, { color: colors.palette.white }]}>
-                    {isProvisioningRetry ? 'Complete Setup' : 'Create Account'}
-                  </Text>
-                  <Ionicons name="arrow-forward" size={18} color={colors.palette.white} />
-                </>
-              )}
-            </TouchableOpacity>
-
-            {/* Terms and Privacy policy disclaimer */}
-            <View style={styles.policyRow}>
-              <Text style={[styles.policyText, { color: colors.textMuted }]}>
-                By signing up, you agree to our{' '}
+              <Ionicons
+                name="alert-circle"
+                size={18}
+                color={colors.palette.warningText}
+              />
+              <Text
+                style={[styles.errorBannerText, { color: colors.palette.warningText }]}
+              >
+                {authError}
               </Text>
-              <TouchableOpacity onPress={() => setPolicyModal({ visible: true, type: 'terms' })}>
-                <Text style={[styles.policyLink, { color: colors.palette.forest }]}>
-                  Terms & Conditions
-                </Text>
-              </TouchableOpacity>
-              <Text style={[styles.policyText, { color: colors.textMuted }]}> and </Text>
-              <TouchableOpacity onPress={() => setPolicyModal({ visible: true, type: 'privacy' })}>
-                <Text style={[styles.policyLink, { color: colors.palette.forest }]}>
-                  Privacy Policy
-                </Text>
-              </TouchableOpacity>
-              <Text style={[styles.policyText, { color: colors.textMuted }]}>.</Text>
             </View>
+          )}
 
-            {/* Switch to Login */}
-            <View style={styles.switchAuthRow}>
-              <Text style={[styles.switchAuthText, { color: colors.textMuted }]}>
-                Already registered?{' '}
-              </Text>
-              <TouchableOpacity onPress={() => router.push('/(auth)/login')}>
-                <Text
+          {/* Name Field */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>
+              Full Name
+            </Text>
+            <Controller
+              control={control}
+              name="name"
+              render={({ field: { onChange, onBlur, value } }) => (
+                <View
                   style={[
-                    styles.switchAuthLink,
-                    { color: colors.palette.forest, fontWeight: '700' },
+                    styles.inputContainer,
+                    {
+                      backgroundColor: colors.palette.mist,
+                      borderColor: errors.name
+                        ? colors.palette.warningBorder
+                        : colors.border,
+                      borderRadius: radii.md,
+                    },
                   ]}
                 >
-                  Sign In
-                </Text>
-              </TouchableOpacity>
-            </View>
+                  <Ionicons
+                    name="person-outline"
+                    size={20}
+                    color={colors.textMuted}
+                    style={styles.inputIcon}
+                  />
+                  <TextInput
+                    ref={nameInputRef}
+                    style={[styles.input, { color: colors.text }]}
+                    placeholder="Jane Doe"
+                    placeholderTextColor={colors.palette.sage}
+                    autoCapitalize="words"
+                    autoCorrect={false}
+                    autoComplete="name"
+                    textContentType="name"
+                    onBlur={onBlur}
+                    onChangeText={onChange}
+                    value={value}
+                  />
+                </View>
+              )}
+            />
+            {errors.name && (
+              <Text style={[styles.fieldError, { color: colors.palette.warningText }]}>
+                {errors.name.message}
+              </Text>
+            )}
           </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
 
-      <LegalPoliciesModal
-        visible={policyModal.visible}
-        type={policyModal.type}
-        onClose={() => setPolicyModal((prev) => ({ ...prev, visible: false }))}
-      />
-    </SafeAreaView>
-  );
+          {/* Email Field */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>
+              Email Address
+            </Text>
+            <Controller
+              control={control}
+              name="email"
+              render={({ field: { onChange, onBlur, value } }) => (
+                <View
+                  style={[
+                    styles.inputContainer,
+                    {
+                      backgroundColor: colors.palette.mist,
+                      borderColor: errors.email
+                        ? colors.palette.warningBorder
+                        : colors.border,
+                      borderRadius: radii.md,
+                    },
+                  ]}
+                >
+                  <Ionicons
+                    name="mail-outline"
+                    size={20}
+                    color={colors.textMuted}
+                    style={styles.inputIcon}
+                  />
+                  <TextInput
+                    ref={emailInputRef}
+                    style={[styles.input, { color: colors.text }]}
+                    placeholder="gardener@example.com"
+                    placeholderTextColor={colors.palette.sage}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    autoComplete="email"
+                    textContentType="emailAddress"
+                    keyboardType="email-address"
+                    onBlur={onBlur}
+                    onChangeText={onChange}
+                    value={value}
+                  />
+                </View>
+              )}
+            />
+            {errors.email && (
+              <Text style={[styles.fieldError, { color: colors.palette.warningText }]}>
+                {errors.email.message}
+              </Text>
+            )}
+          </View>
+
+          {/* Password Field */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>
+              Password
+            </Text>
+            <Controller
+              control={control}
+              name="password"
+              render={({ field: { onChange, onBlur, value } }) => (
+                <View
+                  style={[
+                    styles.inputContainer,
+                    {
+                      backgroundColor: colors.palette.mist,
+                      borderColor: errors.password
+                        ? colors.palette.warningBorder
+                        : colors.border,
+                      borderRadius: radii.md,
+                    },
+                  ]}
+                >
+                  <Ionicons
+                    name="lock-closed-outline"
+                    size={20}
+                    color={colors.textMuted}
+                    style={styles.inputIcon}
+                  />
+                  <TextInput
+                    ref={passwordInputRef}
+                    style={[styles.input, { color: colors.text }]}
+                    placeholder="••••••••"
+                    placeholderTextColor={colors.palette.sage}
+                    secureTextEntry
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    autoComplete="new-password"
+                    textContentType="newPassword"
+                    onBlur={onBlur}
+                    onChangeText={onChange}
+                    value={value}
+                  />
+                </View>
+              )}
+            />
+            {errors.password && (
+              <Text style={[styles.fieldError, { color: colors.palette.warningText }]}>
+                {errors.password.message}
+              </Text>
+            )}
+          </View>
+
+          {/* Confirm Password Field */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>
+              Confirm Password
+            </Text>
+            <Controller
+              control={control}
+              name="confirmPassword"
+              render={({ field: { onChange, onBlur, value } }) => (
+                <View
+                  style={[
+                    styles.inputContainer,
+                    {
+                      backgroundColor: colors.palette.mist,
+                      borderColor: errors.confirmPassword
+                        ? colors.palette.warningBorder
+                        : colors.border,
+                      borderRadius: radii.md,
+                    },
+                  ]}
+                >
+                  <Ionicons
+                    name="shield-checkmark-outline"
+                    size={20}
+                    color={colors.textMuted}
+                    style={styles.inputIcon}
+                  />
+                  <TextInput
+                    ref={confirmPasswordInputRef}
+                    style={[styles.input, { color: colors.text }]}
+                    placeholder="••••••••"
+                    placeholderTextColor={colors.palette.sage}
+                    secureTextEntry
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    autoComplete="new-password"
+                    textContentType="newPassword"
+                    onBlur={onBlur}
+                    onChangeText={onChange}
+                    value={value}
+                  />
+                </View>
+              )}
+            />
+            {errors.confirmPassword && (
+              <Text style={[styles.fieldError, { color: colors.palette.warningText }]}>
+                {errors.confirmPassword.message}
+              </Text>
+            )}
+          </View>
+
+          {/* Submit Button */}
+          <TouchableOpacity
+            style={[
+              styles.primaryButton,
+              {
+                backgroundColor: colors.palette.forest,
+                borderRadius: radii.full,
+                opacity: isSubmitting ? 0.7 : 1,
+              },
+            ]}
+            onPress={handlePressSubmit}
+            disabled={isSubmitting}
+          >
+            {isSubmitting ? (
+              <ActivityIndicator color={colors.palette.white} />
+            ) : (
+              <>
+                <Text style={[styles.primaryButtonText, { color: colors.palette.white }]}>
+                  {isProvisioningRetry ? 'Complete Setup' : 'Create Account'}
+                </Text>
+                <Ionicons name="arrow-forward" size={18} color={colors.palette.white} />
+              </>
+            )}
+          </TouchableOpacity>
+
+          {/* Terms and Privacy policy disclaimer */}
+          <View style={styles.policyRow}>
+            <Text style={[styles.policyText, { color: colors.textMuted }]}>
+              By signing up, you agree to our{' '}
+            </Text>
+            <TouchableOpacity onPress={() => setPolicyModal({ visible: true, type: 'terms' })}>
+              <Text style={[styles.policyLink, { color: colors.palette.forest }]}>
+                Terms & Conditions
+              </Text>
+            </TouchableOpacity>
+            <Text style={[styles.policyText, { color: colors.textMuted }]}> and </Text>
+            <TouchableOpacity onPress={() => setPolicyModal({ visible: true, type: 'privacy' })}>
+              <Text style={[styles.policyLink, { color: colors.palette.forest }]}>
+                Privacy Policy
+              </Text>
+            </TouchableOpacity>
+            <Text style={[styles.policyText, { color: colors.textMuted }]}>.</Text>
+          </View>
+
+          {/* Switch to Login */}
+          <View style={styles.switchAuthRow}>
+            <Text style={[styles.switchAuthText, { color: colors.textMuted }]}>
+              Already registered?{' '}
+            </Text>
+            <TouchableOpacity onPress={() => router.push('/(auth)/login')}>
+              <Text
+                style={[
+                  styles.switchAuthLink,
+                  { color: colors.palette.forest, fontWeight: '700' },
+                ]}
+              >
+                Sign In
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
+
+    <LegalPoliciesModal
+      visible={policyModal.visible}
+      type={policyModal.type}
+      onClose={() => setPolicyModal((prev) => ({ ...prev, visible: false }))}
+    />
+  </SafeAreaView>
+);
 }
 
 const styles = StyleSheet.create({

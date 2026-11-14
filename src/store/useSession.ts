@@ -8,6 +8,10 @@ import {
   onAuthStateChanged,
   updatePassword,
   updateProfile,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
+  sendPasswordResetEmail as fbSendPasswordResetEmail,
+  sendEmailVerification as fbSendEmailVerification,
 } from 'firebase/auth';
 import { get as fbGet, ref, update } from 'firebase/database';
 import { create } from 'zustand';
@@ -19,6 +23,7 @@ export interface UserProfile {
   email: string | null;
   displayName: string | null;
   avatarUri?: string | null;
+  emailVerified?: boolean;
 }
 
 export interface UserAlertPrefs {
@@ -59,6 +64,7 @@ export const DEFAULT_USER_PREFS: UserPrefs = {
 
 interface SessionState {
   user: UserProfile | null;
+  isEmailVerified: boolean;
   isLoading: boolean;
   isAuthReady: boolean;
   hasResolvedAuth: boolean;
@@ -75,7 +81,11 @@ interface SessionState {
   setAvatarUri: (uri: string | null) => Promise<void>;
   updateUserDisplayName: (displayName: string) => Promise<void>;
   retrySyncProfileToRTDB: () => Promise<void>;
-  updateUserPassword: (newPassword: string) => Promise<void>;
+  updateUserPassword: (currentPasswordOrNew: string, maybeNewPassword?: string) => Promise<void>;
+  sendPasswordResetEmail: (email: string) => Promise<void>;
+  sendPasswordReset: (email: string) => Promise<void>;
+  resendVerificationEmail: () => Promise<void>;
+  refreshEmailVerification: () => Promise<boolean>;
   setActiveDeviceId: (deviceId: string) => void;
   signOut: () => Promise<void>;
   initializeAuthListener: () => () => void;
@@ -220,7 +230,9 @@ async function hydrateUserSession(
       email: firebaseUser.email,
       displayName: firebaseUser.displayName,
       avatarUri: firebaseUser.photoURL || null,
+      emailVerified: Boolean(firebaseUser.emailVerified),
     },
+    isEmailVerified: Boolean(firebaseUser.emailVerified),
     activeDeviceId: pairedDeviceId,
     pairingStatus: resolvedStatus,
     prefs: resolvedPrefs,
@@ -233,6 +245,7 @@ async function hydrateUserSession(
 
 export const useSession = create<SessionState>((set, get) => ({
   user: null,
+  isEmailVerified: false,
   isLoading: true,
   isAuthReady: false,
   hasResolvedAuth: false,
@@ -241,7 +254,11 @@ export const useSession = create<SessionState>((set, get) => ({
   prefs: DEFAULT_USER_PREFS,
   profileSyncError: null,
 
-  setUser: (user) => set({ user }),
+  setUser: (user) =>
+    set({
+      user,
+      isEmailVerified: Boolean(user?.emailVerified ?? auth.currentUser?.emailVerified ?? false),
+    }),
 
   setPrefs: (partial) => {
     set((state) => ({
@@ -370,11 +387,55 @@ export const useSession = create<SessionState>((set, get) => ({
     set({ profileSyncError: null });
   },
 
-  updateUserPassword: async (newPassword: string) => {
-    if (!auth.currentUser) {
+  updateUserPassword: async (currentPasswordOrNew: string, maybeNewPassword?: string) => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
       throw new Error('No authenticated user session');
     }
-    await updatePassword(auth.currentUser, newPassword);
+    const currentPassword = maybeNewPassword !== undefined ? currentPasswordOrNew : '';
+    const newPassword = maybeNewPassword !== undefined ? maybeNewPassword : currentPasswordOrNew;
+
+    if (currentPassword) {
+      const email = currentUser.email || get().user?.email;
+      if (!email) {
+        throw new Error('No email found for current user');
+      }
+      const credential = EmailAuthProvider.credential(email, currentPassword);
+      await reauthenticateWithCredential(currentUser, credential);
+    }
+    await updatePassword(currentUser, newPassword);
+  },
+
+  sendPasswordResetEmail: async (email: string) => {
+    const trimmed = email.trim();
+    await fbSendPasswordResetEmail(auth, trimmed);
+  },
+
+  sendPasswordReset: async (email: string) => {
+    const trimmed = email.trim();
+    await fbSendPasswordResetEmail(auth, trimmed);
+  },
+
+  resendVerificationEmail: async () => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      throw new Error('No authenticated user session');
+    }
+    await fbSendEmailVerification(currentUser);
+  },
+
+  refreshEmailVerification: async () => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      throw new Error('No authenticated user session');
+    }
+    await currentUser.reload();
+    const verified = Boolean(currentUser.emailVerified);
+    set((state) => ({
+      isEmailVerified: verified,
+      user: state.user ? { ...state.user, emailVerified: verified } : null,
+    }));
+    return verified;
   },
 
   setActiveDeviceId: (deviceId: string) => {
@@ -409,6 +470,7 @@ export const useSession = create<SessionState>((set, get) => ({
     triggerAlertSessionClear();
     set({
       user: null,
+      isEmailVerified: false,
       activeDeviceId: '',
       isLoading: false,
       isAuthReady: true,
@@ -436,6 +498,7 @@ export const useSession = create<SessionState>((set, get) => ({
           if (attemptId === currentBootAttempt) {
             set({
               user: null,
+              isEmailVerified: false,
               activeDeviceId: '',
               pairingStatus: 'unpaired',
               prefs: DEFAULT_USER_PREFS,
@@ -487,6 +550,7 @@ export const useSession = create<SessionState>((set, get) => ({
     } else {
       set({
         user: null,
+        isEmailVerified: false,
         activeDeviceId: '',
         pairingStatus: 'unpaired',
         isAuthReady: true,

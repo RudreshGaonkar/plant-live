@@ -254,9 +254,12 @@ export type RegisterFormData = z.infer<typeof registerSchema>;
 
 /**
  * Zod schema for settings change password form.
+ * Accepts optional currentPassword to maintain compatibility with legacy tests,
+ * but requires matching newPassword and minimum length.
  */
 export const changePasswordSchema = z
   .object({
+    currentPassword: z.string().min(1, 'Current password is required').optional(),
     newPassword: z.string().min(6, 'New password must be at least 6 characters'),
     confirmPassword: z.string().min(1, 'Please confirm your new password'),
   })
@@ -266,3 +269,99 @@ export const changePasswordSchema = z
   });
 
 export type ChangePasswordFormData = z.infer<typeof changePasswordSchema>;
+
+/**
+ * Strict schema for changing password requiring currentPassword.
+ */
+export const changePasswordWithCurrentSchema = z
+  .object({
+    currentPassword: z.string().min(1, 'Current password is required'),
+    newPassword: z.string().min(6, 'New password must be at least 6 characters'),
+    confirmPassword: z.string().min(1, 'Please confirm your new password'),
+  })
+  .refine((data) => data.newPassword === data.confirmPassword, {
+    message: 'Passwords do not match',
+    path: ['confirmPassword'],
+  });
+
+export type ChangePasswordWithCurrentFormData = z.infer<typeof changePasswordWithCurrentSchema>;
+
+/**
+ * Maps error codes specifically for the Change Password flow.
+ * Provides clear inline feedback for incorrect current password and session expiry.
+ */
+export function mapChangePasswordError(
+  error: unknown,
+  fallback: string = 'Failed to change password.'
+): string {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code)
+      : typeof error === 'string'
+        ? error
+        : '';
+
+  if (
+    code === 'auth/wrong-password' ||
+    code === 'auth/invalid-credential' ||
+    code === 'auth/invalid-login-credentials'
+  ) {
+    return 'Current password is incorrect.';
+  }
+  if (code === 'auth/requires-recent-login') {
+    return 'For security reasons, please log out and sign back in before modifying your password.';
+  }
+  return mapAuthError(error, fallback);
+}
+
+/**
+ * Zod schema for forgot password form.
+ */
+export const forgotPasswordSchema = z.object({
+  email: z
+    .string()
+    .min(1, 'Email address is required')
+    .superRefine((val, ctx) => {
+      const res = validateEmail(val, false);
+      if (!res.valid) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: res.error || 'Please enter a valid email address',
+        });
+      }
+    }),
+});
+
+export type ForgotPasswordFormData = z.infer<typeof forgotPasswordSchema>;
+
+export const PASSWORD_RESET_CONFIRMATION_MESSAGE =
+  'If an account exists for that email, a password reset link has been sent.';
+
+/**
+ * Maps error codes for password reset flow, enforcing non-enumeration.
+ */
+export function mapPasswordResetError(
+  error: unknown,
+  fallback: string = 'Failed to send password reset email.'
+): string {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code)
+      : typeof error === 'string'
+        ? error
+        : '';
+
+  switch (code) {
+    case 'auth/user-not-found':
+      // Non-enumerating confirmation
+      return PASSWORD_RESET_CONFIRMATION_MESSAGE;
+    case 'auth/invalid-email':
+      return 'Please enter a valid email address.';
+    case 'auth/network-request-failed':
+      return 'Network error. Please check your internet connection and try again.';
+    case 'auth/too-many-requests':
+      return 'Too many unsuccessful attempts. Please try again later.';
+    default:
+      return mapAuthError(error, fallback);
+  }
+}

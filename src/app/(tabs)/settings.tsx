@@ -46,7 +46,10 @@ import {
   updateDeviceLightMode,
 } from '@/services/devices';
 import { formatTemperature } from '@/utils/temperature';
-import { changePasswordSchema, mapAuthError } from '@/utils/authValidation';
+import {
+  changePasswordSchema,
+  mapChangePasswordError,
+} from '@/utils/authValidation';
 import {
   PlantPassportHeader,
   SliderControl,
@@ -60,6 +63,9 @@ export default function SettingsScreen() {
   const { colors, radii, spacing } = useAppTheme();
   const {
     user,
+    isEmailVerified,
+    resendVerificationEmail,
+    refreshEmailVerification,
     prefs,
     signOut,
     setAvatarUri,
@@ -210,8 +216,11 @@ export default function SettingsScreen() {
 
   // Change Password Modal States
   const [passwordModalOpen, setPasswordModalOpen] = useState<boolean>(false);
+  const [currentPassword, setCurrentPassword] = useState<string>('');
   const [newPassword, setNewPassword] = useState<string>('');
   const [confirmPassword, setConfirmPassword] = useState<string>('');
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
   const [isUpdatingPassword, setIsUpdatingPassword] = useState<boolean>(false);
 
   // Temperature unit preference bound to UID-scoped session store
@@ -250,6 +259,102 @@ export default function SettingsScreen() {
       await updateAlertPref(key, val);
     } catch (err) {
       console.warn('[settings] Failed to persist alert toggle:', err);
+    }
+  };
+
+  // Email verification state
+  const [resendCooldown, setResendCooldown] = useState<number>(0);
+  const [isResendingEmail, setIsResendingEmail] = useState<boolean>(false);
+  const [isCheckingVerification, setIsCheckingVerification] = useState<boolean>(false);
+  const [verificationFeedback, setVerificationFeedback] = useState<{
+    type: 'success' | 'error' | 'info';
+    message: string;
+  } | null>(null);
+
+  React.useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (resendCooldown > 0) {
+      timer = setTimeout(() => {
+        setResendCooldown((prev) => Math.max(0, prev - 1));
+      }, 1000);
+    }
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [resendCooldown]);
+
+  const handleResendVerification = async () => {
+    if (isResendingEmail || resendCooldown > 0) return;
+    setIsResendingEmail(true);
+    setVerificationFeedback(null);
+    try {
+      await resendVerificationEmail();
+      setResendCooldown(60);
+      setVerificationFeedback({
+        type: 'success',
+        message: 'Verification email sent. Please check your inbox and spam folders.',
+      });
+      Alert.alert(
+        'Verification Email Sent',
+        'We sent a new verification link to your email address. Please click the link to verify your account.'
+      );
+    } catch (err: any) {
+      console.warn('[Settings] Failed to resend verification email:', err);
+      if (err?.code === 'auth/too-many-requests') {
+        setResendCooldown(60);
+        setVerificationFeedback({
+          type: 'error',
+          message: 'Too many requests. Please wait a moment before trying again.',
+        });
+        Alert.alert(
+          'Rate Limited',
+          'Too many verification emails have been requested. Please wait before requesting another.'
+        );
+      } else {
+        const errorMsg = err?.message || 'Failed to send verification email. Please try again later.';
+        setVerificationFeedback({
+          type: 'error',
+          message: errorMsg,
+        });
+        Alert.alert('Unable to Send', errorMsg);
+      }
+    } finally {
+      setIsResendingEmail(false);
+    }
+  };
+
+  const handleCheckVerification = async () => {
+    if (isCheckingVerification) return;
+    setIsCheckingVerification(true);
+    setVerificationFeedback(null);
+    try {
+      const verified = await refreshEmailVerification();
+      if (verified) {
+        setVerificationFeedback({
+          type: 'success',
+          message: 'Your email address is verified!',
+        });
+        Alert.alert('Email Verified', 'Your email address has been successfully verified.');
+      } else {
+        setVerificationFeedback({
+          type: 'info',
+          message: 'Email not verified yet. Please check your inbox and click the verification link.',
+        });
+        Alert.alert(
+          'Not Verified Yet',
+          'We have not detected your verification yet. If you just clicked the link, please wait a few seconds and try again.'
+        );
+      }
+    } catch (err: any) {
+      console.warn('[Settings] Failed to refresh verification status:', err);
+      const errorMsg = 'Failed to check verification status. Please check your connection and try again.';
+      setVerificationFeedback({
+        type: 'error',
+        message: errorMsg,
+      });
+      Alert.alert('Check Failed', errorMsg);
+    } finally {
+      setIsCheckingVerification(false);
     }
   };
 
@@ -337,26 +442,56 @@ export default function SettingsScreen() {
     }
   };
 
+  const handleOpenPasswordModal = () => {
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setPasswordError(null);
+    setPasswordSuccess(null);
+    setPasswordModalOpen(true);
+  };
+
+  const handleClosePasswordModal = () => {
+    if (isUpdatingPassword) return;
+    setPasswordModalOpen(false);
+    setPasswordError(null);
+    setPasswordSuccess(null);
+  };
+
   // Password Update Handler
   const handleSavePassword = async () => {
-    const parseResult = changePasswordSchema.safeParse({ newPassword, confirmPassword });
+    setPasswordError(null);
+    setPasswordSuccess(null);
+
+    const trimmedCurrent = currentPassword.trim();
+    if (!trimmedCurrent) {
+      setPasswordError('Current password is required.');
+      return;
+    }
+
+    const parseResult = changePasswordSchema.safeParse({
+      currentPassword: trimmedCurrent,
+      newPassword,
+      confirmPassword,
+    });
     if (!parseResult.success) {
       const firstError = parseResult.error.issues[0]?.message || 'Please check your passwords.';
-      Alert.alert('Invalid Password', firstError);
+      setPasswordError(firstError);
       return;
     }
 
     try {
       setIsUpdatingPassword(true);
-      await updateUserPassword(newPassword);
+      await updateUserPassword(trimmedCurrent, newPassword);
+      setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
-      setPasswordModalOpen(false);
+      setPasswordSuccess('Your account password has been updated securely.');
       Alert.alert('Password Changed', 'Your account password has been updated securely.');
     } catch (err: any) {
       console.warn('[Settings] Password update error:', err);
-      const friendlyMessage = mapAuthError(err, 'Failed to change password.');
-      Alert.alert('Update Failed', friendlyMessage);
+      const friendlyMessage = mapChangePasswordError(err, 'Failed to change password.');
+      setPasswordError(friendlyMessage);
     } finally {
       setIsUpdatingPassword(false);
     }
@@ -589,11 +724,47 @@ export default function SettingsScreen() {
               </TouchableOpacity>
             </View>
 
-            {/* Email and Quick Avatar Prompt */}
+            {/* Email, Verification Badge, and Quick Avatar Prompt */}
             <View style={styles.profileInfoWrap}>
-              <Text style={[styles.profileEmail, { color: colors.text }]} numberOfLines={1}>
-                {user?.email || 'Plant Parent'}
-              </Text>
+              <View style={styles.profileEmailRow}>
+                <Text style={[styles.profileEmail, { color: colors.text }]} numberOfLines={1}>
+                  {user?.email || 'Plant Parent'}
+                </Text>
+                <View
+                  testID="email-verification-badge"
+                  style={[
+                    styles.verificationBadge,
+                    {
+                      backgroundColor: isEmailVerified
+                        ? `${colors.palette.forest}15`
+                        : `${colors.palette.warningText}15`,
+                      borderColor: isEmailVerified
+                        ? `${colors.palette.forest}40`
+                        : `${colors.palette.warningBorder}40`,
+                    },
+                  ]}
+                  accessibilityRole="text"
+                  accessibilityLabel={`Email status: ${isEmailVerified ? 'Verified' : 'Unverified'}`}
+                >
+                  <Ionicons
+                    name={isEmailVerified ? 'checkmark-circle' : 'alert-circle-outline'}
+                    size={11}
+                    color={isEmailVerified ? colors.palette.forest : colors.palette.warningText}
+                  />
+                  <Text
+                    style={[
+                      styles.verificationBadgeText,
+                      {
+                        color: isEmailVerified
+                          ? colors.palette.forest
+                          : colors.palette.warningText,
+                      },
+                    ]}
+                  >
+                    {isEmailVerified ? 'Verified' : 'Unverified'}
+                  </Text>
+                </View>
+              </View>
               <TouchableOpacity onPress={handlePickAvatar} style={styles.changePhotoBtn}>
                 <Ionicons name="image-outline" size={14} color={colors.palette.forest} />
                 <Text style={[styles.changePhotoText, { color: colors.palette.forest }]}>
@@ -602,6 +773,127 @@ export default function SettingsScreen() {
               </TouchableOpacity>
             </View>
           </View>
+
+          {/* Email Verification Action Callout (shown when unverified) */}
+          {!isEmailVerified && (
+            <View
+              testID="email-verification-callout"
+              style={[
+                styles.unverifiedBanner,
+                {
+                  backgroundColor: colors.palette.blush,
+                  borderColor: colors.palette.warningBorder,
+                  borderRadius: radii.sm,
+                },
+              ]}
+            >
+              <View style={styles.unverifiedBannerHeader}>
+                <Ionicons
+                  name="shield-outline"
+                  size={15}
+                  color={colors.palette.warningText}
+                />
+                <Text style={[styles.unverifiedBannerTitle, { color: colors.palette.warningText }]}>
+                  Email not verified
+                </Text>
+              </View>
+              <Text style={[styles.unverifiedBannerText, { color: colors.palette.warningText }]}>
+                Verify your email to secure your account and recover device settings if needed.
+              </Text>
+
+              {verificationFeedback && (
+                <View style={styles.verificationFeedbackRow}>
+                  <Ionicons
+                    name={
+                      verificationFeedback.type === 'success'
+                        ? 'checkmark-circle-outline'
+                        : verificationFeedback.type === 'error'
+                        ? 'alert-circle-outline'
+                        : 'information-circle-outline'
+                    }
+                    size={13}
+                    color={
+                      verificationFeedback.type === 'success'
+                        ? colors.palette.forest
+                        : colors.palette.warningText
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.verificationFeedbackText,
+                      {
+                        color:
+                          verificationFeedback.type === 'success'
+                            ? colors.palette.forest
+                            : colors.palette.warningText,
+                      },
+                    ]}
+                  >
+                    {verificationFeedback.message}
+                  </Text>
+                </View>
+              )}
+
+              <View style={styles.verificationButtonsRow}>
+                <TouchableOpacity
+                  testID="resend-verification-email-btn"
+                  accessibilityRole="button"
+                  accessibilityLabel="Resend verification email"
+                  onPress={handleResendVerification}
+                  disabled={isResendingEmail || resendCooldown > 0}
+                  style={[
+                    styles.resendBtn,
+                    {
+                      backgroundColor: colors.palette.forest,
+                      borderRadius: radii.sm,
+                      opacity: isResendingEmail || resendCooldown > 0 ? 0.6 : 1,
+                    },
+                  ]}
+                >
+                  {isResendingEmail ? (
+                    <ActivityIndicator size="small" color={colors.palette.white} />
+                  ) : (
+                    <>
+                      <Ionicons name="mail-outline" size={13} color={colors.palette.white} />
+                      <Text style={[styles.resendBtnText, { color: colors.palette.white }]}>
+                        {resendCooldown > 0
+                          ? `Resend in ${resendCooldown}s`
+                          : 'Resend verification email'}
+                      </Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  testID="check-verification-status-btn"
+                  accessibilityRole="button"
+                  accessibilityLabel="Check verification status"
+                  onPress={handleCheckVerification}
+                  disabled={isCheckingVerification}
+                  style={[
+                    styles.checkStatusBtn,
+                    {
+                      borderColor: colors.palette.forest,
+                      backgroundColor: colors.surface,
+                      borderRadius: radii.sm,
+                      opacity: isCheckingVerification ? 0.6 : 1,
+                    },
+                  ]}
+                >
+                  {isCheckingVerification ? (
+                    <ActivityIndicator size="small" color={colors.palette.forest} />
+                  ) : (
+                    <>
+                      <Ionicons name="refresh-outline" size={13} color={colors.palette.forest} />
+                      <Text style={[styles.checkStatusBtnText, { color: colors.palette.forest }]}>
+                        Check verification status
+                      </Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
 
           <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
@@ -650,7 +942,7 @@ export default function SettingsScreen() {
 
           {/* Change Password Trigger */}
           <TouchableOpacity
-            onPress={() => setPasswordModalOpen(true)}
+            onPress={handleOpenPasswordModal}
             style={[
               styles.passwordRowBtn,
               { backgroundColor: colors.palette.mist, borderRadius: radii.sm },
@@ -1530,7 +1822,7 @@ export default function SettingsScreen() {
 
                 {/* Change Password Button */}
                 <TouchableOpacity
-                  onPress={() => setPasswordModalOpen(true)}
+                  onPress={handleOpenPasswordModal}
                   style={[
                     styles.actionBtnOutlineFull,
                     { borderColor: colors.palette.forest, borderRadius: radii.sm, marginTop: 4 },
@@ -1663,7 +1955,7 @@ export default function SettingsScreen() {
         visible={passwordModalOpen}
         animationType="slide"
         transparent
-        onRequestClose={() => setPasswordModalOpen(false)}
+        onRequestClose={handleClosePasswordModal}
       >
         <View style={styles.modalBackdrop}>
           <View
@@ -1680,29 +1972,103 @@ export default function SettingsScreen() {
                 </Text>
               </View>
               <TouchableOpacity
-                onPress={() => setPasswordModalOpen(false)}
+                onPress={handleClosePasswordModal}
+                disabled={isUpdatingPassword}
                 style={[styles.closeModalBtn, { backgroundColor: colors.palette.mist }]}
+                accessibilityLabel="Close update password modal"
               >
                 <Ionicons name="close" size={20} color={colors.text} />
               </TouchableOpacity>
             </View>
 
             <Text style={[styles.modalHeaderSubtitle, { color: colors.textMuted }]}>
-              Enter a new secure password of at least 6 characters.
+              Enter your current password and a new secure password of at least 6 characters.
             </Text>
 
+            {passwordError ? (
+              <View
+                style={[
+                  styles.errorBanner,
+                  {
+                    backgroundColor: colors.palette.blush,
+                    borderRadius: radii.sm,
+                    borderColor: colors.palette.warningBorder,
+                  },
+                ]}
+              >
+                <Ionicons name="alert-circle" size={18} color={colors.palette.warningText} />
+                <Text style={[styles.errorBannerText, { color: colors.palette.warningText }]}>
+                  {passwordError}
+                </Text>
+              </View>
+            ) : null}
+
+            {passwordSuccess ? (
+              <View
+                style={[
+                  styles.successBanner,
+                  {
+                    backgroundColor: '#E8F5E9',
+                    borderRadius: radii.sm,
+                    borderColor: '#81C784',
+                  },
+                ]}
+              >
+                <Ionicons name="checkmark-circle" size={18} color="#2E7D32" />
+                <Text style={[styles.successBannerText, { color: '#2E7D32' }]}>
+                  {passwordSuccess}
+                </Text>
+              </View>
+            ) : null}
+
             <View style={{ marginTop: 14 }}>
-              <Text style={[styles.inputLabel, { color: colors.textMuted }]}>New Password</Text>
+              <Text style={[styles.inputLabel, { color: colors.textMuted }]}>
+                Current Password
+              </Text>
+              <TextInput
+                value={currentPassword}
+                onChangeText={(val) => {
+                  setCurrentPassword(val);
+                  if (passwordError) setPasswordError(null);
+                  if (passwordSuccess) setPasswordSuccess(null);
+                }}
+                placeholder="Enter current password"
+                placeholderTextColor={colors.palette.sage}
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+                autoComplete="current-password"
+                textContentType="password"
+                editable={!isUpdatingPassword}
+                style={[
+                  styles.modalTextInput,
+                  {
+                    backgroundColor: colors.palette.mist,
+                    borderColor: colors.border,
+                    color: colors.text,
+                    borderRadius: radii.sm,
+                  },
+                ]}
+              />
+
+              <Text style={[styles.inputLabel, { color: colors.textMuted, marginTop: 12 }]}>
+                New Password
+              </Text>
               <TextInput
                 value={newPassword}
-                onChangeText={setNewPassword}
-                placeholder="Enter new password"
+                onChangeText={(val) => {
+                  setNewPassword(val);
+                  if (passwordError) setPasswordError(null);
+                  if (passwordSuccess) setPasswordSuccess(null);
+                }}
+                placeholder="Enter new password (min. 6 characters)"
                 placeholderTextColor={colors.palette.sage}
                 secureTextEntry
                 autoCapitalize="none"
                 autoCorrect={false}
                 autoComplete="new-password"
                 textContentType="newPassword"
+                editable={!isUpdatingPassword}
                 style={[
                   styles.modalTextInput,
                   {
@@ -1719,7 +2085,11 @@ export default function SettingsScreen() {
               </Text>
               <TextInput
                 value={confirmPassword}
-                onChangeText={setConfirmPassword}
+                onChangeText={(val) => {
+                  setConfirmPassword(val);
+                  if (passwordError) setPasswordError(null);
+                  if (passwordSuccess) setPasswordSuccess(null);
+                }}
                 placeholder="Re-type new password"
                 placeholderTextColor={colors.palette.sage}
                 secureTextEntry
@@ -1727,6 +2097,7 @@ export default function SettingsScreen() {
                 autoCorrect={false}
                 autoComplete="new-password"
                 textContentType="newPassword"
+                editable={!isUpdatingPassword}
                 style={[
                   styles.modalTextInput,
                   {
@@ -2088,6 +2459,86 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: -0.2,
   },
+  profileEmailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  verificationBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  verificationBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  unverifiedBanner: {
+    marginTop: 12,
+    padding: 12,
+    borderWidth: 1,
+  },
+  unverifiedBannerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+  },
+  unverifiedBannerTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  unverifiedBannerText: {
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 10,
+  },
+  verificationFeedbackRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginBottom: 8,
+  },
+  verificationFeedbackText: {
+    fontSize: 12,
+    fontWeight: '600',
+    flex: 1,
+  },
+  verificationButtonsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  resendBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  resendBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  checkStatusBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+  },
+  checkStatusBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
   changePhotoBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2225,6 +2676,34 @@ const styles = StyleSheet.create({
   passwordModalSheet: {
     padding: 20,
     paddingBottom: 36,
+  },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderWidth: 1,
+    marginTop: 10,
+    marginBottom: 8,
+    gap: 8,
+  },
+  errorBannerText: {
+    fontSize: 13,
+    fontWeight: '500',
+    flex: 1,
+  },
+  successBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderWidth: 1,
+    marginTop: 10,
+    marginBottom: 8,
+    gap: 8,
+  },
+  successBannerText: {
+    fontSize: 13,
+    fontWeight: '500',
+    flex: 1,
   },
   modalTextInput: {
     borderWidth: 1,

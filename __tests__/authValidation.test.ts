@@ -5,6 +5,11 @@ import {
   loginSchema,
   registerSchema,
   changePasswordSchema,
+  changePasswordWithCurrentSchema,
+  mapChangePasswordError,
+  forgotPasswordSchema,
+  mapPasswordResetError,
+  PASSWORD_RESET_CONFIRMATION_MESSAGE,
 } from '../src/utils/authValidation';
 
 describe('authValidation', () => {
@@ -194,6 +199,94 @@ describe('authValidation', () => {
         confirmPassword: 'newpassword123',
       });
       expect(pass.success).toBe(true);
+    });
+
+    it('changePasswordWithCurrentSchema requires current password, minimum length, and matching passwords', () => {
+      const missingCurrent = changePasswordWithCurrentSchema.safeParse({
+        currentPassword: '',
+        newPassword: 'newpassword123',
+        confirmPassword: 'newpassword123',
+      });
+      expect(missingCurrent.success).toBe(false);
+      if (!missingCurrent.success) {
+        expect(missingCurrent.error.issues[0].message).toBe('Current password is required');
+      }
+
+      const invalidLength = changePasswordWithCurrentSchema.safeParse({
+        currentPassword: 'oldpassword123',
+        newPassword: 'short',
+        confirmPassword: 'short',
+      });
+      expect(invalidLength.success).toBe(false);
+
+      const valid = changePasswordWithCurrentSchema.safeParse({
+        currentPassword: 'oldpassword123',
+        newPassword: 'newpassword123',
+        confirmPassword: 'newpassword123',
+      });
+      expect(valid.success).toBe(true);
+    });
+
+    it('forgotPasswordSchema validates email input correctly', () => {
+      const emptyEmail = forgotPasswordSchema.safeParse({ email: '' });
+      expect(emptyEmail.success).toBe(false);
+
+      const invalidEmail = forgotPasswordSchema.safeParse({ email: 'not-an-email' });
+      expect(invalidEmail.success).toBe(false);
+
+      const validEmail = forgotPasswordSchema.safeParse({ email: 'gardener@leaflink.com' });
+      expect(validEmail.success).toBe(true);
+    });
+  });
+
+  describe('mapChangePasswordError', () => {
+    it('maps wrong-password and invalid-credential to "Current password is incorrect."', () => {
+      expect(mapChangePasswordError({ code: 'auth/wrong-password' })).toBe(
+        'Current password is incorrect.'
+      );
+      expect(mapChangePasswordError({ code: 'auth/invalid-credential' })).toBe(
+        'Current password is incorrect.'
+      );
+      expect(mapChangePasswordError({ code: 'auth/invalid-login-credentials' })).toBe(
+        'Current password is incorrect.'
+      );
+    });
+
+    it('maps requires-recent-login gracefully', () => {
+      expect(mapChangePasswordError({ code: 'auth/requires-recent-login' })).toBe(
+        'For security reasons, please log out and sign back in before modifying your password.'
+      );
+    });
+
+    it('falls back to default or general auth error message for other codes', () => {
+      expect(mapChangePasswordError({ code: 'auth/weak-password' })).toBe(
+        'Password is too weak. Please use at least 6 characters.'
+      );
+      expect(mapChangePasswordError(new Error('Random error'), 'Failed to change password.')).toBe(
+        'Random error'
+      );
+    });
+  });
+
+  describe('mapPasswordResetError', () => {
+    it('returns non-enumerating confirmation message for auth/user-not-found', () => {
+      const res = mapPasswordResetError({ code: 'auth/user-not-found' });
+      expect(res).toBe(PASSWORD_RESET_CONFIRMATION_MESSAGE);
+      expect(res).toBe(
+        'If an account exists for that email, a password reset link has been sent.'
+      );
+    });
+
+    it('maps invalid email, network failures, and rate limits correctly', () => {
+      expect(mapPasswordResetError({ code: 'auth/invalid-email' })).toBe(
+        'Please enter a valid email address.'
+      );
+      expect(mapPasswordResetError({ code: 'auth/network-request-failed' })).toBe(
+        'Network error. Please check your internet connection and try again.'
+      );
+      expect(mapPasswordResetError({ code: 'auth/too-many-requests' })).toBe(
+        'Too many unsuccessful attempts. Please try again later.'
+      );
     });
   });
 });
