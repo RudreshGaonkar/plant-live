@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "leaflink-otp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "kv_namespaces": [
+    {
+      "binding": "OTP_KV",
+      "id": "ea598afa44bc47769cf98f83597e3570"
+    }
+  ],
+  "vars": {
+    "FIREBASE_PROJECT_ID": "leaflink-7c669"
+  }
+}

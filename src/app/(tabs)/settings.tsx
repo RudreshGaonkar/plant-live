@@ -28,9 +28,19 @@ import {
   get as fbGet,
   remove,
 } from 'firebase/database';
-import { deleteUser } from 'firebase/auth';
+import {
+  deleteUser,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
+  updatePassword,
+} from 'firebase/auth';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { auth, db } from '@/services/firebase';
+import {
+  isOtpWorkerConfigured,
+  sendEmailOtp,
+  verifyEmailOtp,
+} from '@/services/emailOtp';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice, DeviceConfig } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
@@ -71,7 +81,6 @@ export default function SettingsScreen() {
     setAvatarUri,
     updateUserDisplayName,
     retrySyncProfileToRTDB,
-    updateUserPassword,
     updateTempUnit,
     toggleQuietHours,
     updateAlertPref,
@@ -222,6 +231,23 @@ export default function SettingsScreen() {
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
   const [isUpdatingPassword, setIsUpdatingPassword] = useState<boolean>(false);
+  const [otpStep, setOtpStep] = useState<'passwords' | 'otp'>('passwords');
+  const [otpCode, setOtpCode] = useState<string>('');
+  const [otpCooldown, setOtpCooldown] = useState<number>(0);
+  const [isSendingOtp, setIsSendingOtp] = useState<boolean>(false);
+  const [isVerifyingOtp, setIsVerifyingOtp] = useState<boolean>(false);
+
+  React.useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (otpCooldown > 0) {
+      timer = setTimeout(() => {
+        setOtpCooldown((prev) => Math.max(0, prev - 1));
+      }, 1000);
+    }
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [otpCooldown]);
 
   // Temperature unit preference bound to UID-scoped session store
   const tempUnit = prefs.units;
@@ -443,17 +469,39 @@ export default function SettingsScreen() {
   };
 
   const handleOpenPasswordModal = () => {
+    const isOtpActive = isOtpWorkerConfigured();
+    if (isOtpActive && !isEmailVerified) {
+      Alert.alert(
+        'Email Verification Required',
+        'Your email address must be verified before changing your password with two-factor email verification. Please verify your email first.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Verify Email',
+            onPress: () => {
+              handleCheckVerification();
+            },
+          },
+        ]
+      );
+      return;
+    }
+
     setCurrentPassword('');
     setNewPassword('');
     setConfirmPassword('');
+    setOtpCode('');
+    setOtpStep('passwords');
     setPasswordError(null);
     setPasswordSuccess(null);
     setPasswordModalOpen(true);
   };
 
   const handleClosePasswordModal = () => {
-    if (isUpdatingPassword) return;
+    if (isUpdatingPassword || isSendingOtp || isVerifyingOtp) return;
     setPasswordModalOpen(false);
+    setOtpStep('passwords');
+    setOtpCode('');
     setPasswordError(null);
     setPasswordSuccess(null);
   };
@@ -462,6 +510,12 @@ export default function SettingsScreen() {
   const handleSavePassword = async () => {
     setPasswordError(null);
     setPasswordSuccess(null);
+
+    const isOtpActive = isOtpWorkerConfigured();
+    if (isOtpActive && !isEmailVerified) {
+      setPasswordError('Please verify your email address before changing your password.');
+      return;
+    }
 
     const trimmedCurrent = currentPassword.trim();
     if (!trimmedCurrent) {
@@ -482,7 +536,37 @@ export default function SettingsScreen() {
 
     try {
       setIsUpdatingPassword(true);
-      await updateUserPassword(trimmedCurrent, newPassword);
+      const currentUser = auth.currentUser;
+      if (!currentUser || !currentUser.email) {
+        throw new Error('No authenticated user session found');
+      }
+
+      // 1. Re-authenticate with current password
+      const credential = EmailAuthProvider.credential(currentUser.email, trimmedCurrent);
+      await reauthenticateWithCredential(currentUser, credential);
+
+      // 2. If OTP worker is configured, request OTP and transition modal to OTP input
+      if (isOtpActive) {
+        setIsSendingOtp(true);
+        try {
+          await sendEmailOtp();
+          setOtpStep('otp');
+          setOtpCooldown(60);
+          setPasswordSuccess('A 6-digit verification code has been sent to your email.');
+        } catch (otpErr: any) {
+          const msg = otpErr?.message || 'Failed to send verification code. Please try again.';
+          setPasswordError(msg);
+          if (otpErr?.retryAfter) {
+            setOtpCooldown(otpErr.retryAfter);
+          }
+        } finally {
+          setIsSendingOtp(false);
+        }
+        return;
+      }
+
+      // If EXPO_PUBLIC_OTP_WORKER_URL is unset, gracefully complete updatePassword directly
+      await updatePassword(currentUser, newPassword);
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
@@ -494,6 +578,62 @@ export default function SettingsScreen() {
       setPasswordError(friendlyMessage);
     } finally {
       setIsUpdatingPassword(false);
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (otpCooldown > 0 || isSendingOtp) return;
+    setPasswordError(null);
+    setPasswordSuccess(null);
+    try {
+      setIsSendingOtp(true);
+      await sendEmailOtp();
+      setOtpCooldown(60);
+      setPasswordSuccess('A new verification code has been sent to your email.');
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to resend code.';
+      setPasswordError(msg);
+      if (err?.retryAfter) {
+        setOtpCooldown(err.retryAfter);
+      }
+    } finally {
+      setIsSendingOtp(false);
+    }
+  };
+
+  const handleVerifyOtpAndChangePassword = async () => {
+    setPasswordError(null);
+    setPasswordSuccess(null);
+
+    const trimmedCode = otpCode.trim();
+    if (!trimmedCode || !/^\d{6}$/.test(trimmedCode)) {
+      setPasswordError('Please enter a valid 6-digit verification code.');
+      return;
+    }
+
+    try {
+      setIsVerifyingOtp(true);
+      await verifyEmailOtp(trimmedCode);
+
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        throw new Error('No authenticated user session found');
+      }
+      await updatePassword(currentUser, newPassword);
+
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setOtpCode('');
+      setOtpStep('passwords');
+      setPasswordSuccess('Your account password has been updated securely.');
+      Alert.alert('Password Changed', 'Your account password has been updated securely.');
+    } catch (err: any) {
+      console.warn('[Settings] OTP verification error:', err);
+      const msg = err?.message || 'Verification failed. Please try again.';
+      setPasswordError(msg);
+    } finally {
+      setIsVerifyingOtp(false);
     }
   };
 
@@ -1966,14 +2106,18 @@ export default function SettingsScreen() {
           >
             <View style={styles.modalHeaderRow}>
               <View style={styles.rowCentered}>
-                <Ionicons name="lock-closed" size={20} color={colors.palette.forest} />
+                <Ionicons
+                  name={otpStep === 'otp' ? 'shield-checkmark' : 'lock-closed'}
+                  size={20}
+                  color={colors.palette.forest}
+                />
                 <Text style={[styles.modalHeaderTitle, { color: colors.text }]}>
-                  Update Password
+                  {otpStep === 'otp' ? 'Verify Security Code' : 'Update Password'}
                 </Text>
               </View>
               <TouchableOpacity
                 onPress={handleClosePasswordModal}
-                disabled={isUpdatingPassword}
+                disabled={isUpdatingPassword || isSendingOtp || isVerifyingOtp}
                 style={[styles.closeModalBtn, { backgroundColor: colors.palette.mist }]}
                 accessibilityLabel="Close update password modal"
               >
@@ -1982,8 +2126,28 @@ export default function SettingsScreen() {
             </View>
 
             <Text style={[styles.modalHeaderSubtitle, { color: colors.textMuted }]}>
-              Enter your current password and a new secure password of at least 6 characters.
+              {otpStep === 'otp'
+                ? 'Enter the 6-digit verification code sent to your registered email address to finalize your password update.'
+                : 'Enter your current password and a new secure password of at least 6 characters.'}
             </Text>
+
+            {isOtpWorkerConfigured() && !isEmailVerified ? (
+              <View
+                style={[
+                  styles.errorBanner,
+                  {
+                    backgroundColor: colors.palette.blush,
+                    borderRadius: radii.sm,
+                    borderColor: colors.palette.warningBorder,
+                  },
+                ]}
+              >
+                <Ionicons name="alert-circle" size={18} color={colors.palette.warningText} />
+                <Text style={[styles.errorBannerText, { color: colors.palette.warningText }]}>
+                  Email verification is required before changing password.
+                </Text>
+              </View>
+            ) : null}
 
             {passwordError ? (
               <View
@@ -2021,111 +2185,208 @@ export default function SettingsScreen() {
               </View>
             ) : null}
 
-            <View style={{ marginTop: 14 }}>
-              <Text style={[styles.inputLabel, { color: colors.textMuted }]}>
-                Current Password
-              </Text>
-              <TextInput
-                value={currentPassword}
-                onChangeText={(val) => {
-                  setCurrentPassword(val);
-                  if (passwordError) setPasswordError(null);
-                  if (passwordSuccess) setPasswordSuccess(null);
-                }}
-                placeholder="Enter current password"
-                placeholderTextColor={colors.palette.sage}
-                secureTextEntry
-                autoCapitalize="none"
-                autoCorrect={false}
-                autoComplete="current-password"
-                textContentType="password"
-                editable={!isUpdatingPassword}
-                style={[
-                  styles.modalTextInput,
-                  {
-                    backgroundColor: colors.palette.mist,
-                    borderColor: colors.border,
-                    color: colors.text,
-                    borderRadius: radii.sm,
-                  },
-                ]}
-              />
+            {otpStep === 'passwords' ? (
+              <View style={{ marginTop: 14 }}>
+                <Text style={[styles.inputLabel, { color: colors.textMuted }]}>
+                  Current Password
+                </Text>
+                <TextInput
+                  value={currentPassword}
+                  onChangeText={(val) => {
+                    setCurrentPassword(val);
+                    if (passwordError) setPasswordError(null);
+                    if (passwordSuccess) setPasswordSuccess(null);
+                  }}
+                  placeholder="Enter current password"
+                  placeholderTextColor={colors.palette.sage}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  autoComplete="current-password"
+                  textContentType="password"
+                  editable={!isUpdatingPassword && !isSendingOtp}
+                  style={[
+                    styles.modalTextInput,
+                    {
+                      backgroundColor: colors.palette.mist,
+                      borderColor: colors.border,
+                      color: colors.text,
+                      borderRadius: radii.sm,
+                    },
+                  ]}
+                />
 
-              <Text style={[styles.inputLabel, { color: colors.textMuted, marginTop: 12 }]}>
-                New Password
-              </Text>
-              <TextInput
-                value={newPassword}
-                onChangeText={(val) => {
-                  setNewPassword(val);
-                  if (passwordError) setPasswordError(null);
-                  if (passwordSuccess) setPasswordSuccess(null);
-                }}
-                placeholder="Enter new password (min. 6 characters)"
-                placeholderTextColor={colors.palette.sage}
-                secureTextEntry
-                autoCapitalize="none"
-                autoCorrect={false}
-                autoComplete="new-password"
-                textContentType="newPassword"
-                editable={!isUpdatingPassword}
-                style={[
-                  styles.modalTextInput,
-                  {
-                    backgroundColor: colors.palette.mist,
-                    borderColor: colors.border,
-                    color: colors.text,
-                    borderRadius: radii.sm,
-                  },
-                ]}
-              />
+                <Text style={[styles.inputLabel, { color: colors.textMuted, marginTop: 12 }]}>
+                  New Password
+                </Text>
+                <TextInput
+                  value={newPassword}
+                  onChangeText={(val) => {
+                    setNewPassword(val);
+                    if (passwordError) setPasswordError(null);
+                    if (passwordSuccess) setPasswordSuccess(null);
+                  }}
+                  placeholder="Enter new password (min. 6 characters)"
+                  placeholderTextColor={colors.palette.sage}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  autoComplete="new-password"
+                  textContentType="newPassword"
+                  editable={!isUpdatingPassword && !isSendingOtp}
+                  style={[
+                    styles.modalTextInput,
+                    {
+                      backgroundColor: colors.palette.mist,
+                      borderColor: colors.border,
+                      color: colors.text,
+                      borderRadius: radii.sm,
+                    },
+                  ]}
+                />
 
-              <Text style={[styles.inputLabel, { color: colors.textMuted, marginTop: 12 }]}>
-                Confirm New Password
-              </Text>
-              <TextInput
-                value={confirmPassword}
-                onChangeText={(val) => {
-                  setConfirmPassword(val);
-                  if (passwordError) setPasswordError(null);
-                  if (passwordSuccess) setPasswordSuccess(null);
-                }}
-                placeholder="Re-type new password"
-                placeholderTextColor={colors.palette.sage}
-                secureTextEntry
-                autoCapitalize="none"
-                autoCorrect={false}
-                autoComplete="new-password"
-                textContentType="newPassword"
-                editable={!isUpdatingPassword}
-                style={[
-                  styles.modalTextInput,
-                  {
-                    backgroundColor: colors.palette.mist,
-                    borderColor: colors.border,
-                    color: colors.text,
-                    borderRadius: radii.sm,
-                  },
-                ]}
-              />
+                <Text style={[styles.inputLabel, { color: colors.textMuted, marginTop: 12 }]}>
+                  Confirm New Password
+                </Text>
+                <TextInput
+                  value={confirmPassword}
+                  onChangeText={(val) => {
+                    setConfirmPassword(val);
+                    if (passwordError) setPasswordError(null);
+                    if (passwordSuccess) setPasswordSuccess(null);
+                  }}
+                  placeholder="Re-type new password"
+                  placeholderTextColor={colors.palette.sage}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  autoComplete="new-password"
+                  textContentType="newPassword"
+                  editable={!isUpdatingPassword && !isSendingOtp}
+                  style={[
+                    styles.modalTextInput,
+                    {
+                      backgroundColor: colors.palette.mist,
+                      borderColor: colors.border,
+                      color: colors.text,
+                      borderRadius: radii.sm,
+                    },
+                  ]}
+                />
 
-              <TouchableOpacity
-                onPress={handleSavePassword}
-                disabled={isUpdatingPassword}
-                style={[
-                  styles.savePasswordBtn,
-                  { backgroundColor: colors.palette.forest, borderRadius: radii.md },
-                ]}
-              >
-                {isUpdatingPassword ? (
-                  <ActivityIndicator size="small" color={colors.palette.white} />
-                ) : (
-                  <Text style={[styles.savePasswordBtnText, { color: colors.palette.white }]}>
-                    Save New Password
-                  </Text>
-                )}
-              </TouchableOpacity>
-            </View>
+                <TouchableOpacity
+                  onPress={handleSavePassword}
+                  disabled={isUpdatingPassword || isSendingOtp}
+                  style={[
+                    styles.savePasswordBtn,
+                    { backgroundColor: colors.palette.forest, borderRadius: radii.md },
+                  ]}
+                >
+                  {isUpdatingPassword || isSendingOtp ? (
+                    <ActivityIndicator size="small" color={colors.palette.white} />
+                  ) : (
+                    <Text style={[styles.savePasswordBtnText, { color: colors.palette.white }]}>
+                      {isOtpWorkerConfigured() ? 'Verify & Continue' : 'Save New Password'}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={{ marginTop: 14 }}>
+                <Text style={[styles.inputLabel, { color: colors.textMuted }]}>
+                  6-Digit Verification Code
+                </Text>
+                <TextInput
+                  value={otpCode}
+                  onChangeText={(val) => {
+                    setOtpCode(val.replace(/\D/g, '').slice(0, 6));
+                    if (passwordError) setPasswordError(null);
+                    if (passwordSuccess) setPasswordSuccess(null);
+                  }}
+                  placeholder="000000"
+                  placeholderTextColor={colors.palette.sage}
+                  keyboardType="number-pad"
+                  maxLength={6}
+                  textContentType="oneTimeCode"
+                  autoFocus
+                  editable={!isVerifyingOtp}
+                  style={[
+                    styles.modalTextInput,
+                    styles.otpInput,
+                    {
+                      backgroundColor: colors.palette.mist,
+                      borderColor: colors.border,
+                      color: colors.text,
+                      borderRadius: radii.sm,
+                    },
+                  ]}
+                />
+
+                <View style={styles.otpResendRow}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setOtpStep('passwords');
+                      setPasswordError(null);
+                      setPasswordSuccess(null);
+                    }}
+                    disabled={isVerifyingOtp || isSendingOtp}
+                    style={styles.otpBackBtn}
+                  >
+                    <Ionicons name="arrow-back" size={16} color={colors.palette.forest} />
+                    <Text style={[styles.otpBackText, { color: colors.palette.forest }]}>
+                      Edit Passwords
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    onPress={handleResendOtp}
+                    disabled={otpCooldown > 0 || isSendingOtp || isVerifyingOtp}
+                    style={styles.otpResendBtn}
+                  >
+                    {isSendingOtp ? (
+                      <ActivityIndicator size="small" color={colors.palette.forest} />
+                    ) : (
+                      <Text
+                        style={[
+                          styles.otpResendText,
+                          {
+                            color:
+                              otpCooldown > 0
+                                ? colors.textMuted
+                                : colors.palette.forest,
+                          },
+                        ]}
+                      >
+                        {otpCooldown > 0 ? `Resend in ${otpCooldown}s` : 'Resend Code'}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+
+                <TouchableOpacity
+                  onPress={handleVerifyOtpAndChangePassword}
+                  disabled={isVerifyingOtp || otpCode.trim().length !== 6}
+                  style={[
+                    styles.savePasswordBtn,
+                    {
+                      backgroundColor:
+                        otpCode.trim().length === 6 && !isVerifyingOtp
+                          ? colors.palette.forest
+                          : colors.palette.sage,
+                      borderRadius: radii.md,
+                    },
+                  ]}
+                >
+                  {isVerifyingOtp ? (
+                    <ActivityIndicator size="small" color={colors.palette.white} />
+                  ) : (
+                    <Text style={[styles.savePasswordBtnText, { color: colors.palette.white }]}>
+                      Verify & Update Password
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
         </View>
       </Modal>
@@ -2721,6 +2982,37 @@ const styles = StyleSheet.create({
   savePasswordBtnText: {
     fontSize: 14,
     fontWeight: '700',
+  },
+  otpInput: {
+    letterSpacing: 8,
+    fontSize: 22,
+    fontWeight: '700',
+    textAlign: 'center',
+    paddingVertical: 12,
+  },
+  otpResendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 12,
+  },
+  otpBackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  otpBackText: {
+    fontSize: 13,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  otpResendBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+  },
+  otpResendText: {
+    fontSize: 13,
+    fontWeight: '600',
   },
   calibrationModalSheet: {
     margin: 16,

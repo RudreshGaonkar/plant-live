@@ -49,5 +49,6 @@ spec.md
 *.apk
 uiLayout.md
 *.txt
+secrets.txt
 .recall_scratchpad.md
 .remem_context_feed.md
