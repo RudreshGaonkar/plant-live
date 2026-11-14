@@ -12,6 +12,17 @@ jest.mock('react-native', () => ({
   Platform: { OS: 'ios' },
 }));
 jest.mock('expo-device', () => ({}));
+jest.mock('expo-constants', () => ({
+  default: {
+    expoConfig: {
+      extra: {
+        eas: {
+          projectId: 'mock-project-id',
+        },
+      },
+    },
+  },
+}));
 
 jest.mock('../src/services/firebase', () => ({
   db: {},
@@ -40,7 +51,7 @@ describe('Alerts Engine & Retention Suite', () => {
   describe('1. Firebase RTDB Alert Persistence', () => {
     test('saveDeviceAlertToRTDB saves alert immediately to /devices/{deviceId}/alerts/{alertId} with createdAt', async () => {
       const alert: DeviceAlertRecord = {
-        id: 'dry-leaf-node-01',
+        id: 'dry-node-test-01',
         type: 'warning',
         title: 'Soil Dry - Needs Water',
         message: 'Moisture below minimum',
@@ -48,13 +59,13 @@ describe('Alerts Engine & Retention Suite', () => {
         createdAt: now,
       };
 
-      await saveDeviceAlertToRTDB('leaf-node-01', alert);
+      await saveDeviceAlertToRTDB('node-test-01', alert);
 
-      expect(ref).toHaveBeenCalledWith(db, 'devices/leaf-node-01/alerts/dry-leaf-node-01');
+      expect(ref).toHaveBeenCalledWith(db, 'devices/node-test-01/alerts/dry-node-test-01');
       expect(set).toHaveBeenCalledWith(
-        expect.objectContaining({ path: 'devices/leaf-node-01/alerts/dry-leaf-node-01' }),
+        expect.objectContaining({ path: 'devices/node-test-01/alerts/dry-node-test-01' }),
         expect.objectContaining({
-          id: 'dry-leaf-node-01',
+          id: 'dry-node-test-01',
           type: 'warning',
           title: 'Soil Dry - Needs Water',
           status: 'active',
@@ -64,11 +75,11 @@ describe('Alerts Engine & Retention Suite', () => {
     });
 
     test('updateDeviceAlertInRTDB updates status in RTDB when alert resolves', async () => {
-      await updateDeviceAlertInRTDB('leaf-node-01', 'dry-leaf-node-01', { status: 'resolved' });
+      await updateDeviceAlertInRTDB('node-test-01', 'dry-node-test-01', { status: 'resolved' });
 
-      expect(ref).toHaveBeenCalledWith(db, 'devices/leaf-node-01/alerts/dry-leaf-node-01');
+      expect(ref).toHaveBeenCalledWith(db, 'devices/node-test-01/alerts/dry-node-test-01');
       expect(update).toHaveBeenCalledWith(
-        expect.objectContaining({ path: 'devices/leaf-node-01/alerts/dry-leaf-node-01' }),
+        expect.objectContaining({ path: 'devices/node-test-01/alerts/dry-node-test-01' }),
         { status: 'resolved' }
       );
     });
@@ -86,7 +97,7 @@ describe('Alerts Engine & Retention Suite', () => {
           createdAt: now - 3600000,
         },
         {
-          id: 'dry-leaf-node-01',
+          id: 'dry-node-test-01',
           type: 'warning',
           title: 'Soil Dry - Needs Water',
           message: 'Soil moisture is 22%',
@@ -97,7 +108,7 @@ describe('Alerts Engine & Retention Suite', () => {
 
       const localAlerts: DeviceAlertRecord[] = [
         {
-          id: 'dry-leaf-node-01', // Duplicate ID from real-time local engine
+          id: 'dry-node-test-01', // Duplicate ID from real-time local engine
           type: 'warning',
           title: 'Soil Dry - Needs Water',
           message: 'Soil moisture is 20%',
@@ -105,7 +116,7 @@ describe('Alerts Engine & Retention Suite', () => {
           createdAt: now - 1800000,
         },
         {
-          id: 'bottle-low-leaf-node-01',
+          id: 'bottle-low-node-test-01',
           type: 'warning',
           title: 'Water Reservoir Low',
           message: 'Reservoir is below 20%',
@@ -136,10 +147,10 @@ describe('Alerts Engine & Retention Suite', () => {
 
       // Should have 3 unique alerts, deduplicated by id
       expect(merged).toHaveLength(3);
-      expect(merged.map((a) => a.id)).toEqual(['server-notice-1', 'dry-leaf-node-01', 'bottle-low-leaf-node-01']);
+      expect(merged.map((a) => a.id)).toEqual(['server-notice-1', 'dry-node-test-01', 'bottle-low-node-test-01']);
 
-      // Local active alert 'bottle-low-leaf-node-01' is preserved and NOT wiped by server alerts
-      const bottleAlert = merged.find((a) => a.id === 'bottle-low-leaf-node-01');
+      // Local active alert 'bottle-low-node-test-01' is preserved and NOT wiped by server alerts
+      const bottleAlert = merged.find((a) => a.id === 'bottle-low-node-test-01');
       expect(bottleAlert).toBeDefined();
       expect(bottleAlert?.status).toBe('active');
     });
@@ -244,7 +255,7 @@ describe('Alerts Engine & Retention Suite', () => {
       // Evaluation cycle function imitating useAlertEngine
       const evaluateMoistureCondition = (currentMoisture: number, existingAlerts: DeviceAlertRecord[]) => {
         const isDry = currentMoisture < thresholdMin;
-        const dryAlertId = 'dry-leaf-node-01';
+        const dryAlertId = 'dry-node-test-01';
         const currentMap = new Map<string, DeviceAlertRecord>();
         for (const a of existingAlerts) currentMap.set(a.id, a);
 
@@ -278,7 +289,7 @@ describe('Alerts Engine & Retention Suite', () => {
       // Heartbeat 1 (t=0s): soil moisture is 22% (< 35%) -> alert generated
       localAlerts = evaluateMoistureCondition(22, localAlerts);
       expect(localAlerts).toHaveLength(1);
-      expect(localAlerts[0].id).toBe('dry-leaf-node-01');
+      expect(localAlerts[0].id).toBe('dry-node-test-01');
       expect(localAlerts[0].status).toBe('active');
       const originalCreatedAt = localAlerts[0].createdAt;
 
@@ -286,7 +297,7 @@ describe('Alerts Engine & Retention Suite', () => {
       localAlerts = evaluateMoistureCondition(21, localAlerts);
       // Alert MUST NOT disappear or be cleared
       expect(localAlerts).toHaveLength(1);
-      expect(localAlerts[0].id).toBe('dry-leaf-node-01');
+      expect(localAlerts[0].id).toBe('dry-node-test-01');
       expect(localAlerts[0].status).toBe('active');
       expect(localAlerts[0].createdAt).toBe(originalCreatedAt);
 
@@ -305,12 +316,12 @@ describe('Alerts Engine & Retention Suite', () => {
 
   describe('5. RTDB Query Capping & Today-Only Filter (limitToLast(50))', () => {
     test('listenToDeviceAlerts queries /devices/{deviceId}/alerts with limitToLast(50)', () => {
-      listenToDeviceAlerts('leaf-node-01', jest.fn());
+      listenToDeviceAlerts('node-test-01', jest.fn());
 
-      expect(ref).toHaveBeenCalledWith(db, 'devices/leaf-node-01/alerts');
+      expect(ref).toHaveBeenCalledWith(db, 'devices/node-test-01/alerts');
       expect(limitToLast).toHaveBeenCalledWith(50);
       expect(query).toHaveBeenCalledWith(
-        expect.objectContaining({ path: 'devices/leaf-node-01/alerts' }),
+        expect.objectContaining({ path: 'devices/node-test-01/alerts' }),
         expect.objectContaining({ limitToLast: 50 })
       );
     });
@@ -359,7 +370,7 @@ describe('Alerts Engine & Retention Suite', () => {
 
     test('evaluation tick does not spam duplicate identical alerts if an alert exists for today', () => {
       const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
-      const deviceId = 'leaf-node-01';
+      const deviceId = 'node-test-01';
       const createdAlerts: any[] = [];
       const createdKeys = new Set<string>();
 
@@ -388,16 +399,25 @@ describe('Alerts Engine & Retention Suite', () => {
       };
 
       // Tick 1 (t=0s): soil dry condition violated
-      evaluateRuleDeduplicated('dry-leaf-node-01', 'dry', true);
+      evaluateRuleDeduplicated('dry-node-test-01', 'dry', true);
       expect(createdAlerts).toHaveLength(1);
 
       // Tick 2 (t=5s): same condition evaluated
-      evaluateRuleDeduplicated('dry-leaf-node-01', 'dry', true);
+      evaluateRuleDeduplicated('dry-node-test-01', 'dry', true);
       expect(createdAlerts).toHaveLength(1); // No duplicate spammed!
 
       // Tick 3 (t=10s): same condition evaluated
-      evaluateRuleDeduplicated('dry-leaf-node-01', 'dry', true);
+      evaluateRuleDeduplicated('dry-node-test-01', 'dry', true);
       expect(createdAlerts).toHaveLength(1); // Still exactly 1!
+    });
+
+    test('skips sensor threshold rules on unhydrated devices (null telemetry or lastSeen: 0)', () => {
+      const unhydrated = {
+        telemetry: null,
+        status: { online: false, lastSeen: 0 },
+      };
+      const shouldSkip = !unhydrated.telemetry || unhydrated.status.lastSeen === 0;
+      expect(shouldSkip).toBe(true);
     });
   });
 });

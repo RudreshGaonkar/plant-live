@@ -19,13 +19,11 @@ import { useAppTheme } from '@/theme';
 export interface DeviceQRScannerProps {
   onScan: (deviceId: string) => void;
   onManualInputPress?: () => void;
-  onDemoPress?: () => void;
 }
 
 export function DeviceQRScanner({
   onScan,
   onManualInputPress,
-  onDemoPress,
 }: DeviceQRScannerProps) {
   const { colors, radii } = useAppTheme();
   const [permission, requestPermission] = useCameraPermissions();
@@ -170,16 +168,6 @@ export function DeviceQRScanner({
             >
               <Ionicons name="create-outline" size={14} color="#FFFFFF" style={{ marginRight: 4 }} />
               <Text style={styles.actionBtnText}>Enter Manually</Text>
-            </TouchableOpacity>
-          )}
-
-          {onDemoPress && (
-            <TouchableOpacity
-              style={[styles.actionBtn, { borderRadius: radii.full, backgroundColor: 'rgba(90, 138, 92, 0.85)' }]}
-              onPress={onDemoPress}
-            >
-              <Ionicons name="flask-outline" size={14} color="#FFFFFF" style={{ marginRight: 4 }} />
-              <Text style={styles.actionBtnText}>Use Demo Device</Text>
             </TouchableOpacity>
           )}
         </View>

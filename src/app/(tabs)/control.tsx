@@ -18,11 +18,14 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { router } from 'expo-router';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice } from '@/store/useLiveDevice';
 import { usePlantState } from '@/hooks/usePlantState';
 import { StatusChip } from '@/components';
 import { useCommand } from '@/hooks/useCommand';
+import { useAutoSoakCooldown } from '@/hooks/useAutoSoakCooldown';
+import { RefillConfirmationModal } from '@/components/RefillConfirmation';
 
 export default function ControlScreen() {
   const { colors, radii, spacing } = useAppTheme();
@@ -41,23 +44,49 @@ export default function ControlScreen() {
     resetCommandState,
   } = useCommand();
 
-  const [isRefilling, setIsRefilling] = useState(false);
-  const liveRefillBottle = useLiveDevice((s) => s.refillBottle);
+  const [showRefillModal, setShowRefillModal] = useState(false);
+  const autoSoak = useAutoSoakCooldown(device?.id);
 
-  if (!device) return null;
+  if (!device) {
+    return (
+      <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
+        <View style={styles.emptyContainer}>
+          <View style={[styles.emptyIconWrap, { backgroundColor: colors.palette.lime }]}>
+            <Ionicons name="water-outline" size={56} color={colors.palette.forest} />
+          </View>
+          <Text style={[styles.emptyTitle, { color: colors.text }]}>
+            No Controller Paired
+          </Text>
+          <Text style={[styles.emptySubtitle, { color: colors.textMuted }]}>
+            Pair your plant controller to enable manual watering and live hardware controls.
+          </Text>
+          <TouchableOpacity
+            style={[
+              styles.emptyActionBtn,
+              { backgroundColor: colors.palette.forest, borderRadius: radii.full },
+            ]}
+            onPress={() => router.push('/add-device')}
+          >
+            <Ionicons name="add-circle-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+            <Text style={styles.emptyActionBtnText}>Pair Controller</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   const { config, telemetry, status } = device;
   const isAuto = config.mode === 'auto';
   const durationOptions = [3, 5, 10, 15];
   const isPumpActive = Boolean(
-    telemetry.isPumpActive ||
-    telemetry.pumpOn ||
+    telemetry?.isPumpActive ||
+    telemetry?.pumpOn ||
     device.control?.pumpState ||
     stage === 'running' ||
     secondsRemaining > 0
   );
   const isDispensing = isPumpActive;
-  const isReservoirLow = config.bottle.remainingMl <= 20;
+  const isReservoirLow = (config.bottle?.remainingMl ?? 0) <= 20;
 
   const handleWaterPress = async () => {
     await executeWaterNow(selectedDuration);
@@ -87,7 +116,7 @@ export default function ControlScreen() {
       >
         <Text style={[styles.screenTitle, { color: colors.text }]}>Manual Control</Text>
         <Text style={[styles.screenSubtitle, { color: colors.textMuted }]}>
-          Safety limits: Max 15s pump runtime • 60s cooldown between waterings.
+          Safety limits: Max 15s pump runtime • 60s manual pump cooldown between waterings.
         </Text>
 
         {/* Cooldown Active Banner */}
@@ -95,7 +124,7 @@ export default function ControlScreen() {
           <View style={[styles.cooldownBanner, { backgroundColor: colors.palette.lime, borderRadius: radii.md }]}>
             <Ionicons name="timer-outline" size={16} color={colors.palette.forest} />
             <Text style={[styles.cooldownText, { color: colors.palette.ink }]}>
-              Pump Cooldown Active: {cooldownSecondsLeft}s remaining before next manual cycle
+              Manual Pump Cooldown Active: {cooldownSecondsLeft}s remaining before next manual cycle
             </Text>
           </View>
         )}
@@ -113,25 +142,13 @@ export default function ControlScreen() {
               </Text>
             </View>
             <TouchableOpacity
-              disabled={isRefilling}
               style={[
                 styles.refillBtn,
-                { backgroundColor: colors.palette.forest, borderRadius: radii.full, opacity: isRefilling ? 0.7 : 1 },
+                { backgroundColor: colors.palette.forest, borderRadius: radii.full },
               ]}
-              onPress={async () => {
-                setIsRefilling(true);
-                try {
-                  await liveRefillBottle(device.id);
-                } finally {
-                  setIsRefilling(false);
-                }
-              }}
+              onPress={() => setShowRefillModal(true)}
             >
-              {isRefilling ? (
-                <ActivityIndicator size="small" color={colors.palette.white} />
-              ) : (
-                <Text style={styles.refillBtnText}>I Refilled</Text>
-              )}
+              <Text style={styles.refillBtnText}>I Refilled</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -162,6 +179,44 @@ export default function ControlScreen() {
             </View>
             <StatusChip status={health} />
           </View>
+
+          {/* Automatic-watering status badge / cooldown when isAuto is active */}
+          {isAuto && (
+            <View
+              style={[
+                styles.autoStatusBanner,
+                {
+                  backgroundColor: autoSoak.isCoolingDown
+                    ? 'rgba(217, 119, 6, 0.12)'
+                    : 'rgba(90, 138, 92, 0.12)',
+                  borderColor: autoSoak.isCoolingDown
+                    ? 'rgba(217, 119, 6, 0.3)'
+                    : 'rgba(90, 138, 92, 0.3)',
+                  borderRadius: radii.md,
+                },
+              ]}
+            >
+              <Ionicons
+                name={autoSoak.isCoolingDown ? 'hourglass-outline' : 'checkmark-circle-outline'}
+                size={16}
+                color={autoSoak.isCoolingDown ? '#D97706' : colors.palette.forest}
+              />
+              <Text
+                style={[
+                  styles.autoStatusText,
+                  {
+                    color: autoSoak.isCoolingDown
+                      ? '#B45309'
+                      : colors.palette.forest,
+                  },
+                ]}
+              >
+                {autoSoak.isCoolingDown
+                  ? autoSoak.formattedText
+                  : 'Automatic watering active'}
+              </Text>
+            </View>
+          )}
 
           <View style={[styles.toggleRow, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
             <TouchableOpacity
@@ -307,7 +362,7 @@ export default function ControlScreen() {
             accessibilityLabel="Water Now"
             activeOpacity={0.85}
             onPress={stage === 'done' ? resetCommandState : handleWaterPress}
-            disabled={(!canWater && telemetry.soilMoisture < 100 && stage === 'idle') || isDispensing || stage === 'sent'}
+            disabled={(!canWater && (telemetry?.soilMoisture ?? 0) < 100 && stage === 'idle') || isDispensing || stage === 'sent'}
             style={[
               styles.waterNowBtn,
               {
@@ -315,7 +370,7 @@ export default function ControlScreen() {
                   ? colors.palette.sage
                   : stage === 'done'
                   ? colors.palette.forest
-                  : (!canWater && telemetry.soilMoisture < 100)
+                  : (!canWater && (telemetry?.soilMoisture ?? 0) < 100)
                   ? colors.palette.sage
                   : colors.primary,
                 borderRadius: radii.xl,
@@ -344,7 +399,7 @@ export default function ControlScreen() {
                 <Ionicons name="water" size={20} color="#FFFFFF" style={{ marginRight: 8 }} />
                 <Text style={styles.waterNowBtnText}>
                   {cooldownSecondsLeft > 0
-                    ? `Cooldown (${cooldownSecondsLeft}s)`
+                    ? `Manual Cooldown (${cooldownSecondsLeft}s)`
                     : isReservoirLow
                     ? 'Bottle Empty'
                     : `Water Now (${selectedDuration}s)`}
@@ -524,7 +579,7 @@ export default function ControlScreen() {
           <View style={styles.guardItem}>
             <Ionicons name="time-outline" size={16} color={colors.palette.forest} />
             <View style={{ flex: 1 }}>
-              <Text style={[styles.guardTitle, { color: colors.text }]}>60s Pump Cooldown</Text>
+              <Text style={[styles.guardTitle, { color: colors.text }]}>60s Manual Pump Cooldown</Text>
               <Text style={[styles.guardDesc, { color: colors.textMuted }]}>
                 Protects the DC submersible pump motor against overheating.
               </Text>
@@ -535,7 +590,7 @@ export default function ControlScreen() {
             <Ionicons name="leaf-outline" size={16} color={colors.palette.forest} />
             <View style={{ flex: 1 }}>
               <Text style={[styles.guardTitle, { color: colors.text }]}>
-                Wet Soil Guard (Live: {telemetry.soilMoisture}%)
+                Wet Soil Guard (Live: {telemetry ? `${telemetry.soilMoisture}%` : '--'})
               </Text>
               <Text style={[styles.guardDesc, { color: colors.textMuted }]}>
                 Prompts for confirmation before watering if soil is already wet (&gt;{config.thresholds.moistureMax}%).
@@ -544,6 +599,14 @@ export default function ControlScreen() {
           </View>
         </View>
       </ScrollView>
+
+      <RefillConfirmationModal
+        visible={showRefillModal}
+        deviceId={device.id}
+        controllerName={config.name || config.plantName}
+        targetCapacity={config.bottle.capacityMl}
+        onClose={() => setShowRefillModal(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -575,6 +638,19 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   cooldownText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  autoStatusBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 12,
+  },
+  autoStatusText: {
     fontSize: 12,
     fontWeight: '700',
   },
@@ -795,5 +871,42 @@ const styles = StyleSheet.create({
   guardDesc: {
     fontSize: 11,
     marginTop: 2,
+  },
+  emptyContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  emptyIconWrap: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  emptyTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  emptySubtitle: {
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+    marginBottom: 24,
+  },
+  emptyActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+  },
+  emptyActionBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
   },
 });

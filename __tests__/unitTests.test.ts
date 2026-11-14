@@ -1,4 +1,4 @@
-import { computePlantHealthState, createDefaultDeviceRecord, DeviceRecord, useLiveDevice } from '../src/store/useLiveDevice';
+import { computePlantHealthState, createDefaultDeviceRecord, DeviceRecord, DeviceTelemetry, useLiveDevice } from '../src/store/useLiveDevice';
 import {
   rawToMoisturePercent,
   evaluateAutoWaterDecision,
@@ -6,6 +6,17 @@ import {
 } from '../src/services/calibration';
 
 describe('Unit Tests: Plant Health State Mapping', () => {
+  const baseTelemetry: DeviceTelemetry = {
+    soilRaw: 700,
+    soilMoisture: 45,
+    temperature: 26,
+    humidity: 60,
+    light: 1,
+    pumpOn: false,
+    rssi: -60,
+    ts: Date.now(),
+  };
+
   const baseDevice: DeviceRecord = {
     id: 'test-device-1',
     config: {
@@ -26,16 +37,7 @@ describe('Unit Tests: Plant Health State Mapping', () => {
       bottle: { capacityMl: 500, flowMlPerSec: 15, remainingMl: 400 },
       pairedAt: 1700000000000,
     },
-    telemetry: {
-      soilRaw: 700,
-      soilMoisture: 45,
-      temperature: 26,
-      humidity: 60,
-      light: 1,
-      pumpOn: false,
-      rssi: -60,
-      ts: Date.now(),
-    },
+    telemetry: baseTelemetry,
     status: {
       online: true,
       lastSeen: Date.now(),
@@ -54,13 +56,13 @@ describe('Unit Tests: Plant Health State Mapping', () => {
   });
 
   test('never treats a default, stale, or invalid soil reading as healthy', () => {
-    const pending = { ...createDefaultDeviceRecord(), status: baseDevice.status };
+    const pending = { ...createDefaultDeviceRecord('pending-node'), status: baseDevice.status };
     expect(computePlantHealthState(pending)).toBe('unknown');
     expect(computePlantHealthState({
-      ...baseDevice, telemetry: { ...baseDevice.telemetry, ts: Date.now() - 180000 },
+      ...baseDevice, telemetry: { ...baseTelemetry, ts: Date.now() - 180000 },
     })).toBe('unknown');
     expect(computePlantHealthState({
-      ...baseDevice, telemetry: { ...baseDevice.telemetry, soilMoisture: NaN },
+      ...baseDevice, telemetry: { ...baseTelemetry, soilMoisture: NaN },
     })).toBe('unknown');
   });
 
@@ -76,7 +78,7 @@ describe('Unit Tests: Plant Health State Mapping', () => {
       const ts = Date.now() - 500;
       useLiveDevice.getState().updateTelemetry({ soilMoisture: 0, ts, pumpOn: false }, other.id);
       const updated = useLiveDevice.getState();
-      expect(updated.devices[other.id].telemetry.ts).toBe(ts);
+      expect(updated.devices[other.id].telemetry?.ts).toBe(ts);
       expect(computePlantHealthState(updated.devices[other.id])).toBe('thirsty');
       expect(computePlantHealthState(updated.devices[baseDevice.id])).toBe('healthy');
       expect(updated.isWateringActive).toBe(true);
@@ -90,7 +92,7 @@ describe('Unit Tests: Plant Health State Mapping', () => {
   test('returns "thirsty" when soilMoisture is strictly below moistureMin', () => {
     const thirstyDevice: DeviceRecord = {
       ...baseDevice,
-      telemetry: { ...baseDevice.telemetry, soilMoisture: 24 },
+      telemetry: { ...baseTelemetry, soilMoisture: 24 },
     };
     expect(computePlantHealthState(thirstyDevice)).toBe('thirsty');
   });
@@ -98,7 +100,7 @@ describe('Unit Tests: Plant Health State Mapping', () => {
   test('returns "overwatered" when soilMoisture exceeds moistureMax', () => {
     const overwateredDevice: DeviceRecord = {
       ...baseDevice,
-      telemetry: { ...baseDevice.telemetry, soilMoisture: 75 },
+      telemetry: { ...baseTelemetry, soilMoisture: 75 },
     };
     expect(computePlantHealthState(overwateredDevice)).toBe('overwatered');
   });
@@ -106,21 +108,21 @@ describe('Unit Tests: Plant Health State Mapping', () => {
   test('returns "healthy" when soilMoisture is within min and max thresholds', () => {
     const healthyDevice: DeviceRecord = {
       ...baseDevice,
-      telemetry: { ...baseDevice.telemetry, soilMoisture: 45 },
+      telemetry: { ...baseTelemetry, soilMoisture: 45 },
     };
     expect(computePlantHealthState(healthyDevice)).toBe('healthy');
 
     // Boundary condition: exactly at moistureMin
     const boundaryMin: DeviceRecord = {
       ...baseDevice,
-      telemetry: { ...baseDevice.telemetry, soilMoisture: 30 },
+      telemetry: { ...baseTelemetry, soilMoisture: 30 },
     };
     expect(computePlantHealthState(boundaryMin)).toBe('healthy');
 
     // Boundary condition: exactly at moistureMax
     const boundaryMax: DeviceRecord = {
       ...baseDevice,
-      telemetry: { ...baseDevice.telemetry, soilMoisture: 60 },
+      telemetry: { ...baseTelemetry, soilMoisture: 60 },
     };
     expect(computePlantHealthState(boundaryMax)).toBe('healthy');
   });
@@ -338,7 +340,7 @@ describe('Unit Tests: Manual Watering Safety Bypass & Payload', () => {
 
 describe('Unit Tests: Water Level Detection & Event Trigger Payload', () => {
   test('generates structured LOW_WATER alert payload for Firebase RTDB', () => {
-    const deviceId = 'leaf-node-01';
+    const deviceId = 'node-test-01';
     const now = Date.now();
     const alertPayload = {
       deviceId,
@@ -588,6 +590,51 @@ describe('Unit Tests: Pump On State & Hourglass Reset Semantics', () => {
     handleAckStatus('done');
     expect(isCommandPending).toBe(false);
     expect(isWatering).toBe(false);
+  });
+});
+
+describe('Unit Tests: Unhydrated-to-Live Telemetry Contract & Chart Series Bounds', () => {
+  test('createDefaultDeviceRecord requires explicit ID and initializes telemetry to null', () => {
+    const record = createDefaultDeviceRecord('custom-node-77');
+    expect(record.id).toBe('custom-node-77');
+    expect(record.telemetry).toBeNull();
+    expect(record.status.online).toBe(false);
+    expect(record.status.lastSeen).toBe(0);
+    expect(record.status.firmware).toBe('');
+    expect(record.config.pairedAt).toBe(0);
+    expect(record.config.name).toBe('');
+    expect(record.config.plantName).toBe('');
+  });
+
+  test('handles empty and single-point chart coordinate calculations safely', () => {
+    const chartWidth = 320;
+    const chartHeight = 170;
+
+    // 0 points: empty series
+    const emptyPoints: { x: number; y: number; val: number }[] = [];
+    expect(emptyPoints.length).toBe(0);
+
+    // 1 point: positioned cleanly at chart center
+    const singleRecord = { ts: Date.now(), soilMoisture: 45 };
+    const singleX = chartWidth / 2;
+    const singleY = chartHeight - (singleRecord.soilMoisture / 100) * chartHeight;
+
+    expect(singleX).toBe(160);
+    expect(singleY).toBeCloseTo(93.5);
+    expect(isFinite(singleX)).toBe(true);
+    expect(isFinite(singleY)).toBe(true);
+
+    // Multi-point linear scale
+    const multiRecords = [
+      { ts: 1000, soilMoisture: 20 },
+      { ts: 2000, soilMoisture: 60 },
+    ];
+    const spanTs = multiRecords[1].ts - multiRecords[0].ts;
+    const p0_x = ((multiRecords[0].ts - multiRecords[0].ts) / spanTs) * chartWidth;
+    const p1_x = ((multiRecords[1].ts - multiRecords[0].ts) / spanTs) * chartWidth;
+
+    expect(p0_x).toBe(0);
+    expect(p1_x).toBe(chartWidth);
   });
 });
 

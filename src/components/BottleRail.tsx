@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/immutability */
 /**
  * BottleRail / WaterCapsule / ReservoirPill
  * Slim vertical reservoir pill component showing water bottle level.
@@ -9,7 +10,7 @@
  * - Tap expands to a popover with capacity, remaining ml, flow rate, and "I refilled" button
  * uiLayout.md Section 3 – Layer 3
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -21,14 +22,15 @@ import {
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
-  withSpring,
   withTiming,
   withRepeat,
+  runOnJS,
   Easing,
 } from 'react-native-reanimated';
 import Svg, { Defs, LinearGradient, Stop, Path } from 'react-native-svg';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
+import { RefillConfirmation } from './RefillConfirmation';
 
 export interface BottleRailProps {
   remainingMl: number;
@@ -36,6 +38,8 @@ export interface BottleRailProps {
   flowMlPerSec?: number;
   isLoading?: boolean;
   onRefill: () => void;
+  deviceId?: string;
+  controllerName?: string;
 }
 
 export type WaterLevelState = 'normal' | 'warning' | 'danger';
@@ -101,9 +105,12 @@ export function BottleRail({
   flowMlPerSec = 15,
   isLoading = false,
   onRefill,
+  deviceId,
+  controllerName,
 }: BottleRailProps) {
   const { colors, radii } = useAppTheme();
   const [popoverOpen, setPopoverOpen] = useState(false);
+  const [isConfirmingRefill, setIsConfirmingRefill] = useState(false);
 
   const isPending = Boolean(isLoading || capacityMl <= 0);
   const fillRatio = isPending ? 0 : Math.max(0, Math.min(1, capacityMl > 0 ? remainingMl / capacityMl : 0));
@@ -121,7 +128,8 @@ export function BottleRail({
   const waterHeightAnim = useSharedValue(0);
   const waveAnim1 = useSharedValue(0);
   const waveAnim2 = useSharedValue(0);
-  const popoverScale = useSharedValue(0);
+  const popoverOpacity = useSharedValue(0);
+  const popoverTranslateY = useSharedValue(8);
 
   // Smooth wave filling effect for water height changes
   useEffect(() => {
@@ -158,25 +166,29 @@ export function BottleRail({
   }));
 
   const popoverStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: popoverScale.value }],
-    opacity: popoverScale.value,
+    transform: [{ translateY: popoverTranslateY.value }],
+    opacity: popoverOpacity.value,
   }));
 
-  const openPopover = () => {
+  const openPopover = useCallback(() => {
+    setIsConfirmingRefill(false);
     setPopoverOpen(true);
-    // eslint-disable-next-line react-hooks/immutability
-    popoverScale.value = withSpring(1, { damping: 14 });
-  };
+    popoverOpacity.value = withTiming(1, { duration: 160 });
+    popoverTranslateY.value = withTiming(0, { duration: 160 });
+  }, [popoverOpacity, popoverTranslateY]);
 
-  const closePopover = () => {
-    // eslint-disable-next-line react-hooks/immutability
-    popoverScale.value = withTiming(0, { duration: 180 });
-    setTimeout(() => setPopoverOpen(false), 200);
-  };
+  const closePopover = useCallback(() => {
+    popoverOpacity.value = withTiming(0, { duration: 140 });
+    popoverTranslateY.value = withTiming(8, { duration: 140 }, (finished) => {
+      'worklet';
+      if (finished) {
+        runOnJS(setPopoverOpen)(false);
+      }
+    });
+  }, [popoverOpacity, popoverTranslateY]);
 
-  const handleRefill = () => {
+  const handleRefillSuccess = () => {
     onRefill();
-    closePopover();
   };
 
   return (
@@ -293,156 +305,176 @@ export function BottleRail({
                   shadowOpacity: 0.14,
                   shadowRadius: 24,
                   elevation: 16,
+                  padding: isConfirmingRefill ? 0 : 20,
                 },
                 popoverStyle,
               ]}
+              onStartShouldSetResponder={() => true}
+              onTouchEnd={(e) => e.stopPropagation()}
             >
-              <View style={styles.popoverHeader}>
-                <Ionicons
-                  name="water"
-                  size={20}
-                  color={stateConfig.accent}
+              {isConfirmingRefill ? (
+                <RefillConfirmation
+                  deviceId={deviceId || ''}
+                  controllerName={controllerName}
+                  targetCapacity={capacityMl}
+                  onClose={() => {
+                    setIsConfirmingRefill(false);
+                    closePopover();
+                  }}
+                  onSuccess={() => {
+                    handleRefillSuccess();
+                  }}
                 />
-                <Text
-                  style={[styles.popoverTitle, { color: colors.palette.ink }]}
-                >
-                  Water Reservoir
-                </Text>
-              </View>
+              ) : (
+                <>
+                  <View style={styles.popoverHeader}>
+                    <Ionicons
+                      name="water"
+                      size={20}
+                      color={stateConfig.accent}
+                    />
+                    <Text
+                      style={[styles.popoverTitle, { color: colors.palette.ink }]}
+                    >
+                      Water Reservoir
+                    </Text>
+                  </View>
 
-              <View style={styles.popoverRow}>
-                <Text style={[styles.popoverKey, { color: colors.palette.sage }]}>
-                  Capacity
-                </Text>
-                <Text style={[styles.popoverVal, { color: colors.palette.ink }]}>
-                  {capacityMl} ml
-                </Text>
-              </View>
+                  <View style={styles.popoverRow}>
+                    <Text style={[styles.popoverKey, { color: colors.palette.sage }]}>
+                      Capacity
+                    </Text>
+                    <Text style={[styles.popoverVal, { color: colors.palette.ink }]}>
+                      {capacityMl > 0 ? `${capacityMl} ml` : '-- ml'}
+                    </Text>
+                  </View>
 
-              <View style={styles.popoverRow}>
-                <Text style={[styles.popoverKey, { color: colors.palette.sage }]}>
-                  Remaining
-                </Text>
-                <Text
-                  style={[
-                    styles.popoverVal,
-                    {
-                      color: stateConfig.accent,
-                      fontWeight: '800',
-                    },
-                  ]}
-                >
-                  {remainingMl} ml ({fillPercent}%)
-                </Text>
-              </View>
+                  <View style={styles.popoverRow}>
+                    <Text style={[styles.popoverKey, { color: colors.palette.sage }]}>
+                      Remaining
+                    </Text>
+                    <Text
+                      style={[
+                        styles.popoverVal,
+                        {
+                          color: stateConfig.accent,
+                          fontWeight: '800',
+                        },
+                      ]}
+                    >
+                      {capacityMl > 0 ? `${remainingMl} ml (${fillPercent}%)` : '-- ml'}
+                    </Text>
+                  </View>
 
-              <View style={styles.popoverRow}>
-                <Text style={[styles.popoverKey, { color: colors.palette.sage }]}>
-                  Flow rate
-                </Text>
-                <Text style={[styles.popoverVal, { color: colors.palette.ink }]}>
-                  {flowMlPerSec} ml/s
-                </Text>
-              </View>
+                  <View style={styles.popoverRow}>
+                    <Text style={[styles.popoverKey, { color: colors.palette.sage }]}>
+                      Flow rate
+                    </Text>
+                    <Text style={[styles.popoverVal, { color: colors.palette.ink }]}>
+                      {flowMlPerSec} ml/s
+                    </Text>
+                  </View>
 
-              <View style={styles.popoverRow}>
-                <Text style={[styles.popoverKey, { color: colors.palette.sage }]}>
-                  Est. waterings
-                </Text>
-                <Text style={[styles.popoverVal, { color: colors.palette.ink }]}>
-                  ~{estimatedWaterings} cycles
-                </Text>
-              </View>
+                  <View style={styles.popoverRow}>
+                    <Text style={[styles.popoverKey, { color: colors.palette.sage }]}>
+                      Est. waterings
+                    </Text>
+                    <Text style={[styles.popoverVal, { color: colors.palette.ink }]}>
+                      ~{estimatedWaterings} cycles
+                    </Text>
+                  </View>
 
-              {/* Responsive status banner */}
-              {levelState === 'danger' && (
-                <View
-                  style={[
-                    styles.statusAlertBanner,
-                    { backgroundColor: `${colors.palette.blush}CC`, borderColor: colors.palette.critical },
-                  ]}
-                >
-                  <Ionicons
-                    name="alert-circle"
-                    size={15}
-                    color={colors.palette.critical}
-                  />
-                  <Text
+                  {/* Responsive status banner */}
+                  {levelState === 'danger' && (
+                    <View
+                      style={[
+                        styles.statusAlertBanner,
+                        { backgroundColor: `${colors.palette.blush}CC`, borderColor: colors.palette.critical },
+                      ]}
+                    >
+                      <Ionicons
+                        name="alert-circle"
+                        size={15}
+                        color={colors.palette.critical}
+                      />
+                      <Text
+                        style={[
+                          styles.statusAlertText,
+                          { color: colors.palette.critical },
+                        ]}
+                      >
+                        Danger: Reservoir critically low (&lt;15%). Auto-watering paused.
+                      </Text>
+                    </View>
+                  )}
+
+                  {levelState === 'warning' && (
+                    <View
+                      style={[
+                        styles.statusAlertBanner,
+                        { backgroundColor: '#FEF3C7', borderColor: '#F59E0B' },
+                      ]}
+                    >
+                      <Ionicons
+                        name="warning-outline"
+                        size={15}
+                        color="#D97706"
+                      />
+                      <Text
+                        style={[
+                          styles.statusAlertText,
+                          { color: '#B45309' },
+                        ]}
+                      >
+                        Warning: Reservoir level is between 15% and 30%. Refill soon.
+                      </Text>
+                    </View>
+                  )}
+
+                  {levelState === 'normal' && (
+                    <View
+                      style={[
+                        styles.statusAlertBanner,
+                        { backgroundColor: '#ECFDF5', borderColor: '#10B981' },
+                      ]}
+                    >
+                      <Ionicons
+                        name="checkmark-circle-outline"
+                        size={15}
+                        color="#059669"
+                      />
+                      <Text
+                        style={[
+                          styles.statusAlertText,
+                          { color: '#047857' },
+                        ]}
+                      >
+                        Reservoir level is optimal (&gt;30%).
+                      </Text>
+                    </View>
+                  )}
+
+                  <TouchableOpacity
+                    onPress={() => setIsConfirmingRefill(true)}
                     style={[
-                      styles.statusAlertText,
-                      { color: colors.palette.critical },
+                      styles.refillBtn,
+                      {
+                        backgroundColor: colors.palette.forest,
+                        borderRadius: radii.xl,
+                      },
                     ]}
+                    accessibilityLabel="I refilled the reservoir"
                   >
-                    Danger: Reservoir critically low (&lt;15%). Auto-watering paused.
-                  </Text>
-                </View>
+                    <Ionicons
+                      name="refresh"
+                      size={16}
+                      color={colors.palette.white}
+                      style={{ marginRight: 6 }}
+                    />
+                    <Text style={styles.refillBtnText}>I Refilled Reservoir</Text>
+                  </TouchableOpacity>
+                </>
               )}
-
-              {levelState === 'warning' && (
-                <View
-                  style={[
-                    styles.statusAlertBanner,
-                    { backgroundColor: '#FEF3C7', borderColor: '#F59E0B' },
-                  ]}
-                >
-                  <Ionicons
-                    name="warning-outline"
-                    size={15}
-                    color="#D97706"
-                  />
-                  <Text
-                    style={[
-                      styles.statusAlertText,
-                      { color: '#B45309' },
-                    ]}
-                  >
-                    Warning: Reservoir level is between 15% and 30%. Refill soon.
-                  </Text>
-                </View>
-              )}
-
-              {levelState === 'normal' && (
-                <View
-                  style={[
-                    styles.statusAlertBanner,
-                    { backgroundColor: '#ECFDF5', borderColor: '#10B981' },
-                  ]}
-                >
-                  <Ionicons
-                    name="checkmark-circle-outline"
-                    size={15}
-                    color="#059669"
-                  />
-                  <Text
-                    style={[
-                      styles.statusAlertText,
-                      { color: '#047857' },
-                    ]}
-                  >
-                    Reservoir level is optimal (&gt;30%).
-                  </Text>
-                </View>
-              )}
-
-              <TouchableOpacity
-                onPress={handleRefill}
-                style={[
-                  styles.refillBtn,
-                  {
-                    backgroundColor: colors.palette.forest,
-                    borderRadius: radii.xl,
-                  },
-                ]}
-                accessibilityLabel="I refilled the reservoir"
-              >
-                <Ionicons
-                  name="refresh"
-                  size={16}
-                  color={colors.palette.white}
-                  style={{ marginRight: 6 }}
-                />
-                <Text style={styles.refillBtnText}>I Refilled Reservoir</Text>
-              </TouchableOpacity>
             </Animated.View>
           </Pressable>
         </Modal>

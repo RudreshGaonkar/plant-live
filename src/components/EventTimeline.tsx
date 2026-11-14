@@ -1,14 +1,16 @@
+import { DeviceHistoryRecord } from '@/services/devices';
+import { WaterLog } from '@/store/useLiveDevice';
+import { useSession } from '@/store/useSession';
+import { useAppTheme } from '@/theme';
+import { formatTemperature } from '@/utils/temperature';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import React, { useState } from 'react';
 import {
-  View,
-  Text,
   StyleSheet,
+  Text,
   TouchableOpacity,
+  View,
 } from 'react-native';
-import Ionicons from '@expo/vector-icons/Ionicons';
-import { useAppTheme } from '@/theme';
-import { WaterLog } from '@/store/useLiveDevice';
-import { DeviceHistoryRecord } from '@/services/devices';
 
 export type WateringEventType = 'MANUAL_WATER' | 'AUTO_WATER' | 'PUMP_PULSE' | 'TELEMETRY_LOG';
 
@@ -60,6 +62,7 @@ function formatRelativeTime(ts: number | undefined): string {
 
 export function EventTimeline({ waterLogs, telemetryHistory = [] }: EventTimelineProps) {
   const { colors, radii } = useAppTheme();
+  const units = useSession((s) => s.prefs.units);
   const [filter, setFilter] = useState<'all' | 'water' | 'telemetry' | 'auto' | 'manual'>('all');
   const [currentPage, setCurrentPage] = useState<number>(1);
 
@@ -195,12 +198,12 @@ export function EventTimeline({ waterLogs, telemetryHistory = [] }: EventTimelin
                   {tab === 'all'
                     ? 'All'
                     : tab === 'water'
-                    ? 'Water'
-                    : tab === 'telemetry'
-                    ? 'Telemetry'
-                    : tab === 'auto'
-                    ? 'Auto'
-                    : 'Manual'}
+                      ? 'Water'
+                      : tab === 'telemetry'
+                        ? 'Telemetry'
+                        : tab === 'auto'
+                          ? 'Auto'
+                          : 'Manual'}
                 </Text>
               </TouchableOpacity>
             );
@@ -226,7 +229,7 @@ export function EventTimeline({ waterLogs, telemetryHistory = [] }: EventTimelin
             color={colors.palette.sage}
           />
           <Text style={[styles.emptyText, { color: colors.textMuted }]}>
-            No events recorded for this selection.
+            No telemetry recorded yet
           </Text>
         </View>
       ) : (
@@ -411,7 +414,7 @@ export function EventTimeline({ waterLogs, telemetryHistory = [] }: EventTimelin
                       <View style={styles.telemPill}>
                         <Text style={styles.telemLabel}>Temp</Text>
                         <Text style={[styles.telemValue, { color: colors.palette.ink }]}>
-                          {event.temperature ?? '--'}°C
+                          {formatTemperature(event.temperature, units)}
                         </Text>
                       </View>
                       <View style={styles.telemPill}>
@@ -426,10 +429,10 @@ export function EventTimeline({ waterLogs, telemetryHistory = [] }: EventTimelin
                           {event.light === 1
                             ? 'Bright'
                             : event.light === 0
-                            ? 'Dim'
-                            : typeof event.light === 'number'
-                            ? `${event.light}%`
-                            : '--'}
+                              ? 'Dim'
+                              : typeof event.light === 'number'
+                                ? `${event.light}%`
+                                : '--'}
                         </Text>
                       </View>
                     </View>

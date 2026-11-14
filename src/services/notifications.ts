@@ -1,6 +1,7 @@
-import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 import * as Device from 'expo-device';
-import { ref, onValue, set, remove, push, query, limitToLast } from 'firebase/database';
+import { limitToLast, onValue, push, query, ref, remove, set } from 'firebase/database';
+import { Platform } from 'react-native';
 import { db } from './firebase';
 
 type ExpoNotificationsType = typeof import('expo-notifications');
@@ -49,6 +50,16 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
   }
 
   try {
+    // Ensure the Android notification channel is created before permission requests
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync('default', {
+        name: 'Default Plant Alerts',
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#5A8A5C',
+      });
+    }
+
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;
 
@@ -61,17 +72,13 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
       return null;
     }
 
-    // Android notification channel setup
-    if (Platform.OS === 'android') {
-      await Notifications.setNotificationChannelAsync('default', {
-        name: 'Default Plant Alerts',
-        importance: Notifications.AndroidImportance.MAX,
-        vibrationPattern: [0, 250, 250, 250],
-        lightColor: '#5A8A5C',
-      });
-    }
+    const projectId =
+      Constants.expoConfig?.extra?.eas?.projectId ??
+      (Constants as any).easConfig?.projectId;
 
-    const tokenData = await Notifications.getExpoPushTokenAsync();
+    const tokenData = await Notifications.getExpoPushTokenAsync(
+      projectId ? { projectId } : undefined
+    );
     return tokenData.data;
   } catch (err) {
     console.warn('Failed to retrieve Expo push token:', err);
@@ -235,7 +242,7 @@ export async function markAlertReadInRTDB(uid: string, alertId: string) {
     await set(alertRef, true);
     try {
       await set(ref(db, `alerts/${uid}/${alertId}/read`), true);
-    } catch {}
+    } catch { }
   } catch (err) {
     console.warn('Failed to mark alert as read:', err);
   }
@@ -250,7 +257,7 @@ export async function deleteAlertFromRTDB(uid: string, alertId: string) {
     await remove(alertRef);
     try {
       await remove(ref(db, `alerts/${uid}/${alertId}`));
-    } catch {}
+    } catch { }
   } catch (err) {
     console.warn('Failed to delete alert:', err);
   }
@@ -280,7 +287,7 @@ export async function writeAlertToRTDB(
       if (newRef.key) {
         await set(ref(db, `alerts/${uid}/${newRef.key}`), payload);
       }
-    } catch {}
+    } catch { }
     return newRef.key;
   } catch (err) {
     console.warn('Failed to write alert to RTDB:', err);

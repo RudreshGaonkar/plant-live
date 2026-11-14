@@ -84,8 +84,9 @@ export function GardenStrip({
       >
         {devices.map((device) => {
           const isActive = device.id === activeDeviceId;
-          const moisture = device.telemetry.soilMoisture;
+          const moisture = device.telemetry?.soilMoisture;
           const health = computePlantHealthState(device);
+          const displayName = device.config.plantName || device.config.name || device.id;
 
           return (
             <TouchableOpacity
@@ -107,7 +108,7 @@ export function GardenStrip({
                   borderWidth: isActive ? 2 : 1.5,
                 },
               ]}
-              accessibilityLabel={`Switch to ${device.config.plantName}`}
+              accessibilityLabel={`Switch to ${displayName}`}
             >
               {/* Header row: Status dot + Unpair/Remove button if multiple devices exist */}
               <View style={styles.cardHeaderRow}>
@@ -124,7 +125,7 @@ export function GardenStrip({
                       e.stopPropagation?.();
                       onRemove(
                         device.id,
-                        device.config.plantName || device.config.name || 'Plant'
+                        displayName
                       );
                     }}
                     style={[
@@ -135,7 +136,7 @@ export function GardenStrip({
                           : 'rgba(235, 87, 87, 0.15)',
                       },
                     ]}
-                    accessibilityLabel={`Remove ${device.config.plantName || device.id}`}
+                    accessibilityLabel={`Remove ${displayName}`}
                   >
                     <Ionicons
                       name="trash-outline"
@@ -156,7 +157,7 @@ export function GardenStrip({
                 ]}
                 numberOfLines={1}
               >
-                {device.config.plantName}
+                {displayName}
               </Text>
               <Text
                 style={[
@@ -168,7 +169,7 @@ export function GardenStrip({
                   },
                 ]}
               >
-                {health === 'unknown' ? '—' : `${moisture}%`}
+                {health === 'unknown' || moisture === undefined ? '--' : `${moisture}%`}
               </Text>
               {isActive && (
                 <Ionicons

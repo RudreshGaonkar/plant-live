@@ -27,15 +27,25 @@ import {
   update,
   get as fbGet,
   remove,
-  onValue,
 } from 'firebase/database';
 import { deleteUser } from 'firebase/auth';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { auth, db } from '@/services/firebase';
 import { useAppTheme } from '@/theme';
-import { useLiveDevice } from '@/store/useLiveDevice';
+import { useLiveDevice, DeviceConfig } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
-import { updateDeviceConfigInRTDB, removeDeviceWithAudit } from '@/services/devices';
+import { RefillConfirmationModal } from '@/components/RefillConfirmation';
+import {
+  updateDeviceConfigInRTDB,
+  removeDeviceWithAudit,
+  updateDeviceLocationAndPreset,
+  updateDevicePumpDuration,
+  updateDeviceThreshold,
+  updateDeviceFlowRate,
+  updateBottleCapacityWithTransaction,
+  updateDeviceLightMode,
+} from '@/services/devices';
+import { formatTemperature } from '@/utils/temperature';
 import { changePasswordSchema, mapAuthError } from '@/utils/authValidation';
 import {
   PlantPassportHeader,
@@ -50,10 +60,15 @@ export default function SettingsScreen() {
   const { colors, radii, spacing } = useAppTheme();
   const {
     user,
+    prefs,
     signOut,
     setAvatarUri,
     updateUserDisplayName,
+    retrySyncProfileToRTDB,
     updateUserPassword,
+    updateTempUnit,
+    toggleQuietHours,
+    updateAlertPref,
   } = useSession();
 
   // Store bindings
@@ -61,19 +76,115 @@ export default function SettingsScreen() {
   const updateThresholds = useLiveDevice((s) => s.updateThresholds);
   const updateConfig = useLiveDevice((s) => s.updateConfig);
   const updateCalibration = useLiveDevice((s) => s.updateCalibration);
-  const refillBottle = useLiveDevice((s) => s.refillBottle);
 
   // Calibration Wizard modal state
   const [calibrationModalOpen, setCalibrationModalOpen] = useState<boolean>(false);
-  const [isRefilling, setIsRefilling] = useState<boolean>(false);
+  const [showRefillModal, setShowRefillModal] = useState<boolean>(false);
   const [isRemovingDevice, setIsRemovingDevice] = useState<boolean>(false);
 
-  // Draft values for Bottle Size and Pump Speed (commit on sliding complete)
+  // Explicit sync state for persistent leaf updates
+  type SyncState = 'idle' | 'pending' | 'saved' | 'error';
+  interface FieldSyncStatus {
+    state: SyncState;
+    error?: string;
+  }
+  const [syncStatus, setSyncStatus] = useState<Record<string, FieldSyncStatus>>({});
+
+  // Scoped drafts for device & user
   const [bottleCapacityDraft, setBottleCapacityDraft] = useState<number | null>(null);
   const [pumpFlowDraft, setPumpFlowDraft] = useState<number | null>(null);
+  const [thresholdDrafts, setThresholdDrafts] = useState<Partial<DeviceConfig['thresholds']>>({});
+  const [displayNameDraft, setDisplayNameDraft] = useState<string | null>(null);
+
+  // Reset device-scoped drafts on device switch to ignore stale completions
+  const activeDevId = device?.id || '';
+  const prevDeviceIdRef = React.useRef(activeDevId);
+  React.useEffect(() => {
+    if (prevDeviceIdRef.current !== activeDevId) {
+      prevDeviceIdRef.current = activeDevId;
+      setBottleCapacityDraft(null);
+      setPumpFlowDraft(null);
+      setThresholdDrafts({});
+      setSyncStatus({});
+    }
+  }, [activeDevId]);
+
+  // Reset user-scoped drafts on account switch
+  const currentUid = user?.uid || '';
+  const prevUidRef = React.useRef(currentUid);
+  React.useEffect(() => {
+    if (prevUidRef.current !== currentUid) {
+      prevUidRef.current = currentUid;
+      setDisplayNameDraft(null);
+    }
+  }, [currentUid]);
 
   const activeBottleCapacity = bottleCapacityDraft ?? device?.config?.bottle?.capacityMl ?? 1000;
   const activePumpFlow = pumpFlowDraft ?? device?.config?.bottle?.flowMlPerSec ?? 15;
+
+  const saveField = async (
+    fieldKey: string,
+    targetDeviceId: string,
+    writer: () => Promise<any>
+  ) => {
+    setSyncStatus((prev) => ({ ...prev, [fieldKey]: { state: 'pending' } }));
+    try {
+      await writer();
+      // Guard against device switches during async write
+      if (useLiveDevice.getState().activeDeviceId !== targetDeviceId) {
+        return;
+      }
+      setSyncStatus((prev) => ({ ...prev, [fieldKey]: { state: 'saved' } }));
+      setTimeout(() => {
+        setSyncStatus((prev) => {
+          if (prev[fieldKey]?.state === 'saved') {
+            return { ...prev, [fieldKey]: { state: 'idle' } };
+          }
+          return prev;
+        });
+      }, 2500);
+    } catch (err: any) {
+      if (useLiveDevice.getState().activeDeviceId !== targetDeviceId) {
+        return;
+      }
+      const msg = err?.message || 'Save failed';
+      setSyncStatus((prev) => ({ ...prev, [fieldKey]: { state: 'error', error: msg } }));
+    }
+  };
+
+  const renderSyncBadge = (fieldKey: string) => {
+    const status = syncStatus[fieldKey];
+    if (!status || status.state === 'idle') return null;
+
+    if (status.state === 'pending') {
+      return (
+        <View style={styles.syncBadgePending}>
+          <ActivityIndicator size="small" color={colors.palette.forest} />
+          <Text style={[styles.syncTextPending, { color: colors.palette.forest }]}>Pending...</Text>
+        </View>
+      );
+    }
+    if (status.state === 'saved') {
+      return (
+        <View style={styles.syncBadgeSaved}>
+          <Ionicons name="checkmark-circle" size={13} color="#2E7D32" />
+          <Text style={styles.syncTextSaved}>Saved</Text>
+        </View>
+      );
+    }
+    if (status.state === 'error') {
+      return (
+        <TouchableOpacity
+          onPress={() => Alert.alert('Sync Error', status.error || 'Write failed. Please check connection and retry.')}
+          style={styles.syncBadgeError}
+        >
+          <Ionicons name="alert-circle" size={13} color={colors.palette.critical} />
+          <Text style={[styles.syncTextError, { color: colors.palette.critical }]}>Error</Text>
+        </TouchableOpacity>
+      );
+    }
+    return null;
+  };
 
   const LOCATION_PRESETS = {
     indoor: { moistureMin: 35, moistureMax: 65, tempMax: 35, humidityMax: 80, pumpDurationSec: 5 },
@@ -83,25 +194,16 @@ export default function SettingsScreen() {
 
   const handleSelectLocation = async (loc: 'indoor' | 'balcony' | 'terrace') => {
     if (!device?.id) return;
+    const targetId = device.id;
     const defaults = LOCATION_PRESETS[loc];
-    try {
-      await updateDeviceConfigInRTDB(device.id, {
-        location: loc,
-        thresholds: {
-          ...device.config?.thresholds,
-          ...defaults,
-        },
-      });
-      updateConfig({ location: loc }, device.id);
+    await saveField('location', targetId, async () => {
+      await updateDeviceLocationAndPreset(targetId, loc, defaults);
+      updateConfig({ location: loc }, targetId);
       updateThresholds(defaults);
-      Alert.alert('Saved', `Location set to ${loc.charAt(0).toUpperCase() + loc.slice(1)} and watering limits updated successfully.`);
-    } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Failed to update location and watering limits.');
-    }
+    });
   };
 
   // User Profile Form States
-  const [displayNameDraft, setDisplayNameDraft] = useState<string | null>(null);
   const displayNameInput = displayNameDraft ?? (user?.displayName || '');
   const [isUpdatingName, setIsUpdatingName] = useState<boolean>(false);
   const [isPickingAvatar, setIsPickingAvatar] = useState<boolean>(false);
@@ -112,19 +214,13 @@ export default function SettingsScreen() {
   const [confirmPassword, setConfirmPassword] = useState<string>('');
   const [isUpdatingPassword, setIsUpdatingPassword] = useState<boolean>(false);
 
-  // Temperature unit preference
-  const [tempUnit, setTempUnit] = useState<'C' | 'F'>('C');
+  // Temperature unit preference bound to UID-scoped session store
+  const tempUnit = prefs.units;
 
   // Alert Category Toggles
-  const [alerts, setAlerts] = useState({
-    bottle: true,
-    dry: true,
-    wet: true,
-    heat: true,
-    offline: true,
-  });
-  const [quietHoursEnabled, setQuietHoursEnabled] = useState<boolean>(false);
-  const quietHoursRange = '22:00 - 07:00';
+  const alerts = prefs.alerts;
+  const quietHoursEnabled = prefs.quietHours.enabled;
+  const quietHoursRange = `${prefs.quietHours.start} - ${prefs.quietHours.end}`;
 
   // Legal Policies Modal State
   const [policyModal, setPolicyModal] = useState<{ visible: boolean; type: LegalPolicyType }>({
@@ -133,60 +229,28 @@ export default function SettingsScreen() {
   });
   const [isDeletingAccount, setIsDeletingAccount] = useState<boolean>(false);
 
-  // Synchronize initial preferences from RTDB
-  React.useEffect(() => {
-    if (!user?.uid) return;
-    const prefsRef = ref(db, `users/${user.uid}/prefs`);
-    const unsubscribe = onValue(prefsRef, (snap) => {
-      if (snap.exists()) {
-        const val = snap.val();
-        if (val.units === 'C' || val.units === 'F') {
-          setTempUnit(val.units);
-        }
-        if (val.quietHours && typeof val.quietHours.enabled === 'boolean') {
-          setQuietHoursEnabled(val.quietHours.enabled);
-        }
-        if (val.alerts && typeof val.alerts === 'object') {
-          setAlerts((prev) => ({
-            ...prev,
-            ...val.alerts,
-          }));
-        }
-      }
-    });
-    return () => unsubscribe();
-  }, [user?.uid]);
-
-  const handleSetTempUnit = (unit: 'C' | 'F') => {
-    setTempUnit(unit);
-    if (user?.uid) {
-      update(ref(db, `users/${user.uid}/prefs`), { units: unit }).catch((err) =>
-        console.warn('[settings] Failed to persist units:', err)
-      );
+  const handleSetTempUnit = async (unit: 'C' | 'F') => {
+    try {
+      await updateTempUnit(unit);
+    } catch (err) {
+      console.warn('[settings] Failed to persist units:', err);
     }
   };
 
-  const handleToggleQuietHours = (val: boolean) => {
-    setQuietHoursEnabled(val);
-    if (user?.uid) {
-      update(ref(db, `users/${user.uid}/prefs/quietHours`), {
-        enabled: val,
-        start: '22:00',
-        end: '07:00',
-      }).catch((err) => console.warn('[settings] Failed to persist quietHours:', err));
+  const handleToggleQuietHours = async (val: boolean) => {
+    try {
+      await toggleQuietHours(val);
+    } catch (err) {
+      console.warn('[settings] Failed to persist quietHours:', err);
     }
   };
 
-  const handleToggleAlert = (key: keyof typeof alerts, val: boolean) => {
-    setAlerts((prev) => {
-      const next = { ...prev, [key]: val };
-      if (user?.uid) {
-        update(ref(db, `users/${user.uid}/prefs/alerts`), { [key]: val }).catch((err) =>
-          console.warn('[settings] Failed to persist alert toggle:', err)
-        );
-      }
-      return next;
-    });
+  const handleToggleAlert = async (key: keyof typeof alerts, val: boolean) => {
+    try {
+      await updateAlertPref(key, val);
+    } catch (err) {
+      console.warn('[settings] Failed to persist alert toggle:', err);
+    }
   };
 
   // Collapsible Accordion Sections State (Secondary Options)
@@ -256,7 +320,18 @@ export default function SettingsScreen() {
       Alert.alert('Profile Saved', 'Your display name has been updated successfully.');
     } catch (err: any) {
       console.warn('[Settings] Display name update error:', err);
-      Alert.alert('Update Failed', err?.message || 'Failed to update display name.');
+      if (err?.message === 'AUTH_DISPLAY_NAME_UPDATED_RTDB_FAILED') {
+        Alert.alert(
+          'Partially Saved',
+          'Your display name was updated in your session, but the database mirror failed.',
+          [
+            { text: 'Retry Mirror', onPress: () => retrySyncProfileToRTDB().catch(() => {}) },
+            { text: 'OK' },
+          ]
+        );
+      } else {
+        Alert.alert('Update Failed', err?.message || 'Failed to update display name.');
+      }
     } finally {
       setIsUpdatingName(false);
     }
@@ -628,7 +703,7 @@ export default function SettingsScreen() {
               deviceId={device.id}
               config={config!}
               status={status!}
-              telemetry={telemetry!}
+              telemetry={telemetry}
             />
 
             {/* ── 3. CORE WATERING LIMITS CARD ───────────────────────── */}
@@ -708,19 +783,22 @@ export default function SettingsScreen() {
               <SliderControl
                 label="Start Watering Below"
                 description="Triggers auto-watering when soil drops below this %"
-                value={config!.thresholds.moistureMin}
+                value={thresholdDrafts.moistureMin ?? config!.thresholds.moistureMin}
                 min={10}
                 max={50}
                 step={5}
                 unit="%"
                 accentColor={colors.palette.warningBorder}
-                onChange={(val) => updateThresholds({ moistureMin: val })}
-                onSlidingComplete={(val) => {
-                  if (device?.id) {
-                    updateDeviceConfigInRTDB(device.id, {
-                      'thresholds/moistureMin': val,
-                    } as any).catch((err) => console.warn('[settings] Failed to persist moistureMin to RTDB:', err));
-                  }
+                onChange={(val) => setThresholdDrafts((p) => ({ ...p, moistureMin: val }))}
+                onSlidingCancel={() => setThresholdDrafts((p) => ({ ...p, moistureMin: undefined }))}
+                onSlidingComplete={async (val) => {
+                  if (!device?.id) return;
+                  const targetId = device.id;
+                  await saveField('moistureMin', targetId, async () => {
+                    await updateDeviceThreshold(targetId, 'moistureMin', val);
+                    updateThresholds({ moistureMin: val });
+                    setThresholdDrafts((p) => ({ ...p, moistureMin: undefined }));
+                  });
                 }}
               />
 
@@ -730,43 +808,59 @@ export default function SettingsScreen() {
               <SliderControl
                 label="Stop Watering At"
                 description="Target soil saturation limit for irrigation shut-off"
-                value={config!.thresholds.moistureMax}
+                value={thresholdDrafts.moistureMax ?? config!.thresholds.moistureMax}
                 min={50}
                 max={90}
                 step={5}
                 unit="%"
                 accentColor={colors.palette.forest}
-                onChange={(val) => updateThresholds({ moistureMax: val })}
-                onSlidingComplete={(val) => {
-                  if (device?.id) {
-                    updateDeviceConfigInRTDB(device.id, {
-                      'thresholds/moistureMax': val,
-                    } as any).catch((err) => console.warn('[settings] Failed to persist moistureMax to RTDB:', err));
-                  }
+                onChange={(val) => setThresholdDrafts((p) => ({ ...p, moistureMax: val }))}
+                onSlidingCancel={() => setThresholdDrafts((p) => ({ ...p, moistureMax: undefined }))}
+                onSlidingComplete={async (val) => {
+                  if (!device?.id) return;
+                  const targetId = device.id;
+                  await saveField('moistureMax', targetId, async () => {
+                    await updateDeviceThreshold(targetId, 'moistureMax', val);
+                    updateThresholds({ moistureMax: val });
+                    setThresholdDrafts((p) => ({ ...p, moistureMax: undefined }));
+                  });
                 }}
               />
 
               <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
-              {/* Max Temperature Limit Slider */}
-              <SliderControl
-                label="Max Temperature Limit"
-                description="Pauses auto-watering during peak heat to protect roots"
-                value={config!.thresholds.tempMax}
-                min={20}
-                max={50}
-                step={1}
-                unit="°C"
-                accentColor={colors.palette.warningBorder}
-                onChange={(val) => updateThresholds({ tempMax: val })}
-                onSlidingComplete={(val) => {
-                  if (device?.id) {
-                    updateDeviceConfigInRTDB(device.id, {
-                      'thresholds/tempMax': val,
-                    } as any).catch((err) => console.warn('[settings] Failed to persist tempMax to RTDB:', err));
-                  }
-                }}
-              />
+              {/* Max Temperature Limit Slider - Keeps position and step in Celsius */}
+              {(() => {
+                const currentTempC = thresholdDrafts.tempMax ?? config!.thresholds.tempMax;
+                const tempBadgeUnit = tempUnit === 'F' ? `°C (${formatTemperature(currentTempC, 'F')})` : '°C';
+                return (
+                  <SliderControl
+                    label="Max Temperature Limit"
+                    description={
+                      tempUnit === 'F'
+                        ? `Pauses auto-watering during peak heat (${formatTemperature(currentTempC, 'F')})`
+                        : 'Pauses auto-watering during peak heat to protect roots'
+                    }
+                    value={currentTempC}
+                    min={20}
+                    max={50}
+                    step={1}
+                    unit={tempBadgeUnit}
+                    accentColor={colors.palette.warningBorder}
+                    onChange={(val) => setThresholdDrafts((p) => ({ ...p, tempMax: val }))}
+                    onSlidingCancel={() => setThresholdDrafts((p) => ({ ...p, tempMax: undefined }))}
+                    onSlidingComplete={async (val) => {
+                      if (!device?.id) return;
+                      const targetId = device.id;
+                      await saveField('tempMax', targetId, async () => {
+                        await updateDeviceThreshold(targetId, 'tempMax', val);
+                        updateThresholds({ tempMax: val });
+                        setThresholdDrafts((p) => ({ ...p, tempMax: undefined }));
+                      });
+                    }}
+                  />
+                );
+              })()}
 
               <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
@@ -774,42 +868,47 @@ export default function SettingsScreen() {
               <SliderControl
                 label="Max Humidity Limit"
                 description="Coastal guard delays watering when ambient air humidity is high"
-                value={config!.thresholds.humidityMax}
+                value={thresholdDrafts.humidityMax ?? config!.thresholds.humidityMax}
                 min={40}
                 max={95}
                 step={5}
                 unit="%"
                 accentColor={colors.palette.forest}
-                onChange={(val) => updateThresholds({ humidityMax: val })}
-                onSlidingComplete={(val) => {
-                  if (device?.id) {
-                    updateDeviceConfigInRTDB(device.id, {
-                      'thresholds/humidityMax': val,
-                    } as any).catch((err) => console.warn('[settings] Failed to persist humidityMax to RTDB:', err));
-                  }
+                onChange={(val) => setThresholdDrafts((p) => ({ ...p, humidityMax: val }))}
+                onSlidingCancel={() => setThresholdDrafts((p) => ({ ...p, humidityMax: undefined }))}
+                onSlidingComplete={async (val) => {
+                  if (!device?.id) return;
+                  const targetId = device.id;
+                  await saveField('humidityMax', targetId, async () => {
+                    await updateDeviceThreshold(targetId, 'humidityMax', val);
+                    updateThresholds({ humidityMax: val });
+                    setThresholdDrafts((p) => ({ ...p, humidityMax: undefined }));
+                  });
                 }}
               />
 
               <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
-              {/* Watering Duration Slider */}
+              {/* Watering Duration Slider - Preserves both pumpDurationSec and waterDurationSec */}
               <SliderControl
                 label="Watering Duration"
                 description="Run-time per automatic irrigation cycle (max 15s)"
-                value={config!.thresholds.pumpDurationSec}
+                value={thresholdDrafts.pumpDurationSec ?? config!.thresholds.pumpDurationSec}
                 min={1}
                 max={15}
                 step={1}
                 unit="s"
                 accentColor={colors.palette.sage}
-                onChange={(val) => updateThresholds({ pumpDurationSec: val })}
-                onSlidingComplete={(val) => {
-                  if (device?.id) {
-                    updateDeviceConfigInRTDB(device.id, {
-                      'thresholds/pumpDurationSec': val,
-                      'thresholds/waterDurationSec': val,
-                    } as any).catch((err) => console.warn('[settings] Failed to persist pumpDurationSec to RTDB:', err));
-                  }
+                onChange={(val) => setThresholdDrafts((p) => ({ ...p, pumpDurationSec: val }))}
+                onSlidingCancel={() => setThresholdDrafts((p) => ({ ...p, pumpDurationSec: undefined }))}
+                onSlidingComplete={async (val) => {
+                  if (!device?.id) return;
+                  const targetId = device.id;
+                  await saveField('pumpDurationSec', targetId, async () => {
+                    await updateDevicePumpDuration(targetId, val);
+                    updateThresholds({ pumpDurationSec: val });
+                    setThresholdDrafts((p) => ({ ...p, pumpDurationSec: undefined }));
+                  });
                 }}
               />
             </View>
@@ -861,7 +960,42 @@ export default function SettingsScreen() {
 
           <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
-          {/* Bottle Size */}
+          {/* Light Sensor (LDR) Toggle */}
+          <View style={styles.rowBetween}>
+            <View style={{ flex: 1, marginRight: 12 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Text style={[styles.itemLabel, { color: colors.text }]}>Light Sensor (LDR)</Text>
+                {renderSyncBadge('lightMode')}
+              </View>
+              <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
+                Detects direct sunlight to pause watering during peak midday heat
+                {config.sensors?.lightMode === 'analog' ? ' (Legacy analog calibrated)' : ''}
+              </Text>
+            </View>
+            <Switch
+              value={config.sensors?.lightMode === 'digital' || config.sensors?.lightMode === 'analog'}
+              onValueChange={async (val) => {
+                if (!device?.id) return;
+                const targetId = device.id;
+                const nextMode = val ? 'digital' : 'none';
+                await saveField('lightMode', targetId, async () => {
+                  await updateDeviceLightMode(targetId, nextMode);
+                  updateConfig({
+                    sensors: {
+                      ...config.sensors,
+                      lightMode: nextMode,
+                    },
+                  }, targetId);
+                });
+              }}
+              trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
+              thumbColor={colors.palette.white}
+            />
+          </View>
+
+          <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
+
+          {/* Bottle Size - Atomic Transaction on Config Node */}
           <SliderControl
             label="Bottle Size"
             description="Volume of water bottle attached to the plant node"
@@ -872,33 +1006,29 @@ export default function SettingsScreen() {
             unit=" ml"
             accentColor={colors.palette.forest}
             onChange={(val) => setBottleCapacityDraft(val)}
-            onSlidingComplete={(val) => {
-              setBottleCapacityDraft(null);
-              const currentRemaining = config!.bottle.remainingMl;
-              const newRemaining = Math.min(currentRemaining, val);
-              updateConfig({
-                bottleCapacityMl: val,
-                remainingMl: newRemaining,
-                bottle: {
-                  ...config!.bottle,
-                  capacityMl: val,
-                  remainingMl: newRemaining,
-                },
-              }, device?.id);
-              if (device?.id) {
-                updateDeviceConfigInRTDB(device.id, {
-                  bottleCapacityMl: val,
-                  remainingMl: newRemaining,
-                  'bottle/capacityMl': val,
-                  'bottle/remainingMl': newRemaining,
-                } as any).catch((err) => console.warn('[settings] Failed to persist bottle size to RTDB:', err));
-              }
+            onSlidingCancel={() => setBottleCapacityDraft(null)}
+            onSlidingComplete={async (val) => {
+              if (!device?.id) return;
+              const targetId = device.id;
+              await saveField('bottleCapacity', targetId, async () => {
+                const res = await updateBottleCapacityWithTransaction(targetId, val);
+                updateConfig({
+                  bottleCapacityMl: res.capacityMl,
+                  remainingMl: res.remainingMl,
+                  bottle: {
+                    ...config!.bottle,
+                    capacityMl: res.capacityMl,
+                    remainingMl: res.remainingMl,
+                  },
+                }, targetId);
+                setBottleCapacityDraft(null);
+              });
             }}
           />
 
           <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
-          {/* Pump Speed */}
+          {/* Pump Speed - Writes bottle/flowMlPerSec independently */}
           <SliderControl
             label="Pump Speed"
             description="Adjusts the water-use estimate while the relay switches the pump on and off"
@@ -909,53 +1039,34 @@ export default function SettingsScreen() {
             unit=" ml/s"
             accentColor={colors.palette.sage}
             onChange={(val) => setPumpFlowDraft(val)}
-            onSlidingComplete={(val) => {
-              setPumpFlowDraft(null);
-              updateConfig({
-                bottle: {
-                  ...config!.bottle,
-                  flowMlPerSec: val,
-                },
-              }, device?.id);
-              if (device?.id) {
-                updateDeviceConfigInRTDB(device.id, {
-                  'bottle/flowMlPerSec': val,
-                } as any).catch((err) => console.warn('[settings] Failed to persist pump speed to RTDB:', err));
-              }
+            onSlidingCancel={() => setPumpFlowDraft(null)}
+            onSlidingComplete={async (val) => {
+              if (!device?.id) return;
+              const targetId = device.id;
+              await saveField('flowMlPerSec', targetId, async () => {
+                await updateDeviceFlowRate(targetId, val);
+                updateConfig({
+                  bottle: {
+                    ...config!.bottle,
+                    flowMlPerSec: val,
+                  },
+                }, targetId);
+                setPumpFlowDraft(null);
+              });
             }}
           />
 
           {/* Shortcut refill button */}
           <TouchableOpacity
-            disabled={isRefilling}
-            onPress={async () => {
-              setIsRefilling(true);
-              try {
-                const confirmed = await refillBottle(device?.id);
-                if (confirmed) {
-                  Alert.alert('Reservoir Refilled', `Reset bottle level to ${config.bottle.capacityMl} ml.`);
-                } else {
-                  Alert.alert(
-                    'Refill Pending',
-                    'Waiting for controller acknowledgement. Please check hardware connection.'
-                  );
-                }
-              } catch (err: any) {
-                Alert.alert('Refill Error', err?.message || 'Failed to dispatch refill command.');
-              } finally {
-                setIsRefilling(false);
-              }
-            }}
+            onPress={() => setShowRefillModal(true)}
             style={[
               styles.refillRowBtn,
-              { backgroundColor: colors.palette.lime, borderRadius: radii.sm, opacity: isRefilling ? 0.7 : 1 },
+              { backgroundColor: colors.palette.lime, borderRadius: radii.sm },
             ]}
           >
             <Ionicons name="refresh" size={15} color={colors.palette.forest} />
             <Text style={[styles.refillRowText, { color: colors.palette.forest }]}>
-              {isRefilling
-                ? 'Confirming Refill with Controller...'
-                : `Mark Bottle as Refilled (${config.bottle.remainingMl} / ${config.bottle.capacityMl} ml)`}
+              {`Mark Bottle as Refilled (${config.bottle.remainingMl} / ${config.bottle.capacityMl} ml)`}
             </Text>
           </TouchableOpacity>
         </View>
@@ -1070,7 +1181,7 @@ export default function SettingsScreen() {
                       <View style={{ flex: 1 }}>
                         <Text style={[styles.itemLabel, { color: colors.text }]}>Extreme Heat & Weather</Text>
                         <Text style={[styles.itemDesc, { color: colors.textMuted }]}>
-                          Alert if temperature exceeds {config?.thresholds.tempMax ?? 35}°C
+                          Alert if temperature exceeds {formatTemperature(config?.thresholds.tempMax ?? 35, tempUnit)}
                         </Text>
                       </View>
                       <Switch
@@ -1298,7 +1409,7 @@ export default function SettingsScreen() {
                 <View style={styles.rowBetween}>
                   <Text style={[styles.infoFieldLabel, { color: colors.textMuted }]}>Wi-Fi Signal</Text>
                   <Text style={[styles.infoFieldValue, { color: colors.text }]}>
-                    {telemetry.rssi ? `${telemetry.rssi} dBm` : '-60 dBm (Good)'}
+                    {telemetry?.rssi ? `${telemetry.rssi} dBm` : '--'}
                   </Text>
                 </View>
 
@@ -1694,6 +1805,14 @@ export default function SettingsScreen() {
         visible={policyModal.visible}
         type={policyModal.type}
         onClose={() => setPolicyModal((prev) => ({ ...prev, visible: false }))}
+      />
+
+      <RefillConfirmationModal
+        visible={showRefillModal}
+        deviceId={device?.id || ''}
+        controllerName={config?.name || config?.plantName}
+        targetCapacity={config?.bottle?.capacityMl}
+        onClose={() => setShowRefillModal(false)}
       />
     </SafeAreaView>
   );
@@ -2165,5 +2284,45 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     marginLeft: 10,
+  },
+  syncBadgePending: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(90, 138, 92, 0.12)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  syncTextPending: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  syncBadgeSaved: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: '#E8F5E9',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  syncTextSaved: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#2E7D32',
+  },
+  syncBadgeError: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: '#FFEBEE',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  syncTextError: {
+    fontSize: 10,
+    fontWeight: '700',
   },
 });

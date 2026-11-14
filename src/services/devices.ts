@@ -9,6 +9,7 @@ import {
   limitToLast,
   get as fbGet,
   serverTimestamp,
+  runTransaction,
 } from 'firebase/database';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db, auth } from './firebase';
@@ -18,6 +19,8 @@ import type {
   DeviceStatus,
   DeviceCommand,
   WaterLog,
+  PlantLocation,
+  LightMode,
 } from '@/store/useLiveDevice';
 import { useLiveDevice } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
@@ -161,6 +164,148 @@ export const updateDeviceConfigInRTDB = async (
   await update(configRef, partialConfig);
 };
 
+export interface LocationPresetThresholds {
+  moistureMin: number;
+  moistureMax: number;
+  tempMax?: number;
+  humidityMax?: number;
+  pumpDurationSec?: number;
+}
+
+/**
+ * Atomically writes location and preset thresholds using leaf paths.
+ * Guarantees unrelated fields (mode, sensors, bottle) are never overwritten
+ * and manual mode is never unintentionally re-armed.
+ */
+export const updateDeviceLocationAndPreset = async (
+  deviceId: string,
+  location: PlantLocation,
+  presetThresholds: LocationPresetThresholds
+): Promise<void> => {
+  const configRef = ref(db, `devices/${deviceId}/config`);
+  const pumpSec = presetThresholds.pumpDurationSec ?? 5;
+  const leafUpdates: Record<string, any> = {
+    location,
+    'thresholds/moistureMin': presetThresholds.moistureMin,
+    'thresholds/moistureMax': presetThresholds.moistureMax,
+    'thresholds/tempMax': presetThresholds.tempMax ?? 35,
+    'thresholds/humidityMax': presetThresholds.humidityMax ?? 80,
+    'thresholds/pumpDurationSec': pumpSec,
+    'thresholds/waterDurationSec': pumpSec,
+  };
+  await update(configRef, leafUpdates);
+};
+
+/**
+ * Updates pump runtime using leaf paths, preserving both `pumpDurationSec`
+ * and `waterDurationSec` aliases across firmware revisions.
+ */
+export const updateDevicePumpDuration = async (
+  deviceId: string,
+  durationSec: number
+): Promise<void> => {
+  const configRef = ref(db, `devices/${deviceId}/config`);
+  await update(configRef, {
+    'thresholds/pumpDurationSec': durationSec,
+    'thresholds/waterDurationSec': durationSec,
+    pumpDurationSec: durationSec,
+    waterDurationSec: durationSec,
+  });
+};
+
+/**
+ * Updates an individual threshold leaf in `devices/{deviceId}/config/thresholds/{key}`.
+ */
+export const updateDeviceThreshold = async (
+  deviceId: string,
+  key: 'moistureMin' | 'moistureMax' | 'tempMax' | 'humidityMax',
+  value: number
+): Promise<void> => {
+  const configRef = ref(db, `devices/${deviceId}/config`);
+  await update(configRef, {
+    [`thresholds/${key}`]: value,
+  });
+};
+
+/**
+ * Writes bottle flow rate independently to `devices/{deviceId}/config/bottle/flowMlPerSec`
+ * without touching capacity, remaining volume, or other fields.
+ */
+export const updateDeviceFlowRate = async (
+  deviceId: string,
+  flowMlPerSec: number
+): Promise<void> => {
+  const configRef = ref(db, `devices/${deviceId}/config`);
+  await update(configRef, {
+    'bottle/flowMlPerSec': flowMlPerSec,
+    flowMlPerSec: flowMlPerSec,
+  });
+};
+
+/**
+ * Updates bottle capacity atomically via runTransaction on `/devices/{deviceId}/config`.
+ * Reads the latest `remainingMl` reserve, clamps it if the new capacity shrinks below it,
+ * and writes atomically across nested and legacy fields without colliding with concurrent
+ * firmware deductions or refills.
+ */
+export const updateBottleCapacityWithTransaction = async (
+  deviceId: string,
+  newCapacityMl: number
+): Promise<{ capacityMl: number; remainingMl: number }> => {
+  const configRef = ref(db, `devices/${deviceId}/config`);
+  const safeCapacity = Math.max(100, Math.round(newCapacityMl));
+
+  const result = await runTransaction(configRef, (currentData) => {
+    if (!currentData) {
+      return currentData;
+    }
+
+    const currentBottle = currentData.bottle || {};
+    const existingRemaining =
+      typeof currentBottle.remainingMl === 'number'
+        ? currentBottle.remainingMl
+        : typeof currentData.remainingMl === 'number'
+        ? currentData.remainingMl
+        : safeCapacity;
+
+    const clampedRemaining = Math.max(0, Math.min(safeCapacity, existingRemaining));
+
+    return {
+      ...currentData,
+      bottleCapacityMl: safeCapacity,
+      remainingMl: clampedRemaining,
+      bottle: {
+        ...currentBottle,
+        capacityMl: safeCapacity,
+        remainingMl: clampedRemaining,
+        flowMlPerSec: currentBottle.flowMlPerSec ?? 15,
+      },
+    };
+  });
+
+  const snapshot = result.snapshot;
+  const committedData = snapshot.val() || {};
+  return {
+    capacityMl: safeCapacity,
+    remainingMl:
+      committedData.bottle?.remainingMl ?? committedData.remainingMl ?? safeCapacity,
+  };
+};
+
+/**
+ * Updates Light Sensor (LDR) mode leaf `/devices/{deviceId}/config/sensors/lightMode`.
+ * Persists 'digital' for ON or 'none' for OFF, keeping any legacy 'analog' untouched until toggled.
+ */
+export const updateDeviceLightMode = async (
+  deviceId: string,
+  lightMode: LightMode
+): Promise<void> => {
+  const configRef = ref(db, `devices/${deviceId}/config`);
+  await update(configRef, {
+    'sensors/lightMode': lightMode,
+  });
+};
+
 /**
  * Fetches or listens to watering logs in `waterLogs/{deviceId}`
  * Uses limitToLast(10) to prevent loading unbounded historical logs.
@@ -177,7 +322,7 @@ export const listenToWaterLogs = (
       const data = snapshot.val();
       const logsArray: WaterLog[] = Object.keys(data).map((key) => {
         const item = data[key];
-        const itemTs = item.ts || item.timestamp || Date.now();
+        const itemTs = item.ts ?? item.timestamp ?? 0;
         return {
           id: key,
           ...item,
@@ -239,7 +384,7 @@ export const listenToDeviceHistory = (
       const data = snapshot.val();
       const records: DeviceHistoryRecord[] = Object.keys(data).map((key) => {
         const item = data[key];
-        const itemTs = item.ts || item.timestamp || Date.now();
+        const itemTs = item.ts ?? item.timestamp ?? 0;
         return {
           id: key,
           ...item,

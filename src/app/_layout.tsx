@@ -17,26 +17,35 @@ function RootNavigator() {
 
   useEffect(() => {
     const unsubscribe = initializeAuthListener();
-    SplashScreen.hideAsync().catch(() => {});
     return () => unsubscribe();
   }, [initializeAuthListener]);
 
   // Register push notifications when authenticated
   useEffect(() => {
-    if (user?.uid) {
-      import('@/services/notifications').then(({ registerForPushNotificationsAsync, savePushTokenToRTDB }) => {
-        registerForPushNotificationsAsync().then((token) => {
-          if (token && user.uid) {
-            savePushTokenToRTDB(user.uid, token);
-          }
+    const targetUid = user?.uid;
+    if (targetUid) {
+      import('@/services/notifications')
+        .then(({ registerForPushNotificationsAsync, savePushTokenToRTDB }) => {
+          registerForPushNotificationsAsync()
+            .then((token) => {
+              const currentUid = useSession.getState().user?.uid;
+              if (token && targetUid && currentUid === targetUid) {
+                savePushTokenToRTDB(targetUid, token);
+              }
+            })
+            .catch((err) => {
+              console.warn('[RootLayout] Push registration failed:', err);
+            });
+        })
+        .catch((err) => {
+          console.warn('[RootLayout] Failed to load notifications module:', err);
         });
-      });
     }
-  }, [user]);
+  }, [user?.uid]);
 
   return (
     <>
-      <StatusBar style="dark" />
+      <StatusBar style="light" />
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="index" />
         <Stack.Screen name="(auth)" options={{ headerShown: false }} />

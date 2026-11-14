@@ -12,6 +12,8 @@ import Animated, { FadeInDown, FadeOutUp } from 'react-native-reanimated';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
 import { WeatherData } from '@/store/useLiveDevice';
+import { useSession } from '@/store/useSession';
+import { formatTemperature } from '@/utils/temperature';
 
 export interface WeatherWidgetProps {
   weather: WeatherData | null;
@@ -39,6 +41,7 @@ export function WeatherWidget({
   style,
 }: WeatherWidgetProps) {
   const { colors, radii } = useAppTheme();
+  const units = useSession((s) => s.prefs.units);
 
   // If no weather loaded and not loading, keep hidden
   if (!weather && !loading) {
@@ -62,7 +65,7 @@ export function WeatherWidget({
     Alert.alert(
       `${weather.icon} Outdoor Weather`,
       `Condition: ${weather.conditionText}\n` +
-        `Temperature: ${Math.round(weather.temperature)}°C\n` +
+        `Temperature: ${formatTemperature(weather.temperature, units)}\n` +
         `Rain Probability: ${weather.rainProbability}%\n` +
         `Location: ${locationSource}\n\n` +
         (isRainDelayActive
@@ -122,7 +125,7 @@ export function WeatherWidget({
           },
         ]}
         accessibilityRole="button"
-        accessibilityLabel={`Weather: ${weather.temperature}°C ${weather.conditionText}`}
+        accessibilityLabel={`Weather: ${formatTemperature(weather.temperature, units)} ${weather.conditionText}`}
         testID="floating-weather-widget"
       >
         {/* Weather Icon (☀️, ⛅, 🌧️) */}
@@ -130,7 +133,7 @@ export function WeatherWidget({
 
         {/* Temperature & Condition Text: e.g. "28°C • Rain" */}
         <Text style={[styles.weatherText, { color: colors.palette.ink }]}>
-          {Math.round(weather.temperature)}°C • {weather.conditionText}
+          {formatTemperature(weather.temperature, units)} • {weather.conditionText}
         </Text>
 
         {/* Smart Terrace Rain Delay Tag if active */}

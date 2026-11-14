@@ -18,6 +18,8 @@ import Svg, { Polyline } from 'react-native-svg';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
 import { DeviceConfig, DeviceTelemetry, WaterLog } from '@/store/useLiveDevice';
+import { useSession } from '@/store/useSession';
+import { convertTemperature, getTemperatureUnitLabel } from '@/utils/temperature';
 
 // ─── BentoTile ───────────────────────────────────────────────────────────────
 
@@ -117,7 +119,7 @@ export function BentoTile({
 
 interface SoilTrendTileProps {
   waterLogs: WaterLog[];
-  currentMoisture: number;
+  currentMoisture?: number;
   bg: string;
 }
 
@@ -132,7 +134,7 @@ function SoilTrendTile({ waterLogs, currentMoisture, bg }: SoilTrendTileProps) {
       { val: l.moistureBefore, isWater: false },
       { val: l.moistureAfter, isWater: true },
     ]),
-    { val: currentMoisture, isWater: false },
+    ...(typeof currentMoisture === 'number' ? [{ val: currentMoisture, isWater: false }] : []),
   ];
 
   const W = 120;
@@ -167,20 +169,28 @@ function SoilTrendTile({ waterLogs, currentMoisture, bg }: SoilTrendTileProps) {
 
       {/* Sparkline */}
       <View style={styles.sparklineWrapper}>
-        <Svg width={120} height={60}>
-          <Polyline
-            points={polylinePoints}
-            fill="none"
-            stroke={colors.palette.sage}
-            strokeWidth={2.5}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </Svg>
+        {points.length > 1 ? (
+          <Svg width={120} height={60}>
+            <Polyline
+              points={polylinePoints}
+              fill="none"
+              stroke={colors.palette.sage}
+              strokeWidth={2.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </Svg>
+        ) : (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <Text style={{ color: colors.palette.sage, fontSize: 11 }}>
+              {typeof currentMoisture === 'number' ? `${currentMoisture}%` : '--'}
+            </Text>
+          </View>
+        )}
       </View>
 
       <Text style={[styles.trendNote, { color: colors.palette.sage }]}>
-        Last {recentLogs.length} waterings
+        {recentLogs.length > 0 ? `Last ${recentLogs.length} waterings` : 'No waterings logged'}
       </Text>
     </View>
   );
@@ -189,7 +199,7 @@ function SoilTrendTile({ waterLogs, currentMoisture, bg }: SoilTrendTileProps) {
 // ─── BentoGrid ───────────────────────────────────────────────────────────────
 
 interface BentoGridProps {
-  telemetry: DeviceTelemetry;
+  telemetry: DeviceTelemetry | null;
   config: DeviceConfig;
   waterLogs: WaterLog[];
 }
@@ -198,15 +208,21 @@ export function BentoGrid({ telemetry, config, waterLogs }: BentoGridProps) {
   const { colors } = useAppTheme();
   const hasLight = config.sensors.lightMode !== 'none';
   const isDigitalLight = config.sensors.lightMode === 'digital';
-  const lightValue = isDigitalLight
+  const lightValue = !telemetry
+    ? '--'
+    : isDigitalLight
     ? telemetry.light === 1
       ? 'Bright'
       : 'Dim'
     : `${telemetry.light ?? 0}%`;
   const lightIcon: keyof typeof Ionicons.glyphMap =
-    telemetry.light === 1 || (telemetry.light ?? 0) > 50
+    telemetry && (telemetry.light === 1 || (telemetry.light ?? 0) > 50)
       ? 'sunny'
       : 'moon-outline';
+
+  const units = useSession((s) => s.prefs.units);
+  const displayTemp = telemetry ? convertTemperature(telemetry.temperature, units) : '--';
+  const tempUnitLabel = telemetry ? getTemperatureUnitLabel(units) : '';
 
   return (
     <View style={styles.bentoGrid}>
@@ -215,7 +231,7 @@ export function BentoGrid({ telemetry, config, waterLogs }: BentoGridProps) {
         {/* Soil Trend – tall (spans 2 rows visually via minHeight) */}
         <SoilTrendTile
           waterLogs={waterLogs}
-          currentMoisture={telemetry.soilMoisture}
+          currentMoisture={telemetry?.soilMoisture}
           bg={`${colors.palette.lime}80`}
         />
 
@@ -223,8 +239,8 @@ export function BentoGrid({ telemetry, config, waterLogs }: BentoGridProps) {
         <View style={styles.rightCol}>
           <BentoTile
             label="Temperature"
-            value={telemetry.temperature}
-            unit="°C"
+            value={displayTemp}
+            unit={tempUnitLabel}
             icon="thermometer-outline"
             iconColor={colors.palette.forest}
             bg={`${colors.palette.mint}70`}
@@ -232,8 +248,8 @@ export function BentoGrid({ telemetry, config, waterLogs }: BentoGridProps) {
           />
           <BentoTile
             label="Humidity"
-            value={telemetry.humidity}
-            unit="%"
+            value={telemetry ? telemetry.humidity : '--'}
+            unit={telemetry ? '%' : ''}
             icon="water-outline"
             iconColor={colors.palette.sage}
             bg={`${colors.palette.lime}70`}
@@ -286,7 +302,10 @@ export function BentoGrid({ telemetry, config, waterLogs }: BentoGridProps) {
   );
 }
 
-function getInsight(telemetry: DeviceTelemetry, config: DeviceConfig): string {
+function getInsight(telemetry: DeviceTelemetry | null, config: DeviceConfig): string {
+  if (!telemetry) {
+    return 'Waiting for first telemetry...';
+  }
   if (telemetry.humidity > config.thresholds.humidityMax) {
     return 'Humidity is high — watering delayed to protect roots.';
   }

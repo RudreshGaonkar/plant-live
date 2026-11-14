@@ -24,8 +24,9 @@ export type {
   WaterLog,
   DeviceRecord,
   LiveDeviceStore,
+  RefillOutcome,
 } from '@/store/useLiveDevice';
-export { computePlantHealthState, mockDevice, createDefaultDeviceRecord } from '@/store/useLiveDevice';
+export { computePlantHealthState, createDefaultDeviceRecord } from '@/store/useLiveDevice';
 
 export const useLiveDevice = useLiveDeviceStore;
 
@@ -54,22 +55,6 @@ export function useLiveDeviceSync() {
         setPairings({ uid, ids: deviceIds });
 
         if (deviceIds.length > 0) {
-          // Seed any uninitialized paired devices into store
-          useLiveDeviceStore.setState((prev) => {
-            const nextDevices = { ...prev.devices };
-            for (const existingId of Object.keys(nextDevices)) {
-              if (!deviceIds.includes(existingId)) {
-                delete nextDevices[existingId];
-              }
-            }
-            for (const devId of deviceIds) {
-              if (!nextDevices[devId]) {
-                nextDevices[devId] = createDefaultDeviceRecord(devId);
-              }
-            }
-            return { devices: nextDevices };
-          });
-
           // Hydrate active device from AsyncStorage if valid
           let savedId: string | null = null;
           try {
@@ -79,17 +64,34 @@ export function useLiveDeviceSync() {
           }
 
           if (!active || revision !== currentRevision) return;
-          const current = useLiveDeviceStore.getState().activeDeviceId;
-          if (!current || !deviceIds.includes(current)) {
-            const target = (savedId && deviceIds.includes(savedId)) ? savedId : deviceIds[0];
-            setActiveDeviceId(target);
+
+          // Reconcile and seed records atomically using seedDeviceRecords
+          useLiveDeviceStore.getState().seedDeviceRecords(deviceIds, savedId);
+
+          if (
+            useSession.getState().user?.uid === uid &&
+            useSession.getState().pairingStatus !== 'paired'
+          ) {
+            useSession.setState({ pairingStatus: 'paired' });
           }
         } else {
           useLiveDeviceStore.getState().clearDeviceState();
+          if (
+            useSession.getState().user?.uid === uid &&
+            useSession.getState().pairingStatus !== 'unpaired'
+          ) {
+            useSession.setState({ pairingStatus: 'unpaired', activeDeviceId: '' });
+          }
         }
       } else {
         setPairings({ uid, ids: [] });
         useLiveDeviceStore.getState().clearDeviceState();
+        if (
+          useSession.getState().user?.uid === uid &&
+          useSession.getState().pairingStatus !== 'unpaired'
+        ) {
+          useSession.setState({ pairingStatus: 'unpaired', activeDeviceId: '' });
+        }
       }
     });
 

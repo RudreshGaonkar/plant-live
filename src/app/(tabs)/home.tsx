@@ -26,6 +26,7 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import Animated, {
   FadeIn,
@@ -48,6 +49,7 @@ import { VitalsSheet } from '@/components/VitalsSheet';
 import { GardenStrip } from '@/components/GardenStrip';
 import { WeatherWidget } from '@/components/WeatherWidget';
 import { useWeather } from '@/hooks/useWeather';
+import { useAutoSoakCooldown } from '@/hooks/useAutoSoakCooldown';
 import { removeDeviceWithAudit } from '@/services/devices';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -68,6 +70,8 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { device, health, isWatering, secondsLeft } = usePlantState();
   const user = useSession((s) => s.user);
+  const pairingStatus = useSession((s) => s.pairingStatus);
+  const retryBoot = useSession((s) => s.retryBoot);
   const devices = useLiveDevice((s) => s.devices);
   const activeDeviceId = useLiveDevice((s) => s.activeDeviceId);
   const setActiveDeviceId = useLiveDevice((s) => s.setActiveDeviceId);
@@ -82,7 +86,7 @@ export default function HomeScreen() {
   const currentPlantLocation = device?.config?.location || 'indoor';
   const { weather, loading: weatherLoading, isRainDelayActive } = useWeather(
     device ? currentPlantLocation : undefined,
-    health !== 'unknown' ? device?.telemetry.soilMoisture : undefined
+    health !== 'unknown' ? device?.telemetry?.soilMoisture : undefined
   );
 
   // Shared value that tracks VitalsSheet's translateY to drive overlay fades
@@ -111,49 +115,116 @@ export default function HomeScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [device?.status.lastSeen]);
 
-  // Empty state – no device paired
+  // Auto soak cooldown (30 min) derived from live telemetry sample
+  const autoSoak = useAutoSoakCooldown(device?.id);
+
+  // Hide splash screen once usable content has committed
+  useEffect(() => {
+    if (device || pairingStatus === 'unpaired' || pairingStatus === 'unavailable') {
+      SplashScreen.hideAsync().catch(() => {});
+    }
+  }, [device, pairingStatus]);
+
+  // Empty state – handling pending, unavailable, or confirmed unpaired
   if (!device) {
-    return (
-      <LinearGradient
-        colors={['#CEEA9F', '#F6FAF2']}
-        style={styles.emptyStage}
-      >
-        <StatusBar style="dark" />
-        <View style={[styles.emptyContent, { paddingTop: insets.top + 20 }]}>
-          <View
-            style={[
-              styles.emptyIconWrap,
-              { backgroundColor: colors.palette.lime },
-            ]}
-          >
-            <Ionicons name="leaf-outline" size={56} color={colors.palette.forest} />
+    if (pairingStatus === 'unavailable') {
+      return (
+        <LinearGradient
+          colors={['#16221A', '#203A2B']}
+          style={styles.emptyStage}
+        >
+          <StatusBar style="light" />
+          <View style={[styles.emptyContent, { paddingTop: insets.top + 40 }]}>
+            <View
+              style={[
+                styles.emptyIconWrap,
+                { backgroundColor: 'rgba(255, 255, 255, 0.1)' },
+              ]}
+            >
+              <Ionicons name="cloud-offline-outline" size={56} color="#F6FAF2" />
+            </View>
+            <Text style={[styles.emptyTitle, { color: '#F6FAF2' }]}>
+              Device Unavailable
+            </Text>
+            <Text style={[styles.emptySubtitle, { color: '#80B07F' }]}>
+              Unable to connect to controller services. Check your connection or retry.
+            </Text>
+            <TouchableOpacity
+              style={[
+                styles.addBtn,
+                {
+                  backgroundColor: colors.palette.lime,
+                  borderRadius: radii.full,
+                },
+              ]}
+              onPress={() => retryBoot()}
+            >
+              <Ionicons
+                name="refresh-outline"
+                size={18}
+                color={colors.palette.forest}
+                style={{ marginRight: 8 }}
+              />
+              <Text style={[styles.addBtnText, { color: colors.palette.forest }]}>
+                Retry Connection
+              </Text>
+            </TouchableOpacity>
           </View>
-          <Text style={[styles.emptyTitle, { color: colors.palette.ink }]}>
-            Unpaired Controller
-          </Text>
-          <Text style={[styles.emptySubtitle, { color: colors.palette.sage }]}>
-            No controller is currently paired under your account. Pair your plant controller to start live monitoring.
-          </Text>
-          <TouchableOpacity
-            style={[
-              styles.addBtn,
-              {
-                backgroundColor: colors.palette.forest,
-                borderRadius: radii.full,
-              },
-            ]}
-            onPress={() => router.push('/add-device')}
-          >
-            <Ionicons
-              name="link-outline"
-              size={18}
-              color={colors.palette.white}
-              style={{ marginRight: 8 }}
-            />
-            <Text style={styles.addBtnText}>Pair Controller</Text>
-          </TouchableOpacity>
-        </View>
-      </LinearGradient>
+        </LinearGradient>
+      );
+    }
+
+    if (pairingStatus === 'unpaired') {
+      return (
+        <LinearGradient
+          colors={['#CEEA9F', '#F6FAF2']}
+          style={styles.emptyStage}
+        >
+          <StatusBar style="dark" />
+          <View style={[styles.emptyContent, { paddingTop: insets.top + 20 }]}>
+            <View
+              style={[
+                styles.emptyIconWrap,
+                { backgroundColor: colors.palette.lime },
+              ]}
+            >
+              <Ionicons name="leaf-outline" size={56} color={colors.palette.forest} />
+            </View>
+            <Text style={[styles.emptyTitle, { color: colors.palette.ink }]}>
+              Unpaired Controller
+            </Text>
+            <Text style={[styles.emptySubtitle, { color: colors.palette.sage }]}>
+              No controller is currently paired under your account. Pair your plant controller to start live monitoring.
+            </Text>
+            <TouchableOpacity
+              style={[
+                styles.addBtn,
+                {
+                  backgroundColor: colors.palette.forest,
+                  borderRadius: radii.full,
+                },
+              ]}
+              onPress={() => router.push('/add-device')}
+            >
+              <Ionicons
+                name="link-outline"
+                size={18}
+                color={colors.palette.white}
+                style={{ marginRight: 8 }}
+              />
+              <Text style={styles.addBtnText}>Pair Controller</Text>
+            </TouchableOpacity>
+          </View>
+        </LinearGradient>
+      );
+    }
+
+    // While pairingStatus is pending or resolving, render smooth loading stage
+    return (
+      <View style={[styles.emptyStage, { backgroundColor: '#16221A', justifyContent: 'center', alignItems: 'center' }]}>
+        <StatusBar style="light" />
+        <ActivityIndicator size="large" color={colors.palette.lime} />
+      </View>
     );
   }
 
@@ -184,7 +255,13 @@ export default function HomeScreen() {
   // as soon as telemetry.pumpOn becomes false or /command/ack/status reaches "done", "failed", or "rejected"
   const isPumpActive =
     !isTerminalAck &&
-    Boolean(telemetry.isPumpActive === true || telemetry.pumpOn === true);
+    Boolean(telemetry?.isPumpActive === true || telemetry?.pumpOn === true);
+
+  const isIdleAndDry =
+    !isPumpActive &&
+    stage !== 'running' &&
+    (health === 'thirsty' || (telemetry ? telemetry.soilMoisture < config.thresholds.moistureMin : false));
+  const soakCooldownText = isIdleAndDry && autoSoak.isCoolingDown ? autoSoak.formattedText : undefined;
 
   // Manual watering trigger with unified command hook
   const handleManualWatering = async () => {
@@ -473,7 +550,11 @@ export default function HomeScreen() {
 
       {/* ── Layer 2: Mood bubble (fades when sheet rises) ────────── */}
       <Animated.View style={[styles.moodBubbleContainer, overlayAnimStyle]}>
-        <MoodBubble health={health} lastSeen={isOffline ? status.lastSeen : undefined} />
+        <MoodBubble
+          health={health}
+          lastSeen={isOffline ? status.lastSeen : undefined}
+          subtitle={soakCooldownText}
+        />
       </Animated.View>
 
       {/* ── Layer 3: Left-edge BottleRail (fades when sheet rises) ── */}
@@ -489,6 +570,8 @@ export default function HomeScreen() {
           capacityMl={config.bottle.capacityMl}
           flowMlPerSec={config.bottle.flowMlPerSec}
           isLoading={!device?.isConfigHydrated && (config.bottle.capacityMl === 0 || config.bottle.remainingMl === 0)}
+          deviceId={device.id}
+          controllerName={config.name || config.plantName}
           onRefill={() => refillBottle(device.id)}
         />
       </Animated.View>
@@ -517,6 +600,7 @@ export default function HomeScreen() {
         waterLogs={waterLogs}
         forceSnap={isWatering ? 'peek' : undefined}
         animatedTranslateY={sheetTranslateY}
+        soakCooldownText={soakCooldownText}
       />
     </View>
   );

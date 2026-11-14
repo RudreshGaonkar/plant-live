@@ -4,6 +4,7 @@ import { ref, onValue } from 'firebase/database';
 import { db } from '@/services/firebase';
 import { useLiveDevice } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
+import { registerAlertSessionClearer } from '@/store/alertSessionBus';
 import {
   listenToUserAlerts,
   markAlertReadInRTDB,
@@ -22,6 +23,7 @@ import {
   sendDeviceCommand,
   listenToDeviceCommand,
 } from '@/services/devices';
+import { formatTemperatureText } from '@/utils/temperature';
 
 export type AlertSeverity = 'critical' | 'warning' | 'info';
 export type AlertStatus = 'unread' | 'read' | 'snoozed' | 'active' | 'resolved';
@@ -239,6 +241,9 @@ export function clearAlertSession() {
   useAlertStore.getState().setAllStatusOverrides({});
 }
 
+// Register with the bus so useSession can call it without a direct import
+registerAlertSessionClearer(clearAlertSession);
+
 const prevPumpState: Record<string, { pumpOn: boolean; moisture: number }> = {};
 const createdTodayAlertKeys = new Set<string>();
 const notifiedAlerts = new Set<string>();
@@ -262,6 +267,12 @@ function runEvaluation() {
 
   for (const dev of Object.values(devices)) {
     const { id: deviceId, config, telemetry, status } = dev;
+
+    // Skip evaluating sensor threshold rules on unhydrated devices
+    if (!telemetry || status.lastSeen === 0) {
+      continue;
+    }
+
     const plantName = config.plantName || config.name || 'Plant';
     const location = config.location || 'indoor';
     const isOutdoor = location === 'balcony' || location === 'terrace';
@@ -627,7 +638,10 @@ function runEvaluation() {
         const inQuietHours = isQuietHours(currentUserPrefs?.quietHours);
 
         if (isEnabled && !inQuietHours) {
-          sendLocalNotification(na.title, na.body, {
+          const preferredUnits = currentUserPrefs?.units || useSession.getState().prefs?.units || 'C';
+          const deliveryTitle = formatTemperatureText(na.title, preferredUnits);
+          const deliveryBody = formatTemperatureText(na.body, preferredUnits);
+          sendLocalNotification(deliveryTitle, deliveryBody, {
             deviceId: na.deviceId,
             type: na.type,
             severity: na.severity,

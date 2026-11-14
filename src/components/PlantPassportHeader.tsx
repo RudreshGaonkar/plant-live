@@ -8,7 +8,7 @@ export interface PlantPassportHeaderProps {
   deviceId?: string;
   config: DeviceConfig;
   status: DeviceStatus;
-  telemetry: DeviceTelemetry;
+  telemetry: DeviceTelemetry | null;
 }
 
 export function PlantPassportHeader({
@@ -29,7 +29,7 @@ export function PlantPassportHeader({
 
   // Helper for last-seen human-readable time
   const formatLastSeen = (timestamp: number) => {
-    if (!timestamp) return 'Unknown';
+    if (!timestamp || timestamp === 0) return 'Never';
     const diffSec = Math.max(0, Math.floor((now - timestamp) / 1000));
     if (diffSec < 15) return 'Just now';
     if (diffSec < 60) return `${diffSec}s ago`;
@@ -41,13 +41,16 @@ export function PlantPassportHeader({
   };
 
   // Wi-Fi signal helper
-  const getWifiSignalInfo = (rssi: number) => {
+  const getWifiSignalInfo = (rssi?: number) => {
+    if (typeof rssi !== 'number' || isNaN(rssi)) {
+      return { label: '--', icon: 'wifi-outline' as const };
+    }
     if (rssi >= -60) return { label: `${rssi} dBm (Strong)`, icon: 'wifi' as const };
     if (rssi >= -75) return { label: `${rssi} dBm (Good)`, icon: 'wifi' as const };
     return { label: `${rssi} dBm (Weak)`, icon: 'wifi-outline' as const };
   };
 
-  const wifiInfo = getWifiSignalInfo(telemetry.rssi);
+  const wifiInfo = getWifiSignalInfo(telemetry?.rssi);
 
   // Location display mapping
   const locationMeta: Record<string, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
@@ -174,7 +177,7 @@ export function PlantPassportHeader({
           <View>
             <Text style={[styles.statusKey, { color: colors.textMuted }]}>Signal</Text>
             <Text style={[styles.statusVal, { color: colors.palette.ink }]}>
-              {telemetry.rssi} dBm
+              {telemetry ? `${telemetry.rssi} dBm` : '--'}
             </Text>
           </View>
         </View>
@@ -190,7 +193,7 @@ export function PlantPassportHeader({
               style={[styles.statusVal, { color: colors.palette.ink }]}
               numberOfLines={1}
             >
-              {status.firmware}
+              {status.firmware || '--'}
             </Text>
           </View>
         </View>

@@ -4,10 +4,11 @@ import {
   Text,
   StyleSheet,
   ScrollView,
+  TouchableOpacity,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ref, onValue } from 'firebase/database';
-import { db } from '@/services/firebase';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import { router } from 'expo-router';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice, WaterLog, DeviceRecord } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
@@ -22,14 +23,15 @@ import {
 } from '@/components/TelemetryChart';
 import { InsightCardCarousel, InsightCardData } from '@/components/InsightCardCarousel';
 import { EventTimeline } from '@/components/EventTimeline';
+import { convertTemperature, formatTemperature, getTemperatureUnitLabel } from '@/utils/temperature';
 
 const toDisplayTemp = (tempC: number, unit: 'C' | 'F') => {
-  return unit === 'F' ? Math.round((tempC * 9) / 5 + 32) : tempC;
+  return convertTemperature(tempC, unit);
 };
 
 /**
- * Builds continuous historical telemetry data points.
- * Combines real RTDB history (if available) with realistic diurnal curves and watering step-ups.
+ * Builds continuous historical telemetry data points strictly from real RTDB samples.
+ * Returns empty arrays when no real samples exist.
  */
 function generateHistoricalSeries(
   device: DeviceRecord,
@@ -45,11 +47,21 @@ function generateHistoricalSeries(
   const windowMs = windowHours * 3600000;
   const startTime = now - windowMs;
 
-  const numPoints = timeWindow === '24h' ? 25 : 29; // Hourly for 24h, 6-hourly for 7d
-  const stepMs = windowMs / (numPoints - 1);
+  const { sensors } = device.config;
 
-  const { location, thresholds, sensors } = device.config;
-  const currentTelem = device.telemetry;
+  // Filter realHistory to those within the window and sort ascending by ts
+  const recordsInWindow = realHistory
+    .filter((r) => r.ts >= startTime && r.ts <= now)
+    .sort((a, b) => a.ts - b.ts);
+
+  if (recordsInWindow.length === 0) {
+    return {
+      moisture: [],
+      temp: [],
+      humidity: [],
+      light: [],
+    };
+  }
 
   // Filter relevant water logs in this window
   const logsInWindow = waterLogs.filter((l) => l.ts >= startTime && l.ts <= now);
@@ -59,110 +71,70 @@ function generateHistoricalSeries(
   const humidityPoints: ChartDataPoint[] = [];
   const lightPoints: ChartDataPoint[] = [];
 
-  for (let i = 0; i < numPoints; i++) {
-    const ptTs = i === numPoints - 1 ? now : startTime + i * stepMs;
-    const x = (i / (numPoints - 1)) * chartWidth;
-    const date = new Date(ptTs);
-    const hour = date.getHours() + date.getMinutes() / 60;
+  const minTs = recordsInWindow[0].ts;
+  const maxTs = recordsInWindow[recordsInWindow.length - 1].ts;
+  const spanTs = maxTs - minTs;
 
-    // Check if real history point exists close to this timestamp
-    const closeReal = realHistory.find((r) => Math.abs(r.ts - ptTs) < stepMs / 2);
+  recordsInWindow.forEach((rec) => {
+    const x = recordsInWindow.length === 1 || spanTs === 0
+      ? chartWidth / 2
+      : ((rec.ts - minTs) / spanTs) * chartWidth;
+
+    const nearLog = logsInWindow.find((l) => Math.abs(l.ts - rec.ts) < 15 * 60 * 1000);
 
     // 1. Soil Moisture Calculation
-    let moistureVal: number;
-    let isWater = false;
-    let matchingLog: WaterLog | undefined;
-
-    // Find if a water log occurred near this sample
-    const nearLog = logsInWindow.find((l) => Math.abs(l.ts - ptTs) < stepMs / 1.5);
-    if (nearLog) {
-      isWater = true;
-      matchingLog = nearLog;
-      moistureVal = nearLog.moistureAfter;
-    } else if (closeReal && typeof closeReal.soilMoisture === 'number') {
-      moistureVal = closeReal.soilMoisture;
-    } else if (i === numPoints - 1) {
-      moistureVal = currentTelem.soilMoisture;
-    } else {
-      // Simulate natural decay from current value back in time
-      const decayRate = location === 'terrace' ? 1.4 : location === 'balcony' ? 1.1 : 0.8;
-      const hoursAgo = (now - ptTs) / 3600000;
-      // Periodic saw-tooth shape based on water logs or decay
-      const baseDecay = (currentTelem.soilMoisture + hoursAgo * decayRate * 0.4) % 40;
-      moistureVal = Math.max(
-        thresholds.moistureMin - 5,
-        Math.min(thresholds.moistureMax + 10, currentTelem.soilMoisture - baseDecay + 15)
-      );
+    if (typeof rec.soilMoisture === 'number') {
+      const moistureVal = rec.soilMoisture;
+      const moistureY = chartHeight - (Math.max(0, Math.min(100, moistureVal)) / 100) * chartHeight;
+      moisturePoints.push({
+        x,
+        y: moistureY,
+        ts: rec.ts,
+        val: moistureVal,
+        isWater: Boolean(nearLog),
+        waterLog: nearLog,
+      });
     }
 
-    const moistureY = chartHeight - (Math.max(0, Math.min(100, moistureVal)) / 100) * chartHeight;
-    moisturePoints.push({
-      x,
-      y: moistureY,
-      ts: ptTs,
-      val: moistureVal,
-      isWater,
-      waterLog: matchingLog,
-    });
-
-    // 2. Temperature Calculation (Diurnal sine curve peaking at 2 PM / 14:00)
-    let tempVal: number;
-    if (closeReal && typeof closeReal.temperature === 'number') {
-      tempVal = closeReal.temperature;
-    } else if (i === numPoints - 1) {
-      tempVal = currentTelem.temperature;
-    } else {
-      const diurnalSine = Math.sin(((hour - 8) / 24) * 2 * Math.PI); // peak ~14:00
-      const baseTemp = location === 'terrace' ? 29 : location === 'balcony' ? 27 : 24;
-      const amplitude = location === 'terrace' ? 5 : 3;
-      tempVal = Math.round(baseTemp + diurnalSine * amplitude);
+    // 2. Temperature Calculation
+    if (typeof rec.temperature === 'number') {
+      const displayTempVal = toDisplayTemp(rec.temperature, tempUnit);
+      const minT = tempUnit === 'F' ? 32 : 0;
+      const maxT = tempUnit === 'F' ? 122 : 50;
+      const tempY = chartHeight - (Math.max(0, Math.min(maxT - minT, displayTempVal - minT)) / (maxT - minT)) * chartHeight;
+      tempPoints.push({
+        x,
+        y: tempY,
+        ts: rec.ts,
+        val: displayTempVal,
+      });
     }
-    const displayTempVal = toDisplayTemp(tempVal, tempUnit);
-    const minT = tempUnit === 'F' ? 32 : 0;
-    const maxT = tempUnit === 'F' ? 122 : 50;
-    const tempY = chartHeight - (Math.max(0, Math.min(maxT - minT, displayTempVal - minT)) / (maxT - minT)) * chartHeight;
-    tempPoints.push({
-      x,
-      y: tempY,
-      ts: ptTs,
-      val: displayTempVal,
-    });
 
-    // 3. Humidity Calculation (Inversely related to temperature / peaks at dawn)
-    let humidityVal: number;
-    if (closeReal && typeof closeReal.humidity === 'number') {
-      humidityVal = closeReal.humidity;
-    } else if (i === numPoints - 1) {
-      humidityVal = currentTelem.humidity;
-    } else {
-      const humiditySine = Math.sin(((hour - 20) / 24) * 2 * Math.PI); // peak ~6:00
-      humidityVal = Math.round(62 + humiditySine * 15);
+    // 3. Humidity Calculation
+    if (typeof rec.humidity === 'number') {
+      const humidityVal = rec.humidity;
+      const humidityY = chartHeight - (Math.max(0, Math.min(100, humidityVal)) / 100) * chartHeight;
+      humidityPoints.push({
+        x,
+        y: humidityY,
+        ts: rec.ts,
+        val: humidityVal,
+      });
     }
-    const humidityY = chartHeight - (Math.max(0, Math.min(100, humidityVal)) / 100) * chartHeight;
-    humidityPoints.push({
-      x,
-      y: humidityY,
-      ts: ptTs,
-      val: humidityVal,
-    });
 
-    // 4. Sunlight Calculation (Daylight 6 AM to 6 PM)
-    let lightVal: number = 0;
-    if (sensors.lightMode === 'digital') {
-      lightVal = hour >= 6 && hour <= 18 ? 1 : 0;
-    } else if (sensors.lightMode === 'analog') {
-      const daylightFactor = Math.max(0, Math.sin(((hour - 6) / 12) * Math.PI));
-      lightVal = Math.round(daylightFactor * 90);
+    // 4. Sunlight Calculation
+    if (typeof rec.light === 'number') {
+      const lightVal = rec.light;
+      const lightMax = sensors.lightMode === 'digital' ? 1 : 100;
+      const lightY = chartHeight - (Math.max(0, Math.min(lightMax, lightVal)) / (lightMax || 1)) * chartHeight;
+      lightPoints.push({
+        x,
+        y: lightY,
+        ts: rec.ts,
+        val: lightVal,
+      });
     }
-    const lightMax = sensors.lightMode === 'digital' ? 1 : 100;
-    const lightY = chartHeight - (Math.max(0, Math.min(lightMax, lightVal)) / (lightMax || 1)) * chartHeight;
-    lightPoints.push({
-      x,
-      y: lightY,
-      ts: ptTs,
-      val: lightVal,
-    });
-  }
+  });
 
   return {
     moisture: moisturePoints,
@@ -181,6 +153,7 @@ function buildRuleBasedInsights(
   tempUnit: 'C' | 'F' = 'C'
 ): InsightCardData[] {
   const { config, telemetry } = device;
+  if (!telemetry) return [];
   const plantName = config.plantName || config.name || 'Your plant';
   const location = config.location;
   const list: InsightCardData[] = [];
@@ -254,14 +227,14 @@ function buildRuleBasedInsights(
   }
 
   // Insight 4: Temperature Safety Zone
-  const displayCurrentTemp = toDisplayTemp(telemetry.temperature, tempUnit);
-  const displayMaxTemp = toDisplayTemp(config.thresholds.tempMax, tempUnit);
+  const displayCurrentTemp = formatTemperature(telemetry.temperature, tempUnit);
+  const displayMaxTemp = formatTemperature(config.thresholds.tempMax, tempUnit);
   if (telemetry.temperature > config.thresholds.tempMax - 2) {
     list.push({
       id: 'ins-temp',
       category: 'Heat Watch',
       title: 'Warm Afternoon Alert',
-      body: `Temperature neared ${displayCurrentTemp}°${tempUnit}. The system prefers early morning watering to avoid scalding delicate feeder roots in warm soil.`,
+      body: `Temperature neared ${displayCurrentTemp}. The system prefers early morning watering to avoid scalding delicate feeder roots in warm soil.`,
       icon: 'thermometer',
       tint: 'blush',
     });
@@ -270,7 +243,7 @@ function buildRuleBasedInsights(
       id: 'ins-temp',
       category: 'Thermal Health',
       title: 'Comfortable Temp Range',
-      body: `Ambient temperature (${displayCurrentTemp}°${tempUnit}) remained comfortably within safe bounds (limit: ${displayMaxTemp}°${tempUnit}).`,
+      body: `Ambient temperature (${displayCurrentTemp}) remained comfortably within safe bounds (limit: ${displayMaxTemp}).`,
       icon: 'happy',
       tint: 'mint',
     });
@@ -281,23 +254,10 @@ function buildRuleBasedInsights(
 
 export default function HistoryScreen() {
   const insets = useSafeAreaInsets();
-  const { colors, spacing } = useAppTheme();
+  const { colors, radii, spacing } = useAppTheme();
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
   const waterLogs = useLiveDevice((s) => s.waterLogs);
-  const user = useSession((s) => s.user);
-  const [tempUnit, setTempUnit] = useState<'C' | 'F'>('C');
-
-  useEffect(() => {
-    if (!user?.uid) return;
-    const unitsRef = ref(db, `users/${user.uid}/prefs/units`);
-    const unsub = onValue(unitsRef, (snap) => {
-      const val = snap.val();
-      if (val === 'C' || val === 'F') {
-        setTempUnit(val);
-      }
-    });
-    return () => unsub();
-  }, [user?.uid]);
+  const tempUnit = useSession((s) => s.prefs.units);
 
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('24h');
   const [activeMetric, setActiveMetric] = useState<ChartMetricKey>('moisture');
@@ -388,9 +348,25 @@ export default function HistoryScreen() {
     return (
       <View style={[styles.safeArea, { backgroundColor: colors.background, paddingTop: insets.top + 12 }]}>
         <View style={styles.emptyContainer}>
-          <Text style={[styles.emptyText, { color: colors.textMuted }]}>
-            No controller paired. Connect a plant controller to view history.
+          <View style={[styles.emptyIconWrap, { backgroundColor: colors.palette.lime }]}>
+            <Ionicons name="bar-chart-outline" size={56} color={colors.palette.forest} />
+          </View>
+          <Text style={[styles.emptyTitle, { color: colors.text }]}>
+            No Controller Paired
           </Text>
+          <Text style={[styles.emptySubtitle, { color: colors.textMuted }]}>
+            Connect a plant controller to view sensor history and telemetry trends.
+          </Text>
+          <TouchableOpacity
+            style={[
+              styles.emptyActionBtn,
+              { backgroundColor: colors.palette.forest, borderRadius: radii.full },
+            ]}
+            onPress={() => router.push('/add-device')}
+          >
+            <Ionicons name="add-circle-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+            <Text style={styles.emptyActionBtnText}>Pair Controller</Text>
+          </TouchableOpacity>
         </View>
       </View>
     );
@@ -401,7 +377,7 @@ export default function HistoryScreen() {
     activeMetric === 'moisture'
       ? '%'
       : activeMetric === 'temp'
-      ? `°${tempUnit}`
+      ? getTemperatureUnitLabel(tempUnit)
       : activeMetric === 'humidity'
       ? '%'
       : device.config.sensors.lightMode === 'digital'
@@ -486,10 +462,37 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24,
+    paddingHorizontal: 32,
   },
-  emptyText: {
-    fontSize: 14,
+  emptyIconWrap: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  emptyTitle: {
+    fontSize: 22,
+    fontWeight: '800',
     textAlign: 'center',
+    marginBottom: 8,
+  },
+  emptySubtitle: {
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+    marginBottom: 24,
+  },
+  emptyActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+  },
+  emptyActionBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
   },
 });

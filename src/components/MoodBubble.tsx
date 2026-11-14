@@ -5,18 +5,18 @@
  * Gently bobs via a looped Reanimated spring animation.
  * uiLayout.md Section 3 – Layer 2
  */
+import { PlantHealthState } from '@/store/useLiveDevice';
+import { useAppTheme } from '@/theme';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import React, { useEffect } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import Animated, {
-  useSharedValue,
   useAnimatedStyle,
+  useSharedValue,
   withRepeat,
   withSequence,
   withTiming,
 } from 'react-native-reanimated';
-import Ionicons from '@expo/vector-icons/Ionicons';
-import { useAppTheme } from '@/theme';
-import { PlantHealthState } from '@/store/useLiveDevice';
 
 interface MoodConfig {
   text: string;
@@ -60,7 +60,7 @@ const getMoodConfig = (
       return {
         text: lastSeenMinutes !== undefined
           ? `Last seen ${lastSeenMinutes} min ago`
-          : 'Waiting for soil telemetry',
+          : 'Waiting for first telemetry',
         bg: '#B0BEC5',
         textColor: '#37474F',
         borderColor: '#90A4AE',
@@ -72,9 +72,10 @@ const getMoodConfig = (
 interface MoodBubbleProps {
   health: PlantHealthState;
   lastSeen?: number; // epoch ms
+  subtitle?: string;
 }
 
-export function MoodBubble({ health, lastSeen }: MoodBubbleProps) {
+export function MoodBubble({ health, lastSeen, subtitle }: MoodBubbleProps) {
   const { colors, radii } = useAppTheme();
   const [now] = React.useState(() => Date.now());
 
@@ -110,10 +111,10 @@ export function MoodBubble({ health, lastSeen }: MoodBubbleProps) {
           {
             backgroundColor: mood.bg,
             borderColor: mood.borderColor,
-            borderRadius: radii.full,
+            borderRadius: subtitle ? radii.lg : radii.full,
           },
         ]}
-        accessibilityLabel={`Plant mood: ${mood.text}`}
+        accessibilityLabel={`Plant mood: ${mood.text}${subtitle ? `. ${subtitle}` : ''}`}
       >
         <Ionicons
           name={mood.icon}
@@ -121,9 +122,16 @@ export function MoodBubble({ health, lastSeen }: MoodBubbleProps) {
           color={mood.textColor}
           style={styles.icon}
         />
-        <Text style={[styles.text, { color: mood.textColor }]}>
-          {mood.text}
-        </Text>
+        <View style={subtitle ? styles.textColumn : undefined}>
+          <Text style={[styles.text, { color: mood.textColor }]}>
+            {mood.text}
+          </Text>
+          {subtitle ? (
+            <Text style={[styles.subtitle, { color: mood.textColor }]}>
+              {subtitle}
+            </Text>
+          ) : null}
+        </View>
       </View>
 
       {/* Bubble tail pointing downward toward the plant */}
@@ -161,6 +169,15 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     letterSpacing: 0.1,
+  },
+  textColumn: {
+    flexDirection: 'column',
+  },
+  subtitle: {
+    fontSize: 11,
+    fontWeight: '600',
+    opacity: 0.85,
+    marginTop: 1,
   },
   tail: {
     width: 0,

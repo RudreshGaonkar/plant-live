@@ -14,7 +14,7 @@ export function usePlantState(device?: DeviceRecord) {
   const isWatering = useLiveDevice((s) => s.isWateringActive);
   const secondsLeft = useLiveDevice((s) => s.wateringSecondsLeft);
   const [, refreshHealth] = useReducer((revision: number) => revision + 1, 0);
-  const sampleTime = active?.telemetry.ts;
+  const sampleTime = active?.telemetry?.ts;
 
   useEffect(() => {
     if (!sampleTime) return;

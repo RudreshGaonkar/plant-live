@@ -187,6 +187,22 @@ describe('Device Audit Logging & Persistence Suite', () => {
       expect(res.nextDeviceId).toBe('active-leaf-node');
       expect(useLiveDevice.getState().activeDeviceId).toBe('active-leaf-node');
     });
+
+    test('ignores late telemetry and status updates after device removal or sign-out', () => {
+      useLiveDevice.getState().clearDeviceState();
+      expect(useLiveDevice.getState().devices[devId]).toBeUndefined();
+
+      // Late telemetry arriving after device removal does not resurrect the device
+      useLiveDevice.getState().updateTelemetry(
+        { soilMoisture: 42, ts: Date.now(), pumpOn: false },
+        devId
+      );
+      expect(useLiveDevice.getState().devices[devId]).toBeUndefined();
+
+      // After sign-out, with no active device and no target device
+      useLiveDevice.getState().updateTelemetry({ soilMoisture: 42, ts: Date.now() });
+      expect(Object.keys(useLiveDevice.getState().devices)).toHaveLength(0);
+    });
   });
 
   describe('3. Database Security Rules & Ownership Claim Invariants', () => {

@@ -16,6 +16,7 @@ import {
   StyleSheet,
   Dimensions,
   ScrollView,
+  useWindowDimensions,
 } from 'react-native';
 import {
   Gesture,
@@ -59,6 +60,7 @@ interface VitalsSheetProps {
   animatedTranslateY?: SharedValue<number>;
   // Force snap to peek (e.g. when watering starts)
   forceSnap?: SheetSnap;
+  soakCooldownText?: string;
 }
 
 function formatLastWatered(log?: WaterLog): string {
@@ -97,8 +99,11 @@ export function VitalsSheet({
   onTranslateY,
   animatedTranslateY,
   forceSnap,
+  soakCooldownText,
 }: VitalsSheetProps) {
   const { colors, radii } = useAppTheme();
+  const { width: windowWidth, fontScale } = useWindowDimensions();
+  const isCompact = windowWidth < 360 || fontScale > 1.15;
 
   const { config, telemetry } = device;
   const lastLog = waterLogs[0];
@@ -231,30 +236,44 @@ export function VitalsSheet({
         contentContainerStyle={[styles.scrollContent, { paddingBottom: 120 }]}
       >
         {/* ── PEEK CONTENT ─────────────────────────────── */}
-        <View style={styles.peekRow}>
+        <View style={[styles.peekRow, isCompact && styles.peekRowCompact]}>
           {/* Left: Moisture ring */}
-          <MoistureRing
-            soilMoisture={health === 'unknown' ? null : telemetry.soilMoisture}
-            moistureMin={config.thresholds.moistureMin}
-            moistureMax={config.thresholds.moistureMax}
-            size={130}
-          />
+          <View style={isCompact ? styles.ringWrapCompact : undefined}>
+            <MoistureRing
+              soilMoisture={health === 'unknown' ? null : (telemetry ? telemetry.soilMoisture : null)}
+              moistureMin={config.thresholds.moistureMin}
+              moistureMax={config.thresholds.moistureMax}
+              size={isCompact ? 116 : 130}
+            />
+          </View>
 
           {/* Right: status stack */}
-          <View style={styles.peekRight}>
+          <View style={[styles.peekRight, isCompact && styles.peekRightCompact]}>
             <Text
               style={[
                 styles.statusHeadline,
                 { color: STATUS_COLORS[health] },
+                isCompact && { fontSize: 22 },
               ]}
+              numberOfLines={1}
             >
-              {STATUS_HEADLINES[health]}
+              {health === 'unknown'
+                ? (!telemetry ? 'Waiting for first telemetry' : 'Soil reading unavailable')
+                : STATUS_HEADLINES[health]}
             </Text>
+            {soakCooldownText ? (
+              <View style={styles.soakCooldownRow}>
+                <Ionicons name="timer-outline" size={12} color="#D97706" />
+                <Text style={styles.soakCooldownText}>
+                  {soakCooldownText}
+                </Text>
+              </View>
+            ) : null}
             <Text
               style={[styles.plantNameText, { color: colors.palette.ink }]}
               numberOfLines={1}
             >
-              {config.plantName}
+              {config.plantName || config.name || 'Plant'}
             </Text>
             <Text
               style={[styles.lastWateredText, { color: colors.palette.sage }]}
@@ -272,6 +291,7 @@ export function VitalsSheet({
               />
               <Text
                 style={[styles.rangeText, { color: colors.palette.forest }]}
+                numberOfLines={1}
               >
                 Target: {config.thresholds.moistureMin}%–{config.thresholds.moistureMax}%
               </Text>
@@ -416,14 +436,44 @@ const styles = StyleSheet.create({
     gap: 20,
     paddingVertical: 8,
   },
+  peekRowCompact: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 12,
+  },
+  ringWrapCompact: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   peekRight: {
     flex: 1,
     gap: 4,
+    minWidth: 0,
+  },
+  peekRightCompact: {
+    alignItems: 'center',
+    width: '100%',
   },
   statusHeadline: {
     fontSize: 26,
     fontWeight: '800',
     letterSpacing: -0.5,
+  },
+  soakCooldownRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(217, 119, 6, 0.12)',
+    alignSelf: 'flex-start',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+    marginVertical: 2,
+  },
+  soakCooldownText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#D97706',
   },
   plantNameText: {
     fontSize: 14,

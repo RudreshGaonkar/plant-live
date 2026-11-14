@@ -20,6 +20,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
 import { useLiveDevice } from '@/store/useLiveDevice';
 import { useCommand, CommandLifecycleStage } from '@/hooks/useCommand';
+import { RefillConfirmationModal } from './RefillConfirmation';
 
 export interface WaterNowSheetProps {
   visible: boolean;
@@ -41,8 +42,7 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
     resetCommandState,
   } = useCommand();
 
-  const [isRefilling, setIsRefilling] = useState(false);
-  const liveRefillBottle = useLiveDevice((s) => s.refillBottle);
+  const [showRefillModal, setShowRefillModal] = useState(false);
 
   if (!device) return null;
 
@@ -98,7 +98,7 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
               <View>
                 <Text style={[styles.title, { color: colors.text }]}>Manual Water Dispenser</Text>
                 <Text style={[styles.subtitle, { color: colors.textMuted }]}>
-                  {config.name || config.plantName || 'Plant'} • Controller: {device.id} • {telemetry.soilMoisture}% Moisture
+                  {config.name || config.plantName || 'Plant'} • Controller: {device.id} • {telemetry ? `${telemetry.soilMoisture}% Moisture` : 'Waiting for first telemetry'}
                 </Text>
               </View>
             </View>
@@ -131,25 +131,13 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
                 </Text>
               </View>
               <TouchableOpacity
-                disabled={isRefilling}
                 style={[
                   styles.refillBtn,
-                  { backgroundColor: colors.palette.forest, borderRadius: radii.full, opacity: isRefilling ? 0.7 : 1 },
+                  { backgroundColor: colors.palette.forest, borderRadius: radii.full },
                 ]}
-                onPress={async () => {
-                  setIsRefilling(true);
-                  try {
-                    await liveRefillBottle(device.id);
-                  } finally {
-                    setIsRefilling(false);
-                  }
-                }}
+                onPress={() => setShowRefillModal(true)}
               >
-                {isRefilling ? (
-                  <ActivityIndicator size="small" color={colors.palette.white} />
-                ) : (
-                  <Text style={styles.refillBtnText}>I Refilled</Text>
-                )}
+                <Text style={styles.refillBtnText}>I Refilled</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -333,7 +321,7 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
             accessibilityLabel="Water Now"
             activeOpacity={0.85}
             onPress={stage === 'done' ? handleClose : handleStartWatering}
-            disabled={(!canWater && telemetry.soilMoisture < 100 && stage === 'idle') || stage === 'sent'}
+            disabled={(!canWater && (telemetry?.soilMoisture ?? 0) < 100 && stage === 'idle') || stage === 'sent'}
             style={[
               styles.primaryBtn,
               {
@@ -342,7 +330,7 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
                     ? colors.palette.sage
                     : stage === 'done'
                     ? colors.palette.forest
-                    : (!canWater && telemetry.soilMoisture < 100)
+                    : (!canWater && (telemetry?.soilMoisture ?? 0) < 100)
                     ? colors.palette.sage
                     : colors.primary,
                 borderRadius: radii.xl,
@@ -379,6 +367,14 @@ export function WaterNowSheet({ visible, onClose }: WaterNowSheetProps) {
           </TouchableOpacity>
         </View>
       </View>
+
+      <RefillConfirmationModal
+        visible={showRefillModal}
+        deviceId={device.id}
+        controllerName={config.name || config.plantName}
+        targetCapacity={config.bottle.capacityMl}
+        onClose={() => setShowRefillModal(false)}
+      />
     </Modal>
   );
 }

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useForm, Controller, FieldErrors } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -26,13 +27,16 @@ export default function LoginScreen() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  useEffect(() => {
+    SplashScreen.hideAsync().catch(() => {});
+  }, []);
+
   const emailInputRef = useRef<TextInput>(null);
   const passwordInputRef = useRef<TextInput>(null);
 
   const {
     control,
     handleSubmit,
-    setValue,
     formState: { errors },
   } = useForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
@@ -264,29 +268,6 @@ export default function LoginScreen() {
                 </>
               )}
             </TouchableOpacity>
-
-            {/* Quick Fill Seeded Account Button - strictly Dev & QA only */}
-            {__DEV__ && (
-              <TouchableOpacity
-                style={{
-                  borderColor: colors.palette.forest,
-                  borderRadius: radii.full,
-                  marginTop: 10,
-                  paddingVertical: 10,
-                  alignItems: 'center',
-                  borderWidth: 1,
-                  backgroundColor: `${colors.palette.lime}20`,
-                }}
-                onPress={() => {
-                  setValue('email', 'demo@leaflink.local', { shouldValidate: true });
-                  setValue('password', 'leaflink123', { shouldValidate: true });
-                }}
-              >
-                <Text style={{ color: colors.palette.forest, fontWeight: '700', fontSize: 13 }}>
-                  Fill Demo Account (demo@leaflink.local)
-                </Text>
-              </TouchableOpacity>
-            )}
 
             {/* Sign Up Navigation */}
             <View style={styles.switchAuthRow}>

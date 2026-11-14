@@ -9,7 +9,6 @@ export * from './CalibrationWizard';
 export * from './WaterNowSheet';
 export * from './PlantPassportHeader';
 export * from './SliderControl';
-export * from './DeveloperPanel';
 export * from './DayRibbon';
 export * from './TelemetryChart';
 export * from './InsightCardCarousel';

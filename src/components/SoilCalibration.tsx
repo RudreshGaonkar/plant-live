@@ -30,7 +30,7 @@ export function SoilCalibration({ onComplete, onCancel }: SoilCalibrationProps) 
   const [dryRaw, setDryRaw] = useState<number>(device?.config?.calibration?.soilDryRaw ?? 1024);
   const [wetRaw, setWetRaw] = useState<number>(device?.config?.calibration?.soilWetRaw ?? 400);
 
-  const targetDeviceId = device?.id || activeDeviceId || 'leaf-node-01';
+  const targetDeviceId = device?.id || activeDeviceId || '';
 
   const handleCaptureDry = () => {
     setIsCapturing(true);

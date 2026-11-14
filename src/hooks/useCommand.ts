@@ -12,7 +12,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Alert } from 'react-native';
 import * as Haptics from 'expo-haptics';
-import { useLiveDevice } from '@/store/useLiveDevice';
+import { useLiveDevice, hasFreshSoilTelemetry } from '@/store/useLiveDevice';
+import { useSession } from '@/store/useSession';
 import {
   sendDeviceCommand,
   listenToDeviceCommand,
@@ -65,7 +66,8 @@ export function useCommand(): UseCommandReturn {
   const lastMoistureBeforeRef = useRef<number>(50);
   const pumpObservedActiveRef = useRef<boolean>(false);
 
-  const deviceId = device?.id ?? 'leaf-node-01';
+  const deviceId = device?.id ?? '';
+  const pairingStatus = useSession((s) => s.pairingStatus);
 
   // Cooldown countdown timer
   useEffect(() => {
@@ -104,21 +106,35 @@ export function useCommand(): UseCommandReturn {
     clearPendingCommand();
     setStage('idle');
     setErrorMessage(null);
-    useLiveDevice.getState().resetWateringState(deviceId);
+    if (deviceId) {
+      useLiveDevice.getState().resetWateringState(deviceId);
+    }
   }, [clearPendingCommand, deviceId]);
 
   const isPumpActiveTelemetry = Boolean(device?.telemetry?.pumpOn || device?.telemetry?.isPumpActive);
+  const isOnline = Boolean(device?.status?.online);
+  const hasFreshTelemetry = hasFreshSoilTelemetry(device?.telemetry);
+  const isReserveKnown = Boolean(
+    device &&
+    device.config?.bottle?.capacityMl > 0 &&
+    typeof device.config?.bottle?.remainingMl === 'number'
+  );
+  const hasSufficientReserve = isReserveKnown && (device?.config?.bottle?.remainingMl ?? 0) > 20;
 
-  // Check if watering can be triggered safely
+  // Block watering commands until target, connection, fresh soil reading, and reserve are known
   const canWater =
+    Boolean(deviceId) &&
+    isOnline &&
+    pairingStatus !== 'cached' &&
+    hasFreshTelemetry &&
+    hasSufficientReserve &&
     !isWateringActive &&
-    cooldownSecondsLeft === 0 &&
-    (device ? device.config.bottle.remainingMl > 20 : true);
+    cooldownSecondsLeft === 0;
 
   // Core command dispatcher with Optimistic UI feedback
   const dispatchWaterCommand = useCallback(
     async (clampedDuration: number, currentMoisture: number): Promise<boolean> => {
-      if (activeCmdIdRef.current) return false;
+      if (activeCmdIdRef.current || !deviceId) return false;
       console.log('[LeafLink] Active Device ID:', deviceId);
       const cmdId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       activeCmdIdRef.current = cmdId;
@@ -234,8 +250,35 @@ export function useCommand(): UseCommandReturn {
   // Execute Water Now with safety checks (manual watering explicitly bypasses soil moisture checks)
   const executeWaterNow = useCallback(
     async (requestedDuration: number = 5, forceIfWet: boolean = true): Promise<boolean> => {
-      if (!device) {
+      if (!device || !deviceId) {
         Alert.alert('No Device Connected', 'Please pair or select a plant device first.');
+        return false;
+      }
+
+      if (pairingStatus === 'cached') {
+        Alert.alert('Connection Unconfirmed', 'Commands are disabled until controller ownership is reconfirmed.');
+        return false;
+      }
+
+      if (!device.status.online) {
+        Alert.alert('Device Offline', 'Cannot water while the controller is offline.');
+        return false;
+      }
+
+      if (!hasFreshSoilTelemetry(device.telemetry)) {
+        Alert.alert('No Telemetry', 'Waiting for fresh soil telemetry from controller before watering.');
+        return false;
+      }
+
+      if (!isReserveKnown || !hasSufficientReserve) {
+        Alert.alert(
+          'Water Reservoir Empty',
+          'Estimated bottle level is below minimum reserve. Refill the bottle to enable pump.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'I Refilled', onPress: () => storeRefillBottle(deviceId) },
+          ]
+        );
         return false;
       }
 
@@ -252,28 +295,23 @@ export function useCommand(): UseCommandReturn {
         return false;
       }
 
-      // Safety Guard 3: Empty reservoir check
-      if (device.config.bottle.remainingMl <= 20) {
-        Alert.alert(
-          'Water Reservoir Empty',
-          'Estimated bottle level is below minimum reserve. Refill the bottle to enable pump.',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'I Refilled', onPress: storeRefillBottle },
-          ]
-        );
-        return false;
-      }
-
-      // Manual Watering explicitly bypasses high-moisture safety locks (e.g. moisture at 100%)
-      const currentMoisture = device.telemetry.soilMoisture;
+      const currentMoisture = device.telemetry?.soilMoisture ?? 0;
       return dispatchWaterCommand(clampedDuration, currentMoisture);
     },
-    [device, cooldownSecondsLeft, storeRefillBottle, dispatchWaterCommand]
+    [
+      device,
+      deviceId,
+      pairingStatus,
+      isReserveKnown,
+      hasSufficientReserve,
+      cooldownSecondsLeft,
+      storeRefillBottle,
+      dispatchWaterCommand,
+    ]
   );
 
-  const isCommandPending = commandDeviceId === deviceId && (stage === 'sent' || stage === 'running');
-  const isWatering = Boolean(isPumpActiveTelemetry || (commandDeviceId === deviceId && (isWateringActive || stage === 'running')));
+  const isCommandPending = Boolean(deviceId && commandDeviceId === deviceId && (stage === 'sent' || stage === 'running'));
+  const isWatering = Boolean(isPumpActiveTelemetry || (Boolean(deviceId) && commandDeviceId === deviceId && (isWateringActive || stage === 'running')));
 
   return {
     stage: commandDeviceId === deviceId ? stage : (isPumpActiveTelemetry ? 'running' : 'idle'),
@@ -288,8 +326,10 @@ export function useCommand(): UseCommandReturn {
     triggerWaterNow: executeWaterNow,
     resetCommandState,
     refillBottle: () => {
-      console.log('[LeafLink] Active Device ID:', deviceId);
-      storeRefillBottle(deviceId);
+      if (deviceId) {
+        console.log('[LeafLink] Active Device ID:', deviceId);
+        storeRefillBottle(deviceId);
+      }
     },
   };
 }

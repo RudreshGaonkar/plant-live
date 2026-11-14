@@ -41,7 +41,7 @@ describe('authValidation', () => {
       const res2 = validateEmail('user.name+tag@sub.domain.org', true);
       expect(res2.valid).toBe(true);
 
-      const res3 = validateEmail('demo@leaflink.local', false);
+      const res3 = validateEmail('gardener@leaflink.local', false);
       expect(res3.valid).toBe(true);
     });
 
@@ -142,9 +142,9 @@ describe('authValidation', () => {
   });
 
   describe('Zod schemas', () => {
-    it('loginSchema validates successfully with seeded demo user', () => {
+    it('loginSchema validates successfully with valid user credentials', () => {
       const parseResult = loginSchema.safeParse({
-        email: 'demo@leaflink.local',
+        email: 'gardener@leaflink.com',
         password: 'leaflink123',
       });
       expect(parseResult.success).toBe(true);
@@ -197,3 +197,4 @@ describe('authValidation', () => {
     });
   });
 });
+

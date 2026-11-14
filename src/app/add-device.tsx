@@ -1,7 +1,7 @@
 /**
  * AddDeviceScreen
  * Comprehensive 5-step hardware onboarding and calibration wizard:
- * 1. Hardware Pairing (QR Scanner via expo-camera, manual entry, or demo device + online verification)
+ * 1. Hardware Pairing (QR Scanner via expo-camera, manual entry, or local AP auto-detect + online verification)
  * 2. Plant Details & Location (searchable plant species presets + Balcony/Terrace/Indoor threshold defaults)
  * 3. Sensor Setup & Guided Soil Calibration (LDR toggle + 2-step dry/wet ADC capture)
  * 4. Bottle Setup & 10s Pump Flow Test (capacity + measured flow rate calculation)
@@ -35,7 +35,7 @@ import Animated, {
   FadeIn,
   FadeOut,
 } from 'react-native-reanimated';
-import { ref, set, update } from 'firebase/database';
+import { ref, set, update, get as fbGet } from 'firebase/database';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db } from '@/services/firebase';
 import { useAppTheme } from '@/theme';
@@ -45,7 +45,7 @@ import { LocationCard } from '@/components/LocationCard';
 import { DeviceQRScanner } from '@/components/DeviceQRScanner';
 import { DEFAULT_CALIBRATION } from '@/services/calibration';
 import { PlantScene3D } from '@/components/Plant3D/PlantScene3D';
-import { updateDeviceConfigInRTDB } from '@/services/devices';
+import { updateDeviceConfigInRTDB, sendDeviceCommand } from '@/services/devices';
 
 // Preset plant species
 const SPECIES_PRESETS = [
@@ -76,7 +76,7 @@ export default function AddDeviceScreen() {
   const [step, setStep] = useState<number>(1);
   const [showWifiGuide, setShowWifiGuide] = useState<boolean>(true);
 
-  const [connectTab, setConnectTab] = useState<'qr' | 'manual' | 'demo'>('qr');
+  const [connectTab, setConnectTab] = useState<'qr' | 'manual'>('qr');
   const [deviceIdInput, setDeviceIdInput] = useState<string>('');
   const [isVerifyingOnline, setIsVerifyingOnline] = useState<boolean>(false);
   const [isDeviceOnline, setIsDeviceOnline] = useState<boolean>(false);
@@ -133,26 +133,27 @@ export default function AddDeviceScreen() {
     }
   };
 
-  // Step 1: Handle scanned or manual device ID
-  const handleDeviceIdSelected = (id: string) => {
-    setDeviceIdInput(id);
+  // Step 1: Handle scanned or manual device ID with real RTDB online verification
+  const handleDeviceIdSelected = async (id: string) => {
+    const cleanId = id.trim();
+    if (!cleanId) return;
+    setDeviceIdInput(cleanId);
     setIsVerifyingOnline(true);
+    setIsDeviceOnline(false);
 
-    // Simulate online handshake verification
-    setTimeout(() => {
+    try {
+      const snap = await fbGet(ref(db, `devices/${cleanId}/status`));
+      if (snap.exists() && snap.val()?.online) {
+        setIsDeviceOnline(true);
+      } else {
+        setIsDeviceOnline(false);
+      }
+    } catch (err) {
+      console.warn('[AddDevice] Status verification error:', err);
+      setIsDeviceOnline(false);
+    } finally {
       setIsVerifyingOnline(false);
-      setIsDeviceOnline(true);
-    }, 1500);
-  };
-
-  const handleUseDemoDevice = () => {
-    const demoId = `esp8266-demo-${Math.floor(1000 + Math.random() * 9000)}`;
-    setDeviceIdInput(demoId);
-    setIsVerifyingOnline(true);
-    setTimeout(() => {
-      setIsVerifyingOnline(false);
-      setIsDeviceOnline(true);
-    }, 800);
+    }
   };
 
   const handleOpenWifiSettings = async () => {
@@ -240,10 +241,21 @@ export default function AddDeviceScreen() {
     }
   };
 
-  // Step 4: Run 10-second pump test
-  const startPumpTest = () => {
+  // Step 4: Run 10-second pump test with real hardware command dispatch
+  const startPumpTest = async () => {
+    const devId = deviceIdInput.trim();
+    if (!devId) {
+      Alert.alert('Device Required', 'Please connect a device before testing the pump.');
+      return;
+    }
     setIsTestingPump(true);
     setPumpTestCountdown(10);
+
+    try {
+      await sendDeviceCommand(devId, { type: 'waterNow', durationSec: 10 });
+    } catch (err) {
+      console.warn('[AddDevice] Failed to dispatch pump test command:', err);
+    }
 
     const interval = setInterval(() => {
       setPumpTestCountdown((prev) => {
@@ -267,7 +279,11 @@ export default function AddDeviceScreen() {
 
   // Finish Setup: Build final device record and commit
   const handleFinalFinish = async () => {
-    const devId = deviceIdInput || `esp8266-${Date.now().toString().slice(-4)}`;
+    const devId = deviceIdInput.trim();
+    if (!devId) {
+      Alert.alert('Device Required', 'Please pair or enter a valid controller ID.');
+      return;
+    }
     const effectiveSpecies =
       selectedSpecies === 'Custom' ? customSpecies || 'Houseplant' : selectedSpecies;
 
@@ -689,27 +705,6 @@ export default function AddDeviceScreen() {
                   Enter ID
                 </Text>
               </TouchableOpacity>
-
-              <TouchableOpacity
-                onPress={() => setConnectTab('demo')}
-                style={[
-                  styles.tabItem,
-                  {
-                    backgroundColor: connectTab === 'demo' ? colors.palette.forest : 'transparent',
-                    borderRadius: radii.md - 2,
-                  },
-                ]}
-              >
-                <Ionicons
-                  name="flask-outline"
-                  size={14}
-                  color={connectTab === 'demo' ? colors.palette.white : colors.palette.sage}
-                  style={{ marginRight: 4 }}
-                />
-                <Text style={[styles.tabText, { color: connectTab === 'demo' ? colors.palette.white : colors.text }]}>
-                  Demo
-                </Text>
-              </TouchableOpacity>
             </View>
 
             {/* QR Scanner Mode */}
@@ -717,7 +712,6 @@ export default function AddDeviceScreen() {
               <DeviceQRScanner
                 onScan={handleDeviceIdSelected}
                 onManualInputPress={() => setConnectTab('manual')}
-                onDemoPress={handleUseDemoDevice}
               />
             )}
 
@@ -814,27 +808,6 @@ export default function AddDeviceScreen() {
                 >
                   <Ionicons name="checkmark" size={18} color={colors.palette.white} style={{ marginRight: 6 }} />
                   <Text style={styles.primaryBtnText}>Connect Hardware</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-
-            {/* Demo Device Mode */}
-            {connectTab === 'demo' && (
-              <View style={[styles.card, { backgroundColor: colors.surface, borderRadius: radii.card, borderColor: colors.border }]}>
-                <View style={[styles.demoIconWrap, { backgroundColor: colors.palette.lime }]}>
-                  <Ionicons name="hardware-chip-outline" size={32} color={colors.palette.forest} />
-                </View>
-                <Text style={[styles.cardTitleCenter, { color: colors.text }]}>Simulator Companion Node</Text>
-                <Text style={[styles.cardSubtitleCenter, { color: colors.textMuted }]}>
-                  No physical ESP8266 board needed. Runs complete telemetry, pump cycles, and environmental noise in client simulation.
-                </Text>
-
-                <TouchableOpacity
-                  style={[styles.primaryBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.xl }]}
-                  onPress={handleUseDemoDevice}
-                >
-                  <Ionicons name="play-outline" size={18} color={colors.palette.white} style={{ marginRight: 6 }} />
-                  <Text style={styles.primaryBtnText}>Launch Simulator Device</Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -1175,7 +1148,7 @@ export default function AddDeviceScreen() {
 
               <View style={styles.specRow}>
                 <Text style={[styles.specKey, { color: colors.textMuted }]}>Device ID</Text>
-                <Text style={[styles.specVal, { color: colors.text }]}>{deviceIdInput || 'esp8266-demo'}</Text>
+                <Text style={[styles.specVal, { color: colors.text }]}>{deviceIdInput || '--'}</Text>
               </View>
               <View style={styles.specDivider} />
 

@@ -1,7 +1,7 @@
-import { create } from 'zustand';
-import { ref, set as fbSet, onValue, update } from 'firebase/database';
+import { auth, db } from '@/services/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { db, auth } from '@/services/firebase';
+import { set as fbSet, onValue, ref, update } from 'firebase/database';
+import { create } from 'zustand';
 
 export type PlantLocation = 'balcony' | 'terrace' | 'indoor';
 export type DeviceMode = 'auto' | 'manual';
@@ -52,6 +52,7 @@ export interface DeviceTelemetry {
   isPumpActive?: boolean;
   rssi: number;
   ts: number;
+  autoCooldownRemainingSec?: number;
 }
 
 export interface DeviceStatus {
@@ -77,6 +78,10 @@ export interface DeviceCommand {
   };
 }
 
+export type RefillOutcome =
+  | { success: true; capacityMl: number }
+  | { success: false; reason: 'rejected' | 'failed' | 'timeout'; message: string };
+
 export interface WaterLog {
   id: string;
   ts: number;
@@ -91,7 +96,7 @@ export interface WaterLog {
 export interface DeviceRecord {
   id: string;
   config: DeviceConfig;
-  telemetry: DeviceTelemetry;
+  telemetry: DeviceTelemetry | null;
   status: DeviceStatus;
   command?: DeviceCommand;
   control?: {
@@ -129,14 +134,16 @@ export interface LiveDeviceStore {
   wateringSecondsLeft: number;
   weather: WeatherData | null;
   weatherLoading: boolean;
-  
+
   // Actions
   setActiveDeviceId: (id: string) => void;
+  seedDeviceRecords: (deviceIds: string[], preferredActiveId?: string | null) => string;
   triggerWaterNow: (durationSec?: number, deviceId?: string) => void;
   resetWateringState: (targetDeviceId?: string) => void;
   stopWatering: (targetDeviceId?: string) => void;
   toggleMode: () => void | Promise<void>;
   refillBottle: (deviceId?: string) => Promise<boolean> | void;
+  requestRefill: (deviceId?: string) => Promise<RefillOutcome>;
   clearDeviceState: () => void;
   updateLocation: (location: PlantLocation) => void;
   updateThresholds: (thresholds: Partial<DeviceConfig['thresholds']>) => void;
@@ -152,61 +159,14 @@ export interface LiveDeviceStore {
   setWeatherLoading: (loading: boolean) => void;
 }
 
-export const mockDevice: DeviceRecord = {
-  id: 'esp8266-demo-01',
-  config: {
-    name: 'Indoor Plant',
-    plantName: 'Monstera Deliciosa',
-    plantSpecies: 'Swiss Cheese Plant',
-    hubId: 'hub-home-1',
-    location: 'indoor',
-    mode: 'auto',
-    thresholds: {
-      moistureMin: 35,
-      moistureMax: 65,
-      tempMax: 32,
-      humidityMax: 75,
-      pumpDurationSec: 5,
-    },
-    sensors: {
-      lightMode: 'digital',
-    },
-    calibration: {
-      soilDryRaw: 1024,
-      soilWetRaw: 420,
-    },
-    bottle: {
-      capacityMl: 500,
-      flowMlPerSec: 15,
-      remainingMl: 380,
-    },
-    pairedAt: Date.now() - 86400000 * 3,
-  },
-  telemetry: {
-    soilRaw: 640,
-    soilMoisture: 42,
-    temperature: 28,
-    humidity: 68,
-    light: 1, // Bright
-    pumpOn: false,
-    rssi: -58,
-    ts: Date.now(),
-  },
-  status: {
-    online: true,
-    lastSeen: Date.now(),
-    firmware: 'v1.0.4-esp8266',
-  },
-};
-
-export const createDefaultDeviceRecord = (id: string = 'leaf-node-01'): DeviceRecord => ({
+export const createDefaultDeviceRecord = (id: string): DeviceRecord => ({
   id,
   isConfigHydrated: false,
   config: {
-    name: 'LeafLink Node',
-    plantName: 'Monstera Deliciosa',
-    plantSpecies: 'Swiss Cheese Plant',
-    hubId: 'hub-main',
+    name: '',
+    plantName: '',
+    plantSpecies: '',
+    hubId: '',
     location: 'indoor',
     mode: 'auto',
     thresholds: {
@@ -230,32 +190,23 @@ export const createDefaultDeviceRecord = (id: string = 'leaf-node-01'): DeviceRe
     },
     bottleCapacityMl: 0,
     remainingMl: 0,
-    pairedAt: Date.now(),
+    pairedAt: 0,
   },
-  telemetry: {
-    soilRaw: 600,
-    soilMoisture: 45,
-    temperature: 24,
-    humidity: 60,
-    light: 1,
-    pumpOn: false,
-    isPumpActive: false,
-    rssi: -60,
-    ts: 0,
-  },
+  telemetry: null,
   status: {
     online: false,
     lastSeen: 0,
-    firmware: 'leaflink-esp8266',
+    firmware: '',
   },
   control: {
     pumpState: false,
     manualOverride: false,
-    timestamp: Date.now(),
+    timestamp: 0,
   },
 });
 
 let activeWateringTimer: ReturnType<typeof setInterval> | null = null;
+const inFlightRefills = new Map<string, Promise<RefillOutcome>>();
 
 export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   devices: {},
@@ -298,14 +249,71 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     }
   },
 
+  seedDeviceRecords: (deviceIds: string[], preferredActiveId?: string | null) => {
+    const { devices, activeDeviceId } = get();
+    const nextDevices: Record<string, DeviceRecord> = {};
+
+    // 1. Reconcile records: preserve existing in-memory records, initialize missing ones with createDefaultDeviceRecord
+    for (const id of deviceIds) {
+      nextDevices[id] = devices[id] || createDefaultDeviceRecord(id);
+    }
+
+    // 2. Resolve activeDeviceId atomically
+    let resolvedActiveId = '';
+    if (preferredActiveId && deviceIds.includes(preferredActiveId)) {
+      resolvedActiveId = preferredActiveId;
+    } else if (activeDeviceId && deviceIds.includes(activeDeviceId)) {
+      resolvedActiveId = activeDeviceId;
+    } else if (deviceIds.length > 0) {
+      resolvedActiveId = deviceIds[0];
+    }
+
+    // Ensure active device is present in nextDevices if resolvedActiveId exists
+    if (resolvedActiveId && !nextDevices[resolvedActiveId]) {
+      nextDevices[resolvedActiveId] = devices[resolvedActiveId] || createDefaultDeviceRecord(resolvedActiveId);
+    }
+
+    const dev = resolvedActiveId ? nextDevices[resolvedActiveId] : undefined;
+    const devPumpOn = Boolean(dev?.telemetry?.pumpOn || dev?.telemetry?.isPumpActive);
+
+    // Atomically commit devices and activeDeviceId together
+    set({
+      devices: nextDevices,
+      activeDeviceId: resolvedActiveId,
+      isWateringActive: devPumpOn,
+      isWatering: devPumpOn,
+    });
+
+    const uid = auth.currentUser?.uid;
+    if (uid) {
+      if (resolvedActiveId) {
+        AsyncStorage.setItem(`@plant_live_active_device_${uid}`, resolvedActiveId).catch(() => { });
+      } else {
+        AsyncStorage.removeItem(`@plant_live_active_device_${uid}`).catch(() => { });
+      }
+    }
+
+    return resolvedActiveId;
+  },
+
   resetWateringState: (targetDeviceId?: string) => {
     if (activeWateringTimer) {
       clearInterval(activeWateringTimer);
       activeWateringTimer = null;
     }
     const { activeDeviceId, devices } = get();
-    const targetId = targetDeviceId || activeDeviceId || 'leaf-node-01';
-    const active = devices[targetId] || createDefaultDeviceRecord(targetId);
+    const targetId = targetDeviceId || activeDeviceId;
+    if (!targetId || !devices[targetId]) {
+      set({
+        isWateringActive: false,
+        isWatering: false,
+        isCommandPending: false,
+        wateringSecondsLeft: 0,
+        wateringDeviceId: null,
+      });
+      return;
+    }
+    const active = devices[targetId];
 
     set({
       isWateringActive: false,
@@ -321,11 +329,13 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
             ...active.control,
             pumpState: false,
           },
-          telemetry: {
-            ...active.telemetry,
-            pumpOn: false,
-            isPumpActive: false,
-          },
+          telemetry: active.telemetry
+            ? {
+              ...active.telemetry,
+              pumpOn: false,
+              isPumpActive: false,
+            }
+            : null,
         },
       },
     });
@@ -342,9 +352,10 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     }
 
     const { activeDeviceId, devices } = get();
-    const targetId = deviceId || activeDeviceId || 'leaf-node-01';
+    const targetId = deviceId || activeDeviceId;
+    if (!targetId || !devices[targetId]) return;
     console.log('[LeafLink] Active Device ID:', targetId);
-    const active = devices[targetId] || createDefaultDeviceRecord(targetId);
+    const active = devices[targetId];
 
     // Optimistic activation of pump state locally
     set({
@@ -365,11 +376,13 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
             timestamp: Date.now(),
             durationSec,
           },
-          telemetry: {
-            ...active.telemetry,
-            pumpOn: true,
-            isPumpActive: true,
-          },
+          telemetry: active.telemetry
+            ? {
+              ...active.telemetry,
+              pumpOn: true,
+              isPumpActive: true,
+            }
+            : null,
           command: {
             id: `cmd-${Date.now()}`,
             type: 'waterNow',
@@ -412,11 +425,13 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
                 ...dev.control,
                 pumpState: false,
               },
-              telemetry: {
-                ...dev.telemetry,
-                pumpOn: false,
-                isPumpActive: false,
-              },
+              telemetry: dev.telemetry
+                ? {
+                  ...dev.telemetry,
+                  pumpOn: false,
+                  isPumpActive: false,
+                }
+                : null,
               command: {
                 id: `cmd-${Date.now()}`,
                 type: 'waterNow',
@@ -439,7 +454,8 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
 
   toggleMode: async () => {
     const { activeDeviceId, devices } = get();
-    const targetId = activeDeviceId || 'leaf-node-01';
+    const targetId = activeDeviceId;
+    if (!targetId) return;
     console.log('[LeafLink] Active Device ID:', targetId);
     const active = devices[targetId];
     if (!active) return;
@@ -495,167 +511,204 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     }
   },
 
-  refillBottle: async (deviceId?: string): Promise<boolean> => {
-    const { activeDeviceId, devices } = get();
-    const targetId = (typeof deviceId === 'string' && deviceId.trim()) ? deviceId : (activeDeviceId || 'leaf-node-01');
-    console.log('[LeafLink] Active Device ID:', targetId);
-    const active = devices[targetId] || createDefaultDeviceRecord(targetId);
-    const validatedCapacity = Math.max(
-      250,
-      active.config.bottle?.capacityMl ||
-      (active.config as any).bottleCapacityMl ||
-      1000
-    );
+  requestRefill: async (deviceId?: string): Promise<RefillOutcome> => {
+    const { activeDeviceId } = get();
+    const targetId = (typeof deviceId === 'string' && deviceId.trim()) ? deviceId : activeDeviceId;
+    if (!targetId || !get().devices[targetId]) {
+      return { success: false, reason: 'failed', message: 'No target device available for refill' };
+    }
 
-    const uniqueId = `cmd-${Date.now()}`;
+    // Deduplicate concurrent refills per device
+    const existingInFlight = inFlightRefills.get(targetId);
+    if (existingInFlight) {
+      return existingInFlight;
+    }
 
-    // 1. Keep the refill status pending until ack arrives
-    set({
-      devices: {
-        ...devices,
-        [targetId]: {
-          ...active,
-          command: {
-            id: uniqueId,
-            type: 'refilled',
-            capacityMl: validatedCapacity,
-            status: 'pending',
-            requestedAt: Date.now(),
-            ack: {
-              id: uniqueId,
-              status: 'pending',
-              ts: Date.now(),
-            },
-          },
-        },
-      },
-    });
+    const refillPromise = (async (): Promise<RefillOutcome> => {
+      console.log('[LeafLink] Active Device ID for Refill:', targetId);
+      const active = get().devices[targetId] || createDefaultDeviceRecord(targetId);
+      const devConfig = active.config;
+      const configuredCapacity = devConfig.bottle?.capacityMl || devConfig.bottleCapacityMl || 0;
+      const validatedCapacity = configuredCapacity > 0 ? configuredCapacity : 500;
 
-    // 3. Correlate acknowledgement from /devices/{id}/command/ack matching uniqueId
-    return new Promise<boolean>((resolve) => {
-      const ackRef = ref(db, `devices/${targetId}/command/ack`);
-      let hasResolved = false;
-      let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+      const uniqueId = `cmd-${Date.now()}`;
 
-      const unsubscribe = onValue(ackRef, (snapshot) => {
-        if (!snapshot.exists()) return;
-        const ack = snapshot.val();
-        if (ack && ack.id === uniqueId) {
-          if (ack.status === 'done') {
-            if (!hasResolved) {
-              hasResolved = true;
-              if (timeoutHandle) clearTimeout(timeoutHandle);
-              unsubscribe();
-
-              // Confirm refill in store using actual applied capacity returned/confirmed by controller
-              const appliedCapacity =
-                typeof ack.capacityMl === 'number' && ack.capacityMl > 0
-                  ? ack.capacityMl
-                  : validatedCapacity;
-
-              const currentDevices = get().devices;
-              const cur = currentDevices[targetId] || active;
-              set({
-                devices: {
-                  ...currentDevices,
-                  [targetId]: {
-                    ...cur,
-                    config: {
-                      ...cur.config,
-                      bottleCapacityMl: appliedCapacity,
-                      remainingMl: appliedCapacity,
-                      bottle: {
-                        ...cur.config.bottle,
-                        capacityMl: appliedCapacity,
-                        remainingMl: appliedCapacity,
-                      },
-                    },
-                    command: {
-                      id: uniqueId,
-                      type: 'refilled',
-                      capacityMl: appliedCapacity,
-                      requestedAt: cur.command?.requestedAt || Date.now(),
-                      status: 'done',
-                      ack: {
-                        id: uniqueId,
-                        status: 'done',
-                        ts: ack.ts || Date.now(),
-                        ...(typeof ack.capacityMl === 'number' ? { capacityMl: ack.capacityMl } : {}),
-                      },
-                    },
-                  },
-                },
-              });
-              resolve(true);
-            }
-          } else if (ack.status === 'rejected' || ack.status === 'failed') {
-            if (!hasResolved) {
-              hasResolved = true;
-              if (timeoutHandle) clearTimeout(timeoutHandle);
-              unsubscribe();
-
-              const currentDevices = get().devices;
-              const cur = currentDevices[targetId] || active;
-              set({
-                devices: {
-                  ...currentDevices,
-                  [targetId]: {
-                    ...cur,
-                    command: {
-                      id: uniqueId,
-                      type: 'refilled',
-                      capacityMl: validatedCapacity,
-                      requestedAt: cur.command?.requestedAt || Date.now(),
-                      status: ack.status,
-                      ack: {
-                        id: uniqueId,
-                        status: ack.status,
-                        reason: ack.reason,
-                        ts: ack.ts || Date.now(),
-                      },
-                    },
-                  },
-                },
-              });
-              resolve(false);
-            }
-          }
-        }
-      });
-
-      const fail = (reason: string) => {
-        if (hasResolved) return;
-        hasResolved = true;
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-        unsubscribe();
-        set((state) => {
-          const current = state.devices[targetId];
-          if (current?.command?.id !== uniqueId) return state;
-          return {
-            devices: {
-              ...state.devices,
-              [targetId]: {
-                ...current,
-                command: {
-                  ...current.command,
-                  status: 'failed',
-                  ack: { id: uniqueId, status: 'failed', reason, ts: Date.now() },
+      // 1. Keep the refill status pending until ack arrives
+      set((state) => {
+        const cur = state.devices[targetId] || active;
+        return {
+          devices: {
+            ...state.devices,
+            [targetId]: {
+              ...cur,
+              command: {
+                id: uniqueId,
+                type: 'refilled',
+                capacityMl: validatedCapacity,
+                status: 'pending',
+                requestedAt: Date.now(),
+                ack: {
+                  id: uniqueId,
+                  status: 'pending',
+                  ts: Date.now(),
                 },
               },
             },
-          };
-        });
-        resolve(false);
-      };
+          },
+        };
+      });
 
-      timeoutHandle = setTimeout(() => fail('refill_timeout'), 20000);
-      void fbSet(ref(db, `devices/${targetId}/command`), {
-        id: uniqueId,
-        type: 'refilled',
-        capacityMl: validatedCapacity,
-        requestedAt: Date.now(),
-      }).catch(() => fail('refill_write_failed'));
-    });
+      // 2. Correlate acknowledgement from /devices/{id}/command/ack matching uniqueId
+      return new Promise<RefillOutcome>((resolve) => {
+        const ackRef = ref(db, `devices/${targetId}/command/ack`);
+        let hasResolved = false;
+        let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+        const unsubscribe = onValue(ackRef, (snapshot) => {
+          if (!snapshot.exists()) return;
+          const ack = snapshot.val();
+          if (ack && ack.id === uniqueId) {
+            if (ack.status === 'done') {
+              if (!hasResolved) {
+                hasResolved = true;
+                if (timeoutHandle) clearTimeout(timeoutHandle);
+                unsubscribe();
+
+                // Confirm refill in store using actual applied capacity returned/confirmed by controller
+                const appliedCapacity =
+                  typeof ack.capacityMl === 'number' && ack.capacityMl > 0
+                    ? ack.capacityMl
+                    : validatedCapacity;
+
+                const currentDevices = get().devices;
+                const cur = currentDevices[targetId] || active;
+                set({
+                  devices: {
+                    ...currentDevices,
+                    [targetId]: {
+                      ...cur,
+                      config: {
+                        ...cur.config,
+                        bottleCapacityMl: appliedCapacity,
+                        remainingMl: appliedCapacity,
+                        bottle: {
+                          ...cur.config.bottle,
+                          capacityMl: appliedCapacity,
+                          remainingMl: appliedCapacity,
+                        },
+                      },
+                      command: {
+                        id: uniqueId,
+                        type: 'refilled',
+                        capacityMl: appliedCapacity,
+                        requestedAt: cur.command?.requestedAt || Date.now(),
+                        status: 'done',
+                        ack: {
+                          id: uniqueId,
+                          status: 'done',
+                          ts: ack.ts || Date.now(),
+                          ...(typeof ack.capacityMl === 'number' ? { capacityMl: ack.capacityMl } : {}),
+                        },
+                      },
+                    },
+                  },
+                });
+                resolve({ success: true, capacityMl: appliedCapacity });
+              }
+            } else if (ack.status === 'rejected' || ack.status === 'failed') {
+              if (!hasResolved) {
+                hasResolved = true;
+                if (timeoutHandle) clearTimeout(timeoutHandle);
+                unsubscribe();
+
+                const currentDevices = get().devices;
+                const cur = currentDevices[targetId] || active;
+                set({
+                  devices: {
+                    ...currentDevices,
+                    [targetId]: {
+                      ...cur,
+                      command: {
+                        id: uniqueId,
+                        type: 'refilled',
+                        capacityMl: validatedCapacity,
+                        requestedAt: cur.command?.requestedAt || Date.now(),
+                        status: ack.status,
+                        ack: {
+                          id: uniqueId,
+                          status: ack.status,
+                          reason: ack.reason,
+                          ts: ack.ts || Date.now(),
+                        },
+                      },
+                    },
+                  },
+                });
+
+                if (ack.status === 'rejected') {
+                  resolve({
+                    success: false,
+                    reason: 'rejected',
+                    message: ack.reason || 'Controller rejected refill',
+                  });
+                } else {
+                  resolve({
+                    success: false,
+                    reason: 'failed',
+                    message: ack.reason || 'Refill failed on controller',
+                  });
+                }
+              }
+            }
+          }
+        });
+
+        const fail = (reason: 'timeout' | 'failed', message: string) => {
+          if (hasResolved) return;
+          hasResolved = true;
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          unsubscribe();
+          set((state) => {
+            const current = state.devices[targetId];
+            if (current?.command?.id !== uniqueId) return state;
+            return {
+              devices: {
+                ...state.devices,
+                [targetId]: {
+                  ...current,
+                  command: {
+                    ...current.command,
+                    status: 'failed',
+                    ack: { id: uniqueId, status: 'failed', reason: message, ts: Date.now() },
+                  },
+                },
+              },
+            };
+          });
+          resolve({ success: false, reason, message });
+        };
+
+        timeoutHandle = setTimeout(() => fail('timeout', 'Controller did not confirm'), 20000);
+        void fbSet(ref(db, `devices/${targetId}/command`), {
+          id: uniqueId,
+          type: 'refilled',
+          capacityMl: validatedCapacity,
+          requestedAt: Date.now(),
+        }).catch(() => fail('failed', 'Failed to send refill command to device'));
+      });
+    })();
+
+    inFlightRefills.set(targetId, refillPromise);
+    try {
+      return await refillPromise;
+    } finally {
+      inFlightRefills.delete(targetId);
+    }
+  },
+
+  refillBottle: async (deviceId?: string): Promise<boolean> => {
+    const outcome = await get().requestRefill(deviceId);
+    return outcome.success;
   },
 
   clearDeviceState: () => {
@@ -674,24 +727,22 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     const { activeDeviceId, devices } = get();
     const active = devices[activeDeviceId];
     if (!active) return;
-    
+
     // Default thresholds based on location from spec.md section 7.2
+    // Preserves active sensors.lightMode so user/firmware light sensor configuration is retained
     let moistureMin = 30;
     let moistureMax = 60;
-    let lightMode = active.config.sensors.lightMode;
+    const currentLightMode = active.config.sensors?.lightMode ?? 'digital';
 
     if (location === 'indoor') {
       moistureMin = 35;
       moistureMax = 65;
-      lightMode = 'none';
     } else if (location === 'balcony') {
       moistureMin = 30;
       moistureMax = 60;
-      lightMode = 'digital';
     } else if (location === 'terrace') {
       moistureMin = 25;
       moistureMax = 55;
-      lightMode = 'digital';
     }
 
     set({
@@ -708,7 +759,8 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
               moistureMax,
             },
             sensors: {
-              lightMode,
+              ...active.config.sensors,
+              lightMode: currentLightMode,
             },
           },
         },
@@ -760,8 +812,9 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
 
   updateTelemetry: (telemetry, targetDeviceId?: string) => {
     const { activeDeviceId, devices } = get();
-    const targetId = targetDeviceId || activeDeviceId || 'leaf-node-01';
-    const active = devices[targetId] || createDefaultDeviceRecord(targetId);
+    const targetId = targetDeviceId || activeDeviceId;
+    if (!targetId || !devices[targetId]) return;
+    const active = devices[targetId];
 
     const incomingActive = telemetry.isPumpActive;
     const incomingOn = telemetry.pumpOn;
@@ -770,7 +823,7 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     if (incomingActive !== undefined || incomingOn !== undefined) {
       isPump = Boolean(incomingActive === true || incomingOn === true);
     } else {
-      isPump = Boolean(active.telemetry.isPumpActive || active.telemetry.pumpOn);
+      isPump = Boolean(active.telemetry?.isPumpActive || active.telemetry?.pumpOn);
     }
 
     // Immediately cancel pending local watering interval and reset flags if pump transitions to false
@@ -798,11 +851,20 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
             pumpState: isPump ? active.control?.pumpState : false,
           },
           telemetry: {
-            ...active.telemetry,
+            ...(active.telemetry || {
+              soilRaw: 0,
+              soilMoisture: 0,
+              temperature: 0,
+              humidity: 0,
+              light: null,
+              pumpOn: false,
+              rssi: 0,
+              ts: 0,
+            }),
             ...telemetry,
             isPumpActive: isPump,
             pumpOn: isPump,
-            ts: Number.isFinite(telemetry.soilMoisture) ? telemetry.ts ?? 0 : 0,
+            ts: Number.isFinite(telemetry.soilMoisture) ? (telemetry.ts ?? 0) : (active.telemetry?.ts ?? 0),
           },
         },
       },
@@ -810,13 +872,25 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   },
 
   clearTelemetry: (deviceId) => {
-    const device = get().devices[deviceId];
-    if (device) get().updateTelemetry({ pumpOn: false, isPumpActive: false }, deviceId);
+    const { devices } = get();
+    const device = devices[deviceId];
+    if (device) {
+      set({
+        devices: {
+          ...devices,
+          [deviceId]: {
+            ...device,
+            telemetry: null,
+          },
+        },
+      });
+    }
   },
 
   updateConfig: (configPartial, targetDeviceId?: string) => {
     const { activeDeviceId, devices } = get();
-    const targetId = targetDeviceId || activeDeviceId || 'leaf-node-01';
+    const targetId = targetDeviceId || activeDeviceId;
+    if (!targetId) return;
     const active = devices[targetId] || createDefaultDeviceRecord(targetId);
 
     const rawBottle = (configPartial as any).bottle || {};
@@ -826,22 +900,19 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     const resolvedCapacity =
       rawBottle.capacityMl ??
       (configPartial as any).bottleCapacityMl ??
-      (currentBottle.capacityMl > 0 ? currentBottle.capacityMl : 1000);
+      (currentBottle.capacityMl > 0 ? currentBottle.capacityMl : 0);
 
-    let resolvedRemaining: number = currentBottle.remainingMl;
+    let resolvedRemaining: number = currentBottle.remainingMl ?? 0;
     if (typeof rawBottle.remainingMl === 'number') {
       resolvedRemaining = rawBottle.remainingMl;
     } else if (typeof (configPartial as any).remainingMl === 'number') {
       resolvedRemaining = (configPartial as any).remainingMl;
-    } else if (typeof active.telemetry.waterLevel === 'number' && active.telemetry.waterLevel > 0) {
+    } else if (typeof active.telemetry?.waterLevel === 'number' && active.telemetry.waterLevel >= 0) {
       resolvedRemaining = Math.round((active.telemetry.waterLevel * resolvedCapacity) / 100);
-    } else if (!active.isConfigHydrated && currentBottle.capacityMl === 0) {
-      // First snapshot arrival with no prior hydration: initialize remaining to capacity
-      resolvedRemaining = resolvedCapacity;
     }
 
     // Reconcile remaining water volume if bottle size is lowered below current remaining volume
-    if (resolvedRemaining > resolvedCapacity) {
+    if (resolvedCapacity > 0 && resolvedRemaining > resolvedCapacity) {
       resolvedRemaining = resolvedCapacity;
     }
 
@@ -871,7 +942,8 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
 
   updateCalibration: (calibration, targetDeviceId?: string) => {
     const { activeDeviceId, devices } = get();
-    const targetId = targetDeviceId || activeDeviceId || 'leaf-node-01';
+    const targetId = targetDeviceId || activeDeviceId;
+    if (!targetId) return;
     const active = devices[targetId] || createDefaultDeviceRecord(targetId);
     set({
       devices: {
@@ -902,9 +974,9 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     const uid = auth.currentUser?.uid;
     if (uid) {
       if (nextActiveId) {
-        AsyncStorage.setItem(`@plant_live_active_device_${uid}`, nextActiveId).catch(() => {});
+        AsyncStorage.setItem(`@plant_live_active_device_${uid}`, nextActiveId).catch(() => { });
       } else {
-        AsyncStorage.removeItem(`@plant_live_active_device_${uid}`).catch(() => {});
+        AsyncStorage.removeItem(`@plant_live_active_device_${uid}`).catch(() => { });
       }
     }
   },
@@ -950,7 +1022,7 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
 
 export const TELEMETRY_MAX_AGE_MS = 3 * 60 * 1000;
 
-export const hasFreshSoilTelemetry = (telemetry?: DeviceTelemetry, now = Date.now()): boolean =>
+export const hasFreshSoilTelemetry = (telemetry?: DeviceTelemetry | null, now = Date.now()): boolean =>
   !!telemetry &&
   Number.isFinite(telemetry.ts) &&
   telemetry.ts > 0 &&
@@ -960,7 +1032,7 @@ export const hasFreshSoilTelemetry = (telemetry?: DeviceTelemetry, now = Date.no
   telemetry.soilMoisture <= 100;
 
 export const computePlantHealthState = (device?: DeviceRecord): PlantHealthState => {
-  if (!device || !device.status.online || !hasFreshSoilTelemetry(device.telemetry)) return 'unknown';
+  if (!device || !device.status.online || !device.telemetry || !hasFreshSoilTelemetry(device.telemetry)) return 'unknown';
   const { soilMoisture } = device.telemetry;
   const { moistureMin, moistureMax } = device.config.thresholds;
 

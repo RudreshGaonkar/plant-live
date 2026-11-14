@@ -3,9 +3,14 @@
  * Uses FloatingDock as a custom tab bar with Expo Router Tabs.
  * uiLayout.md Section 2 & 13
  */
-import React, { useState } from 'react';
-import { View } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Tabs, router, useSegments, Redirect } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import * as SplashScreen from 'expo-splash-screen';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import { ref, onValue } from 'firebase/database';
+import { db } from '@/services/firebase';
 import { FloatingDock } from '@/components/FloatingDock';
 import { WaterNowSheet } from '@/components/WaterNowSheet';
 import { useLiveDevice, useLiveDeviceSync } from '@/hooks/useLiveDevice';
@@ -18,18 +23,73 @@ export default function TabLayout() {
 
   const user = useSession((s) => s.user);
   const isAuthReady = useSession((s) => s.isAuthReady);
+  const pairingStatus = useSession((s) => s.pairingStatus);
+  const retryBoot = useSession((s) => s.retryBoot);
 
   useLiveDeviceSync();
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
   const { unreadCount } = useAlertEngine();
+
+  useEffect(() => {
+    if (pairingStatus === 'unavailable') {
+      SplashScreen.hideAsync().catch(() => {});
+    }
+  }, [pairingStatus]);
+
+  // UID-scoped preferences listener reading users/{uid}/prefs/units ('C' | 'F')
+  useEffect(() => {
+    if (!user?.uid) return;
+    const uid = user.uid;
+    const unitsRef = ref(db, `users/${uid}/prefs/units`);
+    const unsub = onValue(unitsRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const val = snapshot.val();
+        if (val === 'C' || val === 'F') {
+          useSession.getState().setPrefs({ units: val });
+        }
+      }
+    });
+
+    return () => {
+      unsub();
+    };
+  }, [user?.uid]);
 
   // Guard protected tab routes when !user && isAuthReady
   if (isAuthReady && !user) {
     return <Redirect href="/(auth)/login" />;
   }
 
-  if (!isAuthReady) {
-    return null;
+  // Guard direct or deep-link entry while startup pairing resolution is pending
+  if (!isAuthReady || pairingStatus === 'pending') {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#16221A', justifyContent: 'center', alignItems: 'center' }}>
+        <StatusBar style="light" />
+        <ActivityIndicator size="large" color="#CEEA9F" />
+      </View>
+    );
+  }
+
+  // Guard direct entry if device resolution failed or is unavailable
+  if (pairingStatus === 'unavailable') {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#16221A', justifyContent: 'center', alignItems: 'center', padding: 24 }}>
+        <StatusBar style="light" />
+        <Ionicons name="cloud-offline-outline" size={56} color="#F6FAF2" style={{ marginBottom: 16 }} />
+        <Text style={{ color: '#F6FAF2', fontSize: 18, fontWeight: '700', textAlign: 'center', marginBottom: 8 }}>
+          Connection Unavailable
+        </Text>
+        <Text style={{ color: '#80B07F', fontSize: 14, textAlign: 'center', marginBottom: 24, lineHeight: 20 }}>
+          Could not load your plant controller data. Please check your network and retry.
+        </Text>
+        <TouchableOpacity
+          onPress={() => retryBoot()}
+          style={{ backgroundColor: '#CEEA9F', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 999 }}
+        >
+          <Text style={{ color: '#16221A', fontWeight: '700', fontSize: 15 }}>Retry Connection</Text>
+        </TouchableOpacity>
+      </View>
+    );
   }
 
   const ackStatus = device?.command?.ack?.status;

@@ -8,7 +8,21 @@
     "scheme": "plantlive",
     "userInterfaceStyle": "light",
     "ios": {
-      "icon": "./assets/leaflink-icons/ios/AppIcon-1024.png"
+      "icon": "./assets/leaflink-icons/ios/AppIcon-1024.png",
+      "bundleIdentifier": "com.rudresh.leaflink",
+      "infoPlist": {
+        "NSCameraUsageDescription": "LeafLink uses the camera to scan your controller’s pairing QR code.",
+        "NSLocationWhenInUseUsageDescription": "LeafLink uses your location to provide local Open-Meteo forecasts.",
+        "NSLocalNetworkUsageDescription": "LeafLink connects to your controller’s local Wi-Fi hotspot during pairing.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true,
+          "NSExceptionDomains": {
+            "192.168.4.1": {
+              "NSExceptionAllowsInsecureHTTPLoads": true
+            }
+          }
+        }
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -18,7 +32,7 @@
         "monochromeImage": "./assets/leaflink-icons/android/res/mipmap-xxxhdpi/ic_launcher_monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.anonymous.plantlive"
+      "package": "com.rudresh.leaflink"
     },
     "web": {
       "output": "server",
@@ -49,6 +63,20 @@
         "expo-image-picker",
         {
           "photosPermission": "Allow LeafLink to access your photos to set your profile avatar."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "defaultChannel": "default"
         }
       ]
     ],

@@ -1,15 +1,15 @@
 /* eslint-disable react-hooks/refs */
-import React, { useRef, useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  PanResponder,
-  GestureResponderEvent,
-} from 'react-native';
-import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import { useEffect, useRef } from 'react';
+import {
+  GestureResponderEvent,
+  PanResponder,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 
 export interface SliderControlProps {
   label: string;
@@ -20,6 +20,7 @@ export interface SliderControlProps {
   unit?: string;
   onChange: (val: number) => void;
   onSlidingComplete?: (val: number) => void;
+  onSlidingCancel?: () => void;
   accentColor?: string;
   description?: string;
 }
@@ -33,12 +34,14 @@ export function SliderControl({
   unit = '',
   onChange,
   onSlidingComplete,
+  onSlidingCancel,
   accentColor,
   description,
 }: SliderControlProps) {
   const { colors } = useAppTheme();
   const trackWidthRef = useRef<number>(200);
   const trackLayoutXRef = useRef<number>(0);
+  const startValueRef = useRef<number>(value);
   const activeColor = accentColor || colors.palette.forest;
 
   const clampValue = (val: number) => {
@@ -46,9 +49,9 @@ export function SliderControl({
     return Math.max(min, Math.min(max, stepped));
   };
 
-  const propsRef = useRef({ min, max, step, onChange, onSlidingComplete });
+  const propsRef = useRef({ min, max, step, value, onChange, onSlidingComplete, onSlidingCancel });
   useEffect(() => {
-    propsRef.current = { min, max, step, onChange, onSlidingComplete };
+    propsRef.current = { min, max, step, value, onChange, onSlidingComplete, onSlidingCancel };
   });
 
   const panResponder = useRef(
@@ -57,6 +60,7 @@ export function SliderControl({
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: (evt: GestureResponderEvent) => {
         const currentProps = propsRef.current;
+        startValueRef.current = currentProps.value;
         const relativeX = evt.nativeEvent.pageX - trackLayoutXRef.current;
         const ratio = Math.max(0, Math.min(1, relativeX / (trackWidthRef.current || 1)));
         const rawVal = currentProps.min + ratio * (currentProps.max - currentProps.min);
@@ -83,14 +87,11 @@ export function SliderControl({
         currentProps.onChange(clamped);
         currentProps.onSlidingComplete?.(clamped);
       },
-      onPanResponderTerminate: (evt: GestureResponderEvent) => {
+      onPanResponderTerminate: () => {
+        // Discard interrupted gestures without committing writes
         const currentProps = propsRef.current;
-        const relativeX = evt.nativeEvent.pageX - trackLayoutXRef.current;
-        const ratio = Math.max(0, Math.min(1, relativeX / (trackWidthRef.current || 1)));
-        const rawVal = currentProps.min + ratio * (currentProps.max - currentProps.min);
-        const stepped = Math.round((rawVal - currentProps.min) / currentProps.step) * currentProps.step + currentProps.min;
-        const clamped = Math.max(currentProps.min, Math.min(currentProps.max, stepped));
-        currentProps.onSlidingComplete?.(clamped);
+        currentProps.onChange(startValueRef.current);
+        currentProps.onSlidingCancel?.();
       },
     })
   ).current;

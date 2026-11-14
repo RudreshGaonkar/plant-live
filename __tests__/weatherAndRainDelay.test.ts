@@ -167,6 +167,35 @@ describe('Unit Tests: Dynamic Weather & Device Location Integration', () => {
       expect(report.cityName).toBe('Panaji');
       expect(report.isFallback).toBe(false);
     });
+
+    test('handles API response missing hourly precipitation or current weather with safe fallbacks', async () => {
+      const mockEmptyResponse = {};
+
+      global.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockEmptyResponse,
+      }) as any;
+
+      const report = await fetchWeatherFromOpenMeteo(15.4989, 73.8278, 'Goa', true);
+
+      expect(report.temperature).toBe(28);
+      expect(report.weathercode).toBe(0);
+      expect(report.conditionText).toBe('Clear');
+      expect(report.rainProbability).toBe(0);
+      expect(report.isRaining).toBe(false);
+      expect(report.isFallback).toBe(true);
+    });
+
+    test('throws structured error when Open-Meteo HTTP request fails', async () => {
+      global.fetch = jest.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+      }) as any;
+
+      await expect(
+        fetchWeatherFromOpenMeteo(15.4989, 73.8278, 'Goa', true)
+      ).rejects.toThrow('Open-Meteo HTTP error: 503');
+    });
   });
 
   describe('4. Smart Terrace Rain Delay Logic', () => {

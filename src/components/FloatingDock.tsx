@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/immutability */
 /**
  * FloatingDock
  * Floating pill navigation dock that replaces the standard tab bar.
@@ -10,7 +11,7 @@
 import { useAppTheme } from '@/theme';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Platform,
   Pressable,
@@ -22,11 +23,12 @@ import {
 import Animated, {
   FadeIn,
   FadeOut,
-  runOnUI,
+  runOnJS,
   useAnimatedStyle,
+  useReducedMotion,
   useSharedValue,
-  withSpring,
   withTiming,
+  Easing,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -99,61 +101,86 @@ export function FloatingDock({
   const insets = useSafeAreaInsets();
   const [dialOpen, setDialOpen] = useState(false);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isLongPressRef = useRef(false);
 
-  // Animation for center water button pulse
+  const reducedMotion = useReducedMotion();
+
+  // Animation for center water button press feedback (applied to visual child)
   const waterScale = useSharedValue(1);
-  // Animation for dial items
-  const dialScale = useSharedValue(0);
+  const waterOpacity = useSharedValue(1);
+
+  // Animation for dial: fast opacity fade + subtle 6-8dp translateY translation
+  const dialOpacity = useSharedValue(0);
+  const dialTranslateY = useSharedValue(8);
 
   const waterBtnAnimStyle = useAnimatedStyle(() => ({
+    opacity: waterOpacity.value,
     transform: [{ scale: waterScale.value }],
   }));
 
   const dialContainerStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: dialScale.value }],
-    opacity: dialScale.value,
+    opacity: dialOpacity.value,
+    transform: [{ translateY: dialTranslateY.value }],
   }));
 
   const openDial = useCallback(() => {
     setDialOpen(true);
-    runOnUI(() => {
-      'worklet';
-      dialScale.value = withSpring(1, { damping: 14, stiffness: 180 });
-    })();
-  }, [dialScale]);
+    dialOpacity.value = withTiming(1, { duration: 150, easing: Easing.out(Easing.quad) });
+    dialTranslateY.value = withTiming(0, { duration: 150, easing: Easing.out(Easing.quad) });
+  }, [dialOpacity, dialTranslateY]);
 
   const closeDial = useCallback(() => {
-    runOnUI(() => {
-      'worklet';
-      dialScale.value = withTiming(0, { duration: 180 });
-    })();
-    setTimeout(() => setDialOpen(false), 200);
-  }, [dialScale]);
+    dialOpacity.value = withTiming(0, { duration: 130, easing: Easing.in(Easing.quad) });
+    dialTranslateY.value = withTiming(
+      8,
+      { duration: 130, easing: Easing.in(Easing.quad) },
+      (finished) => {
+        'worklet';
+        if (finished) {
+          runOnJS(setDialOpen)(false);
+        }
+      }
+    );
+  }, [dialOpacity, dialTranslateY]);
+
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => {
+      if (longPressTimer.current) {
+        clearTimeout(longPressTimer.current);
+      }
+    };
+  }, []);
 
   const handleWaterPressIn = useCallback(() => {
-    runOnUI(() => {
-      'worklet';
-      waterScale.value = withSpring(0.92, { damping: 12 });
-    })();
+    isLongPressRef.current = false;
+    if (reducedMotion) {
+      waterOpacity.value = withTiming(0.85, { duration: 75, easing: Easing.out(Easing.quad) });
+    } else {
+      waterScale.value = withTiming(0.98, { duration: 75, easing: Easing.out(Easing.quad) });
+    }
     longPressTimer.current = setTimeout(() => {
+      isLongPressRef.current = true;
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       openDial();
     }, 500);
-  }, [waterScale, openDial]);
+  }, [reducedMotion, openDial, waterScale, waterOpacity]);
 
   const handleWaterPressOut = useCallback(() => {
-    runOnUI(() => {
-      'worklet';
-      waterScale.value = withSpring(1, { damping: 12 });
-    })();
+    if (reducedMotion) {
+      waterOpacity.value = withTiming(1, { duration: 110, easing: Easing.out(Easing.quad) });
+    } else {
+      waterScale.value = withTiming(1, { duration: 110, easing: Easing.out(Easing.quad) });
+    }
     if (longPressTimer.current) {
       clearTimeout(longPressTimer.current);
       longPressTimer.current = null;
     }
-  }, [waterScale]);
+  }, [reducedMotion, waterScale, waterOpacity]);
 
   const handleWaterTap = useCallback(() => {
-    if (!dialOpen) {
+    if (!dialOpen && !isLongPressRef.current) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       onWaterPress();
     }
   }, [dialOpen, onWaterPress]);
@@ -211,8 +238,8 @@ export function FloatingDock({
           {WATER_DIAL_OPTIONS.map((opt, i) => (
             <Animated.View
               key={opt.duration}
-              entering={FadeIn.delay(i * 35).springify()}
-              exiting={FadeOut}
+              entering={FadeIn.duration(150).delay(i * 25)}
+              exiting={FadeOut.duration(100)}
               style={[
                 styles.dialOption,
                 {
@@ -287,7 +314,7 @@ export function FloatingDock({
 
         {/* Raised center Water button */}
         <View style={styles.centerSlot}>
-          <Animated.View style={[styles.centerBtnWrapper, waterBtnAnimStyle]}>
+          <View style={styles.centerBtnWrapper}>
             <Pressable
               onPressIn={handleWaterPressIn}
               onPressOut={handleWaterPressOut}
@@ -309,13 +336,15 @@ export function FloatingDock({
               accessibilityLabel={isWatering ? 'Watering active' : 'Water plant – long press for quick dial'}
               accessibilityRole="button"
             >
-              <Ionicons
-                name={isWatering ? 'hourglass-outline' : 'water'}
-                size={26}
-                color={colors.palette.white}
-              />
+              <Animated.View style={[styles.centerBtnVisual, waterBtnAnimStyle]}>
+                <Ionicons
+                  name={isWatering ? 'hourglass-outline' : 'water'}
+                  size={26}
+                  color={colors.palette.white}
+                />
+              </Animated.View>
             </Pressable>
-          </Animated.View>
+          </View>
         </View>
 
         {/* Right 2 tabs */}
@@ -348,28 +377,40 @@ interface DockTabButtonProps {
 }
 
 function DockTabButton({ tab, isFocused, onPress, colors, badge }: DockTabButtonProps) {
+  const reducedMotion = useReducedMotion();
   const scale = useSharedValue(1);
+  const opacity = useSharedValue(1);
+
   const animStyle = useAnimatedStyle(() => ({
+    opacity: opacity.value,
     transform: [{ scale: scale.value }],
   }));
 
   const handlePressIn = useCallback(() => {
-    runOnUI(() => {
-      'worklet';
-      scale.value = withSpring(0.88, { damping: 12 });
-    })();
-  }, [scale]);
+    if (reducedMotion) {
+      opacity.value = withTiming(0.85, { duration: 75, easing: Easing.out(Easing.quad) });
+    } else {
+      scale.value = withTiming(0.98, { duration: 75, easing: Easing.out(Easing.quad) });
+    }
+  }, [reducedMotion, scale, opacity]);
+
   const handlePressOut = useCallback(() => {
-    runOnUI(() => {
-      'worklet';
-      scale.value = withSpring(1, { damping: 12 });
-    })();
-  }, [scale]);
+    if (reducedMotion) {
+      opacity.value = withTiming(1, { duration: 110, easing: Easing.out(Easing.quad) });
+    } else {
+      scale.value = withTiming(1, { duration: 110, easing: Easing.out(Easing.quad) });
+    }
+  }, [reducedMotion, scale, opacity]);
+
+  const handlePress = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    onPress();
+  }, [onPress]);
 
   return (
-    <Animated.View style={[styles.tabItem, animStyle]}>
+    <View style={styles.tabItem}>
       <Pressable
-        onPress={onPress}
+        onPress={handlePress}
         onPressIn={handlePressIn}
         onPressOut={handlePressOut}
         style={styles.tabPressable}
@@ -377,54 +418,56 @@ function DockTabButton({ tab, isFocused, onPress, colors, badge }: DockTabButton
         accessibilityRole="tab"
         accessibilityState={{ selected: isFocused }}
       >
-        <View style={styles.tabIconContainer}>
-          <Ionicons
-            name={isFocused ? tab.iconFocused : tab.icon}
-            size={22}
-            color={
-              isFocused
-                ? colors.palette.forest
-                : `${colors.palette.ink}99`
-            }
-          />
-          {badge !== undefined && badge > 0 && (
-            <View
+        <Animated.View style={[styles.tabVisualChild, animStyle]}>
+          <View style={styles.tabIconContainer}>
+            <Ionicons
+              name={isFocused ? tab.iconFocused : tab.icon}
+              size={22}
+              color={
+                isFocused
+                  ? colors.palette.forest
+                  : `${colors.palette.ink}99`
+              }
+            />
+            {badge !== undefined && badge > 0 && (
+              <View
+                style={[
+                  styles.badge,
+                  { backgroundColor: colors.palette.critical },
+                ]}
+              >
+                <Text style={styles.badgeText}>
+                  {badge > 9 ? '9+' : badge}
+                </Text>
+              </View>
+            )}
+          </View>
+          {isFocused && (
+            <Animated.View
+              entering={FadeIn.duration(200)}
               style={[
-                styles.badge,
-                { backgroundColor: colors.palette.critical },
+                styles.activeDot,
+                { backgroundColor: colors.palette.mint },
               ]}
-            >
-              <Text style={styles.badgeText}>
-                {badge > 9 ? '9+' : badge}
-              </Text>
-            </View>
+            />
           )}
-        </View>
-        {isFocused && (
-          <Animated.View
-            entering={FadeIn.duration(200)}
+          <Text
             style={[
-              styles.activeDot,
-              { backgroundColor: colors.palette.mint },
+              styles.tabLabel,
+              {
+                color: isFocused
+                  ? colors.palette.forest
+                  : `${colors.palette.ink}60`,
+                opacity: isFocused ? 1 : 0,
+              },
             ]}
-          />
-        )}
-        <Text
-          style={[
-            styles.tabLabel,
-            {
-              color: isFocused
-                ? colors.palette.forest
-                : `${colors.palette.ink}60`,
-              opacity: isFocused ? 1 : 0,
-            },
-          ]}
-          numberOfLines={1}
-        >
-          {tab.label}
-        </Text>
+            numberOfLines={1}
+          >
+            {tab.label}
+          </Text>
+        </Animated.View>
       </Pressable>
-    </Animated.View>
+    </View>
   );
 }
 
@@ -446,6 +489,10 @@ const styles = StyleSheet.create({
   tabItem: {
     flex: 1,
     alignItems: 'center',
+  },
+  tabVisualChild: {
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   tabPressable: {
     alignItems: 'center',
@@ -496,6 +543,10 @@ const styles = StyleSheet.create({
   centerBtn: {
     width: 64,
     height: 64,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  centerBtnVisual: {
     alignItems: 'center',
     justifyContent: 'center',
   },

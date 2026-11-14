@@ -6,7 +6,7 @@
  * - Info: lime
  * uiLayout.md Section 6
  */
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,7 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { router } from 'expo-router';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -29,6 +30,10 @@ import {
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAppTheme } from '@/theme';
 import { useAlertEngine, AppAlert, AlertSeverity } from '@/hooks/useAlertEngine';
+import { useLiveDevice } from '@/store/useLiveDevice';
+import { useSession } from '@/store/useSession';
+import { formatTemperatureText } from '@/utils/temperature';
+import { RefillConfirmationModal } from '@/components/RefillConfirmation';
 
 const SEVERITY_COLORS: Record<
   AlertSeverity,
@@ -56,6 +61,9 @@ const SEVERITY_COLORS: Record<
 
 export default function AlertsScreen() {
   const { colors, radii, spacing } = useAppTheme();
+  const tempUnit = useSession((s) => s.prefs.units);
+  const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
+  const pairingStatus = useSession((s) => s.pairingStatus);
   const {
     alerts,
     unreadAlerts,
@@ -66,6 +74,19 @@ export default function AlertsScreen() {
     handleAction,
     isCloudSynced,
   } = useAlertEngine();
+
+  const [refillTargetAlert, setRefillTargetAlert] = useState<AppAlert | null>(null);
+
+  const onAlertAction = useCallback(
+    (alert: AppAlert) => {
+      if (alert.type === 'bottle' || alert.type === 'LOW_WATER' || alert.actionLabel === 'I Refilled') {
+        setRefillTargetAlert(alert);
+      } else {
+        handleAction(alert);
+      }
+    },
+    [handleAction]
+  );
 
   const getAlertTime = (alert: AppAlert) =>
     alert.timestamp ?? alert.createdAt ?? alert.ts ?? 0;
@@ -92,6 +113,34 @@ export default function AlertsScreen() {
     [criticalAlerts, startOfTodayMs]
   );
 
+  if (!device || pairingStatus === 'unpaired') {
+    return (
+      <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
+        <View style={styles.emptyContainer}>
+          <View style={[styles.emptyIconWrapCTA, { backgroundColor: colors.palette.lime }]}>
+            <Ionicons name="notifications-outline" size={56} color={colors.palette.forest} />
+          </View>
+          <Text style={[styles.emptyTitleCTA, { color: colors.text }]}>
+            No Controller Paired
+          </Text>
+          <Text style={[styles.emptySubtitleCTA, { color: colors.textMuted }]}>
+            Pair your plant controller to receive real-time vitals and plant care alerts.
+          </Text>
+          <TouchableOpacity
+            style={[
+              styles.emptyActionBtn,
+              { backgroundColor: colors.palette.forest, borderRadius: radii.full },
+            ]}
+            onPress={() => router.push('/add-device')}
+          >
+            <Ionicons name="add-circle-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+            <Text style={styles.emptyActionBtnText}>Pair Controller</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   const renderItem = ({ item }: { item: AppAlert }) => {
     const isResolved =
       item.status === 'resolved' || item.status === 'read' || item.status === 'snoozed';
@@ -116,7 +165,7 @@ export default function AlertsScreen() {
           />
           <View style={{ flex: 1 }}>
             <Text style={[styles.cardTitle, { color: colors.textMuted }]}>
-              {item.title?.trim() || 'System Notice'}
+              {formatTemperatureText(item.title?.trim() || 'System Notice', tempUnit)}
             </Text>
             <Text style={[styles.cardTime, { color: colors.textMuted }]}>
               {formatTime(item.ts ?? item.timestamp ?? item.createdAt)}
@@ -130,9 +179,10 @@ export default function AlertsScreen() {
       <SwipeableAlertCard
         key={item.id}
         alert={item}
+        tempUnit={tempUnit}
         onMarkRead={() => markRead(item.id)}
         onSnooze={() => snooze(item.id)}
-        onAction={() => handleAction(item)}
+        onAction={() => onAlertAction(item)}
         colors={colors}
         radii={radii}
       />
@@ -205,13 +255,16 @@ export default function AlertsScreen() {
           />
           <View style={{ flex: 1 }}>
             <Text style={[styles.bannerTitle, { color: colors.palette.critical }]}>
-              {todayCritical[0].title?.trim() || 'System Notice'}
+              {formatTemperatureText(todayCritical[0].title?.trim() || 'System Notice', tempUnit)}
             </Text>
             <Text style={[styles.bannerBody, { color: '#8B3040' }]}>
-              {todayCritical[0].message?.trim() ||
-                todayCritical[0].description?.trim() ||
-                todayCritical[0].body?.trim() ||
-                'Critical system notice.'}
+              {formatTemperatureText(
+                todayCritical[0].message?.trim() ||
+                  todayCritical[0].description?.trim() ||
+                  todayCritical[0].body?.trim() ||
+                  'Critical system notice.',
+                tempUnit
+              )}
             </Text>
           </View>
           {todayCritical[0].actionLabel && (
@@ -223,7 +276,7 @@ export default function AlertsScreen() {
                   borderRadius: radii.md,
                 },
               ]}
-              onPress={() => handleAction(todayCritical[0])}
+              onPress={() => onAlertAction(todayCritical[0])}
             >
               <Text style={styles.bannerActionText}>
                 {todayCritical[0].actionLabel}
@@ -276,6 +329,18 @@ export default function AlertsScreen() {
         contentContainerStyle={[styles.container, { padding: spacing.md }]}
         showsVerticalScrollIndicator={false}
       />
+
+      <RefillConfirmationModal
+        visible={Boolean(refillTargetAlert)}
+        deviceId={refillTargetAlert?.deviceId || ''}
+        controllerName={refillTargetAlert?.title || 'Plant Controller'}
+        onClose={() => setRefillTargetAlert(null)}
+        onSuccess={() => {
+          if (refillTargetAlert) {
+            markRead(refillTargetAlert.id);
+          }
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -284,6 +349,7 @@ export default function AlertsScreen() {
 
 interface SwipeableAlertCardProps {
   alert: AppAlert;
+  tempUnit: 'C' | 'F';
   onMarkRead: () => void;
   onSnooze: () => void;
   onAction: () => void;
@@ -293,6 +359,7 @@ interface SwipeableAlertCardProps {
 
 function SwipeableAlertCard({
   alert,
+  tempUnit,
   onMarkRead,
   onSnooze,
   onAction,
@@ -332,17 +399,20 @@ function SwipeableAlertCard({
     opacity: opacity.value,
   }));
 
-  const displayTitle = (alert.title && alert.title.trim().length > 0)
+  const rawTitle = (alert.title && alert.title.trim().length > 0)
     ? alert.title.trim()
     : 'System Notice';
 
-  const displayBody = (alert.message && alert.message.trim().length > 0)
+  const rawBody = (alert.message && alert.message.trim().length > 0)
     ? alert.message.trim()
     : (alert.description && alert.description.trim().length > 0)
     ? alert.description.trim()
     : (alert.body && alert.body.trim().length > 0)
     ? alert.body.trim()
     : '';
+
+  const displayTitle = formatTemperatureText(rawTitle, tempUnit);
+  const displayBody = formatTemperatureText(rawBody, tempUnit);
 
   const timestamp = alert.createdAt ?? alert.ts ?? alert.timestamp;
 
@@ -486,5 +556,42 @@ const styles = StyleSheet.create({
   readCard: {
     flexDirection: 'row', alignItems: 'center',
     padding: 12, gap: 10, borderWidth: 1,
+  },
+  emptyContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  emptyIconWrapCTA: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  emptyTitleCTA: {
+    fontSize: 22,
+    fontWeight: '800',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  emptySubtitleCTA: {
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+    marginBottom: 24,
+  },
+  emptyActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+  },
+  emptyActionBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
   },
 });

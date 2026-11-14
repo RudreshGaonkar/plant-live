@@ -238,113 +238,134 @@ export function TelemetryChart({
 
         {/* ── SVG Chart Viewport ─────────────────────────────── */}
         <View style={styles.svgWrapper}>
-          <Svg width={CHART_WIDTH} height={CHART_HEIGHT}>
-            <Defs>
-              <LinearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
-                <Stop offset="0%" stopColor={meta.fillGradient[0]} stopOpacity="0.32" />
-                <Stop offset="100%" stopColor={meta.fillGradient[1]} stopOpacity="0.02" />
-              </LinearGradient>
-            </Defs>
+          {points.length === 0 ? (
+            <View style={styles.emptyChartOverlay}>
+              <Ionicons name="stats-chart-outline" size={32} color={colors.palette.sage} />
+              <Text style={[styles.emptyChartText, { color: colors.textMuted }]}>
+                No telemetry recorded yet
+              </Text>
+            </View>
+          ) : (
+            <Svg width={CHART_WIDTH} height={CHART_HEIGHT}>
+              <Defs>
+                <LinearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
+                  <Stop offset="0%" stopColor={meta.fillGradient[0]} stopOpacity="0.32" />
+                  <Stop offset="100%" stopColor={meta.fillGradient[1]} stopOpacity="0.02" />
+                </LinearGradient>
+              </Defs>
 
-            {/* Background horizontal grid lines */}
-            {[0.25, 0.5, 0.75].map((frac, idx) => (
-              <Line
-                key={idx}
-                x1={0}
-                y1={CHART_HEIGHT * frac}
-                x2={CHART_WIDTH}
-                y2={CHART_HEIGHT * frac}
-                stroke={`${colors.palette.sage}20`}
-                strokeWidth={1}
-                strokeDasharray="4 4"
-              />
-            ))}
-
-            {/* Threshold Reference Lines (Moisture only) */}
-            {activeMetric === 'moisture' && minThreshold !== undefined && (
-              <Line
-                x1={0}
-                y1={CHART_HEIGHT - (minThreshold / 100) * CHART_HEIGHT}
-                x2={CHART_WIDTH}
-                y2={CHART_HEIGHT - (minThreshold / 100) * CHART_HEIGHT}
-                stroke={colors.palette.warningBorder}
-                strokeWidth={1.5}
-                strokeDasharray="5 3"
-              />
-            )}
-            {activeMetric === 'moisture' && maxThreshold !== undefined && (
-              <Line
-                x1={0}
-                y1={CHART_HEIGHT - (maxThreshold / 100) * CHART_HEIGHT}
-                x2={CHART_WIDTH}
-                y2={CHART_HEIGHT - (maxThreshold / 100) * CHART_HEIGHT}
-                stroke={colors.palette.forest}
-                strokeWidth={1.5}
-                strokeDasharray="5 3"
-              />
-            )}
-
-            {/* Area fill beneath line */}
-            {areaPath ? <Path d={areaPath} fill="url(#chartGradient)" /> : null}
-
-            {/* Main curved line */}
-            {linePath ? (
-              <Path
-                d={linePath}
-                stroke={meta.color}
-                strokeWidth={2.8}
-                fill="none"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            ) : null}
-
-            {/* Watering Droplet Event Markers */}
-            {activeMetric === 'moisture' &&
-              waterPoints.map((p, i) => (
-                <React.Fragment key={`drop-${i}`}>
-                  {/* Outer pulse aura */}
-                  <SvgCircle
-                    cx={p.x}
-                    cy={p.y}
-                    r={9}
-                    fill={`${colors.palette.forest}25`}
-                  />
-                  {/* Inner droplet marker */}
-                  <SvgCircle
-                    cx={p.x}
-                    cy={p.y}
-                    r={5}
-                    fill={colors.palette.forest}
-                    stroke={colors.palette.white}
-                    strokeWidth={1.5}
-                  />
-                </React.Fragment>
+              {/* Background horizontal grid lines */}
+              {[0.25, 0.5, 0.75].map((frac, idx) => (
+                <Line
+                  key={idx}
+                  x1={0}
+                  y1={CHART_HEIGHT * frac}
+                  x2={CHART_WIDTH}
+                  y2={CHART_HEIGHT * frac}
+                  stroke={`${colors.palette.sage}20`}
+                  strokeWidth={1}
+                  strokeDasharray="4 4"
+                />
               ))}
 
-            {/* Interactive Vertical Scrubber Crosshair Line */}
-            {activePoint && (
-              <>
+              {/* Threshold Reference Lines (Moisture only) */}
+              {activeMetric === 'moisture' && minThreshold !== undefined && (
                 <Line
-                  x1={activePoint.x}
-                  y1={0}
-                  x2={activePoint.x}
-                  y2={CHART_HEIGHT}
+                  x1={0}
+                  y1={CHART_HEIGHT - (minThreshold / 100) * CHART_HEIGHT}
+                  x2={CHART_WIDTH}
+                  y2={CHART_HEIGHT - (minThreshold / 100) * CHART_HEIGHT}
+                  stroke={colors.palette.warningBorder}
+                  strokeWidth={1.5}
+                  strokeDasharray="5 3"
+                />
+              )}
+              {activeMetric === 'moisture' && maxThreshold !== undefined && (
+                <Line
+                  x1={0}
+                  y1={CHART_HEIGHT - (maxThreshold / 100) * CHART_HEIGHT}
+                  x2={CHART_WIDTH}
+                  y2={CHART_HEIGHT - (maxThreshold / 100) * CHART_HEIGHT}
                   stroke={colors.palette.forest}
                   strokeWidth={1.5}
-                  strokeDasharray="3 3"
+                  strokeDasharray="5 3"
                 />
+              )}
+
+              {/* Area fill beneath line */}
+              {areaPath ? <Path d={areaPath} fill="url(#chartGradient)" /> : null}
+
+              {/* Main curved line */}
+              {linePath ? (
+                <Path
+                  d={linePath}
+                  stroke={meta.color}
+                  strokeWidth={2.8}
+                  fill="none"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              ) : null}
+
+              {/* Single point fallback */}
+              {points.length === 1 && (
                 <SvgCircle
-                  cx={activePoint.x}
-                  cy={activePoint.y}
+                  cx={points[0].x}
+                  cy={points[0].y}
                   r={6}
                   fill={meta.color}
                   stroke={colors.palette.white}
                   strokeWidth={2}
                 />
-              </>
-            )}
-          </Svg>
+              )}
+
+              {/* Watering Droplet Event Markers */}
+              {activeMetric === 'moisture' &&
+                waterPoints.map((p, i) => (
+                  <React.Fragment key={`drop-${i}`}>
+                    {/* Outer pulse aura */}
+                    <SvgCircle
+                      cx={p.x}
+                      cy={p.y}
+                      r={9}
+                      fill={`${colors.palette.forest}25`}
+                    />
+                    {/* Inner droplet marker */}
+                    <SvgCircle
+                      cx={p.x}
+                      cy={p.y}
+                      r={5}
+                      fill={colors.palette.forest}
+                      stroke={colors.palette.white}
+                      strokeWidth={1.5}
+                    />
+                  </React.Fragment>
+                ))}
+
+              {/* Interactive Vertical Scrubber Crosshair Line */}
+              {activePoint && points.length > 1 && (
+                <>
+                  <Line
+                    x1={activePoint.x}
+                    y1={0}
+                    x2={activePoint.x}
+                    y2={CHART_HEIGHT}
+                    stroke={colors.palette.forest}
+                    strokeWidth={1.5}
+                    strokeDasharray="3 3"
+                  />
+                  <SvgCircle
+                    cx={activePoint.x}
+                    cy={activePoint.y}
+                    r={6}
+                    fill={meta.color}
+                    stroke={colors.palette.white}
+                    strokeWidth={2}
+                  />
+                </>
+              )}
+            </Svg>
+          )}
         </View>
 
         {/* ── Chart Legend / Thresholds Footer ───────────────── */}
@@ -465,6 +486,18 @@ const styles = StyleSheet.create({
   svgWrapper: {
     alignItems: 'center',
     justifyContent: 'center',
+    minHeight: CHART_HEIGHT,
+  },
+  emptyChartOverlay: {
+    height: CHART_HEIGHT,
+    width: CHART_WIDTH,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  emptyChartText: {
+    fontSize: 13,
+    fontWeight: '600',
   },
   legendContainer: {
     flexDirection: 'row',

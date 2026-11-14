@@ -49,4 +49,5 @@ spec.md
 *.apk
 uiLayout.md
 *.txt
-firmware
+.recall_scratchpad.md
+.remem_context_feed.md

@@ -10,9 +10,9 @@
 3. [Hardware Pin Map & Wiring](#3-hardware-pin-map--wiring)
 4. [Quick Start & Local Setup](#4-quick-start--local-setup)
 5. [Firebase & Cloud Functions Deployment](#5-firebase--cloud-functions-deployment)
-6. [Database Seed Script](#6-database-seed-script)
+6. [Device Pairing & Onboarding](#6-device-pairing--onboarding)
 7. [Automated Unit & Integration Tests](#7-automated-unit--integration-tests)
-8. [Live Presentation Demo Script](#8-live-presentation-demo-script)
+8. [Code Quality & Standards](#8-code-quality--standards)
 9. [License & Credits](#9-license--credits)
 
 ---
@@ -42,7 +42,6 @@ graph TD
         RTDB <-->|Live Synchronizer| STORE["Zustand Store\nuseLiveDevice & useSession"]
         STORE --> UI["Mobile Dashboard\n- 3D Plant Hero (60 FPS)\n- Bento Vitals Grid\n- Realtime History Charts\n- Calibration Wizard\n- Manual Water Now Sheet"]
         PUSH --> UI
-        SIM["Client-Side Simulator\n(Offline Demo Mode)"] -.->|Simulated Telemetry| STORE
     end
 ```
 
@@ -54,7 +53,7 @@ graph TD
 - **Coastal-Humidity Guard (Spec §8.1):** Protects plants in humid climates (e.g., coastal zones) by delaying watering cycles if air humidity is high (`> 80% RH`) and soil is within 10% of minimum threshold, preventing fungal root rot.
 - **Midday Heat Guard:** Postpones watering during peak scorching sun on terraces to avoid scalding delicate roots.
 - **Fail-Safe Firmware:** Relay defaults OFF on boot; hard safety timer enforces a 15-second pump cap; non-blocking `millis()` state machine keeps Wi-Fi and watchdog timer fed.
-- **Instant Demo Mode:** 100% offline showcase capability with client-side simulator and hidden 5-tap developer debug panel.
+- **Live Hardware Onboarding:** QR-code guided Wi-Fi provisioning and pairing flow with real RTDB ownership verification.
 
 ---
 
@@ -140,26 +139,21 @@ Functions include:
 
 ---
 
-## 6. Database Seed Script
+## 6. Device Pairing & Onboarding
 
-To populate a complete test user, claimed device, calibrated thresholds, live telemetry, historical charts (24 hours), and water logs:
+To connect and pair a physical LeafLink controller:
 
-```bash
-# Run database seed
-npm run seed
-```
-
-This will automatically:
-1. Register or sign into test user (`demo@leaflink.local`).
-2. Write initial config for `esp8266-demo-01` (`Balcony`, `Monstera Deliciosa`).
-3. Seed 48 telemetry points simulating diurnal night/day microclimate curves.
-4. Record sample water logs and alert notifications.
+1. Power on your ESP8266 controller.
+2. In the LeafLink app, navigate to **Add Device** (`/add-device`).
+3. Scan the controller's QR code or enter its MAC/Device ID.
+4. Follow the captive portal flow to transmit your 2.4 GHz home Wi-Fi credentials to the controller.
+5. Once the controller connects to Firebase RTDB, the app binds ownership under your user account (`users/{uid}/devices/{deviceId}`).
 
 ---
 
 ## 7. Automated Unit & Integration Tests
 
-The project includes Jest test suites covering state mapping, threshold defaults, ADC calibration formulas, and autonomous guard logic:
+The project includes comprehensive Jest test suites covering state mapping, threshold defaults, ADC calibration formulas, autonomous guard logic, and RTDB persistence:
 
 ```bash
 # Run test suite
@@ -167,40 +161,31 @@ npm test
 ```
 
 ### Verified Test Coverage:
-- `Plant health state mapping`: `unknown` (offline), `thirsty`, `overwatered`, `healthy`.
+- `Plant health state mapping`: `unknown` (unhydrated/offline), `thirsty`, `overwatered`, `healthy`.
 - `Location threshold defaults`: `Balcony`, `Terrace`, `Indoor`.
 - `Moisture calibration math`: `dryRaw` (1024) -> 0%, `wetRaw` (400) -> 100%, and ADC noise clamping.
 - `Autonomous rules engine`: Bottle reserve safety check, cooldown timers, midday heat avoidance, and coastal humidity delay.
+- `Device audit and persistence`: Explicit device ID assignment, unhydrated-to-live telemetry handling, and multi-device removal safeguards.
 
 ---
 
-## 8. Live Presentation Demo Script
-
-Follow this step-by-step walkthrough during your project demonstration:
-
-| Step | Action in App | What to Explain / Observe |
-| :---: | :--- | :--- |
-| **1** | Open app, tap **"Explore Demo Mode"** on login screen. | Explain that LeafLink features a **zero-hardware offline simulator** with mathematical microclimate modeling. |
-| **2** | Interact with the **3D Plant Card** on the Home tab. Orbit with finger touch. | Showcase **60 FPS touch-to-orbit perspective physics**, dynamic ambient lighting, and gentle organic sway. |
-| **3** | Tap the version number label **5 times** in Settings to open the **Developer Panel**. | Demonstrate the embedded presentation test bench for forcing device states without physical sensors. |
-| **4** | Slide **Soil Moisture** to **18%**. | Observe 3D plant leaves droop, desaturate, and the state chip change to **"Needs Water"** (`thirsty`). |
-| **5** | Tap **"Water Now"** on the floating action dock or Hero card. | Notice the countdown timer sheet, the relay activating, moisture ring filling, and the watering animation overlay. |
-| **6** | Slide **Air Humidity** to **92%** and moisture to **24%**. | Point out the **Coastal Humidity Guard**: auto-watering pauses gracefully to prevent fungal root rot. |
-| **7** | Navigate to the **History & Insights** tab. | Show real-time telemetry curves (Moisture, Temp, Humidity, Sunlight) and the interactive watering log timeline. |
-| **8** | Toggle **Auto / Manual** mode on the Control tab. | Emphasize fail-safe edge safety: Manual mode strictly locks out the pump; relay defaults safe OFF. |
-
----
-
-## 9. Code Quality & Standards
+## 8. Code Quality & Standards
 
 LeafLink strictly follows modern Expo and TypeScript best practices:
+
 ```bash
 # Typecheck
 npx tsc --noEmit
 
 # Linting
 npx expo lint
+
+# Dependency & config diagnostics
+npx expo-doctor
 ```
 
 ---
+
+## 9. License & Credits
+
 *Built with ❤️ for Modern Agricultural Engineering & Ubiquitous Computing.*
