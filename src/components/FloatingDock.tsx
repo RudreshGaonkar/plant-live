@@ -89,6 +89,10 @@ interface FloatingDockProps {
   unreadAlerts?: number;
 }
 
+const DOCK_BOTTOM_GAP = 16;
+// Includes the raised watering button above the dock row.
+export const FLOATING_DOCK_CLEARANCE = DOCK_BOTTOM_GAP + 88;
+
 export function FloatingDock({
   activeRoute,
   onTabPress,
@@ -198,7 +202,7 @@ export function FloatingDock({
     [closeDial, onWaterPress, onWaterDialSelect]
   );
 
-  const dockBottom = insets.bottom + 16;
+  const dockBottom = insets.bottom + DOCK_BOTTOM_GAP;
   const DIAL_RADIUS = 96;
   const DIAL_ITEM_SIZE = 62;
 

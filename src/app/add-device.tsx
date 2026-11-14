@@ -22,6 +22,8 @@ import {
   Linking,
   Vibration,
   ToastAndroid,
+  Keyboard,
+  findNodeHandle,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useIsFocused } from 'expo-router';
@@ -75,20 +77,34 @@ export default function AddDeviceScreen() {
   }, [user, isAuthReady]);
 
   const [step, setStep] = useState<number>(1);
-  const [showWifiGuide, setShowWifiGuide] = useState<boolean>(true);
+  const [showWifiGuide, setShowWifiGuide] = useState(false);
 
   const [connectTab, setConnectTab] = useState<'qr' | 'manual'>('qr');
   const [deviceIdInput, setDeviceIdInput] = useState<string>('');
   const [isVerifyingOnline, setIsVerifyingOnline] = useState<boolean>(false);
   const [isDeviceOnline, setIsDeviceOnline] = useState<boolean>(false);
   const [pairingError, setPairingError] = useState<string | null>(null);
-  const [scannerAttempt, setScannerAttempt] = useState(0);
+  const scrollView = useRef<ScrollView>(null);
+  const deviceIdField = useRef<TextInput>(null);
   const pairingInProgress = useRef(false);
   const [isAutoDetecting, setIsAutoDetecting] = useState<boolean>(false);
   const [autoDetectBanner, setAutoDetectBanner] = useState<{
     type: 'success' | 'error';
     message: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (!isFocused || step !== 1 || connectTab !== 'manual') return;
+    const subscription = Keyboard.addListener('keyboardDidShow', () => {
+      const input = deviceIdField.current;
+      if (!input?.isFocused()) return;
+      const handle = findNodeHandle(input);
+      if (handle !== null) {
+        scrollView.current?.scrollResponderScrollNativeHandleToKeyboard(handle, 24, true);
+      }
+    });
+    return () => subscription.remove();
+  }, [connectTab, isFocused, step]);
 
   // STEP 2 State: Plant Details & Location
   const [plantName, setPlantName] = useState<string>('Indoor Monstera');
@@ -202,7 +218,6 @@ export default function AddDeviceScreen() {
   const handleScanAgain = () => {
     handleDeviceIdChange('');
     setConnectTab('qr');
-    setScannerAttempt((attempt) => attempt + 1);
   };
 
   const handleOpenWifiSettings = async () => {
@@ -427,6 +442,9 @@ export default function AddDeviceScreen() {
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
       <ScrollView
+        ref={scrollView}
+        automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
+        keyboardShouldPersistTaps="handled"
         contentContainerStyle={[styles.container, { padding: spacing.md }]}
         showsVerticalScrollIndicator={false}
       >
@@ -754,12 +772,10 @@ export default function AddDeviceScreen() {
             </View>
 
             {/* QR Scanner Mode */}
-            {isFocused && connectTab === 'qr' && (
+            {isFocused && connectTab === 'qr' && !isVerifyingOnline && !isAutoDetecting && !pairingError && !isDeviceOnline && (
               <DeviceQRScanner
-                key={scannerAttempt}
                 onScan={handleDeviceIdSelected}
                 onManualInputPress={() => setConnectTab('manual')}
-                scanDisabled={isVerifyingOnline || isAutoDetecting || pairingError !== null}
               />
             )}
 
@@ -835,6 +851,7 @@ export default function AddDeviceScreen() {
 
                 <Text style={[styles.label, { color: colors.text }]}>Device Serial ID</Text>
                 <TextInput
+                  ref={deviceIdField}
                   style={[styles.input, { borderColor: colors.border, borderRadius: radii.md, color: colors.text }]}
                   placeholder="e.g. LeafLink-A6A61A"
                   placeholderTextColor={colors.textMuted}
@@ -862,7 +879,7 @@ export default function AddDeviceScreen() {
             )}
 
             {pairingError && !isVerifyingOnline && (
-              <View style={[styles.card, { backgroundColor: colors.surface, borderRadius: radii.card }]}>
+              <View style={[styles.card, styles.pairingErrorCard, { backgroundColor: colors.surface, borderRadius: radii.card }]}>
                 <Text accessibilityRole="alert" style={[styles.onlineConfirmTitle, { color: colors.text }]}>
                   {pairingError}
                 </Text>
@@ -1513,6 +1530,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 12,
+  },
+  pairingErrorCard: {
+    gap: 8,
   },
   continueBtnText: {
     color: '#FFFFFF',

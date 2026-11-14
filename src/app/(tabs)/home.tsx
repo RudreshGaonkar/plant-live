@@ -81,6 +81,8 @@ export default function HomeScreen() {
   const { triggerWaterNow, stage } = useCommand();
 
   const [gardenStripOpen, setGardenStripOpen] = useState(false);
+  const [headerHeight, setHeaderHeight] = useState(0);
+  const [offlineBannerHeight, setOfflineBannerHeight] = useState(0);
 
   // Dynamic device location weather & smart terrace rain delay
   const currentPlantLocation = device?.config?.location || 'indoor';
@@ -91,6 +93,14 @@ export default function HomeScreen() {
 
   // Shared value that tracks VitalsSheet's translateY to drive overlay fades
   const sheetTranslateY = useSharedValue(SNAP_PEEK_Y);
+  const restingSheetTop = useSharedValue(0);
+  const stageHeight = useSharedValue(SCREEN_HEIGHT);
+  const plantPositionStyle = useAnimatedStyle(() => {
+    if (!restingSheetTop.value) return { transform: [{ translateY: 0 }] };
+    // The illustration is centered in a 220 dp stage. Keep its base and shadow above the card.
+    const plantBottom = stageHeight.value / 2 + 110;
+    return { transform: [{ translateY: Math.min(0, restingSheetTop.value - plantBottom - 12) }] };
+  });
 
   // Overlay opacity: 1 at peek, fades to 0 as sheet approaches half
   const overlayAnimStyle = useAnimatedStyle(() => {
@@ -302,7 +312,10 @@ export default function HomeScreen() {
   };
 
   return (
-    <View style={styles.stage}>
+    <View
+      style={styles.stage}
+      onLayout={(event) => { stageHeight.value = event.nativeEvent.layout.height; }}
+    >
       <StatusBar style="dark" />
 
       {/* ── Layer 0: Full-bleed gradient background ────────────────── */}
@@ -324,7 +337,7 @@ export default function HomeScreen() {
       )}
 
       {/* ── Layer 0b: 3D plant scene ───────────────────────────────── */}
-      <View style={styles.plant3DContainer}>
+      <Animated.View style={[styles.plant3DContainer, plantPositionStyle]}>
         <Plant3DHero
           health={health}
           isWatering={isPumpActive}
@@ -336,10 +349,11 @@ export default function HomeScreen() {
           lastSeen={status.lastSeen}
           weather={weather}
         />
-      </View>
+      </Animated.View>
 
       {/* ── Layer 1: Top floating bar ──────────────────────────────── */}
       <View
+        onLayout={(event) => setHeaderHeight(event.nativeEvent.layout.height)}
         style={[
           styles.topBar,
           { paddingTop: Math.max(insets.top, 24) + 8, paddingHorizontal: spacing.md },
@@ -484,11 +498,11 @@ export default function HomeScreen() {
       </View>
 
       {/* ── Layer 1b: Floating Weather Widget (Centrally below location bar, top center of plant scene) ── */}
-      <Animated.View
+      {headerHeight > 0 && !gardenStripOpen && <Animated.View
         style={[
           styles.weatherWidgetContainer,
           {
-            top: Math.max(insets.top, 24) + (isOffline ? 104 : 58),
+            top: headerHeight + 8 + (isOffline ? offlineBannerHeight + 8 : 0),
           },
           overlayAnimStyle,
         ]}
@@ -499,7 +513,7 @@ export default function HomeScreen() {
           loading={weatherLoading}
           isRainDelayActive={isRainDelayActive}
         />
-      </Animated.View>
+      </Animated.View>}
 
       {/* GardenStrip dropdown */}
       {gardenStripOpen && (
@@ -509,7 +523,7 @@ export default function HomeScreen() {
           style={[
             styles.gardenStripContainer,
             {
-              top: insets.top + 60,
+              top: headerHeight + 8,
               marginHorizontal: spacing.md,
             },
           ]}
@@ -525,12 +539,13 @@ export default function HomeScreen() {
       )}
 
       {/* Offline banner */}
-      {isOffline && (
+      {isOffline && headerHeight > 0 && !gardenStripOpen && (
         <View
+          onLayout={(event) => setOfflineBannerHeight(event.nativeEvent.layout.height)}
           style={[
             styles.offlineBanner,
             {
-              top: insets.top + 60,
+              top: headerHeight + 8,
               backgroundColor: `${colors.palette.blush}EE`,
               marginHorizontal: spacing.md,
               borderRadius: radii.md,
@@ -549,7 +564,7 @@ export default function HomeScreen() {
       )}
 
       {/* ── Layer 2: Mood bubble (fades when sheet rises) ────────── */}
-      <Animated.View style={[styles.moodBubbleContainer, overlayAnimStyle]}>
+      <Animated.View style={[styles.moodBubbleContainer, plantPositionStyle, overlayAnimStyle]}>
         <MoodBubble
           health={health}
           lastSeen={isOffline ? status.lastSeen : undefined}
@@ -600,6 +615,7 @@ export default function HomeScreen() {
         waterLogs={waterLogs}
         forceSnap={isWatering ? 'peek' : undefined}
         animatedTranslateY={sheetTranslateY}
+        restingTop={restingSheetTop}
         soakCooldownText={soakCooldownText}
       />
     </View>

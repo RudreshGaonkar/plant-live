@@ -26,15 +26,18 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   useAnimatedReaction,
+  useDerivedValue,
   withSpring,
   runOnJS,
   SharedValue,
 } from 'react-native-reanimated';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '@/theme';
 import { DeviceRecord, PlantHealthState, WaterLog } from '@/store/useLiveDevice';
 import { MoistureRing } from './MoistureRing';
 import { BentoGrid } from './BentoGrid';
+import { FLOATING_DOCK_CLEARANCE } from './FloatingDock';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -58,6 +61,7 @@ interface VitalsSheetProps {
   onSnapChange?: (snap: SheetSnap) => void;
   onTranslateY?: (y: number) => void;
   animatedTranslateY?: SharedValue<number>;
+  restingTop?: SharedValue<number>;
   // Force snap to peek (e.g. when watering starts)
   forceSnap?: SheetSnap;
   soakCooldownText?: string;
@@ -98,11 +102,13 @@ export function VitalsSheet({
   onSnapChange,
   onTranslateY,
   animatedTranslateY,
+  restingTop,
   forceSnap,
   soakCooldownText,
 }: VitalsSheetProps) {
   const { colors, radii } = useAppTheme();
-  const { width: windowWidth, fontScale } = useWindowDimensions();
+  const { top, bottom } = useSafeAreaInsets();
+  const { width: windowWidth, height: windowHeight, fontScale } = useWindowDimensions();
   const isCompact = windowWidth < 360 || fontScale > 1.15;
 
   const { config, telemetry } = device;
@@ -112,6 +118,9 @@ export function VitalsSheet({
   const internalTranslateY = useSharedValue(snapPoints[2]);
   const translateY = animatedTranslateY ?? internalTranslateY;
   const currentSnap = useSharedValue<SheetSnap>('peek');
+  const peekRowHeight = useSharedValue(0);
+  const sheetHeight = SCREEN_HEIGHT * SNAP_FULL + 40;
+  const dockInset = bottom + FLOATING_DOCK_CLEARANCE + 4;
 
   const snapTo = useCallback((snap: SheetSnap) => {
     'worklet';
@@ -188,30 +197,41 @@ export function VitalsSheet({
       }
     });
 
+  const extraPeekSpace = useDerivedValue(() =>
+    Math.max(0, peekRowHeight.value + 24 - (sheetHeight - snapPoints[2]))
+  );
+  const sheetTopOffset = windowHeight - dockInset - sheetHeight;
+
+  useAnimatedReaction(
+    () => Math.max(top + 8, sheetTopOffset + snapPoints[2] - extraPeekSpace.value),
+    (position) => {
+      if (restingTop) restingTop.value = position;
+    }
+  );
+
   const sheetAnimStyle = useAnimatedStyle(() => {
+    const peekProgress = Math.max(0, Math.min(1,
+      (translateY.value - snapPoints[1]) / (snapPoints[2] - snapPoints[1])
+    ));
     return {
-      transform: [{ translateY: translateY.value }],
+      top: Math.max(top + 8, sheetTopOffset + translateY.value - extraPeekSpace.value * peekProgress),
     };
   });
-
-  // Derived visible height
-  const sheetHeight = SCREEN_HEIGHT * SNAP_FULL + 40;
 
   return (
     <Animated.View
       style={[
         styles.sheet,
         {
-          height: sheetHeight,
+          bottom: dockInset,
+          zIndex: 20,
           backgroundColor: colors.palette.white,
           shadowColor: colors.palette.ink,
-          shadowOffset: { width: 0, height: -6 },
-          shadowOpacity: 0.12,
-          shadowRadius: 24,
-          elevation: 24,
-          borderTopLeftRadius: radii.heroCorner,
-          borderTopRightRadius: radii.hero,
-          zIndex: 20,
+          shadowOffset: { width: 0, height: 4 },
+          shadowOpacity: 0.09,
+          shadowRadius: 12,
+          elevation: 6,
+          borderRadius: radii.hero,
         },
         sheetAnimStyle,
       ]}
@@ -232,11 +252,14 @@ export function VitalsSheet({
       <ScrollView
         scrollEnabled={true}
         showsVerticalScrollIndicator={false}
-        style={[styles.scrollArea, { backgroundColor: colors.palette.white }]}
-        contentContainerStyle={[styles.scrollContent, { paddingBottom: 120 }]}
+        style={[styles.scrollArea, { borderBottomLeftRadius: radii.hero, borderBottomRightRadius: radii.hero }]}
+        contentContainerStyle={styles.scrollContent}
       >
         {/* ── PEEK CONTENT ─────────────────────────────── */}
-        <View style={[styles.peekRow, isCompact && styles.peekRowCompact]}>
+        <View
+          onLayout={(event) => { peekRowHeight.value = event.nativeEvent.layout.height; }}
+          style={[styles.peekRow, isCompact && styles.peekRowCompact]}
+        >
           {/* Left: Moisture ring */}
           <View style={isCompact ? styles.ringWrapCompact : undefined}>
             <MoistureRing
@@ -410,9 +433,8 @@ function WaterLogRow({ log, colors, radii }: WaterLogRowProps) {
 const styles = StyleSheet.create({
   sheet: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
+    left: 12,
+    right: 12,
   },
   handleArea: {
     paddingVertical: 10,
@@ -427,8 +449,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
-    paddingHorizontal: 20,
-    paddingBottom: 120,
+    paddingHorizontal: 16,
+    paddingBottom: 24,
   },
   peekRow: {
     flexDirection: 'row',

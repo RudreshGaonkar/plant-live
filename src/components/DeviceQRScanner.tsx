@@ -4,8 +4,9 @@
  * Supports torch toggle, camera permission requests, and animated scanning reticle.
  */
 import React, { useState, useEffect, useRef } from 'react';
-import { AppState, Linking, View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
+import { AppState, Linking, Platform, View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { CameraView, scanFromURLAsync, useCameraPermissions } from 'expo-camera';
+import * as ImagePicker from 'expo-image-picker';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import Animated, {
   useSharedValue,
@@ -19,13 +20,110 @@ import { useAppTheme } from '@/theme';
 export interface DeviceQRScannerProps {
   onScan: (deviceId: string) => void;
   onManualInputPress?: () => void;
-  scanDisabled?: boolean;
 }
 
 export function DeviceQRScanner({
   onScan,
   onManualInputPress,
-  scanDisabled = false,
+}: DeviceQRScannerProps) {
+  if (Platform.OS === 'android' && CameraView.isModernBarcodeScannerAvailable) {
+    return <AndroidQRScanner onScan={onScan} />;
+  }
+  return <InlineQRScanner onScan={onScan} onManualInputPress={onManualInputPress} />;
+}
+
+function readDeviceId(data: string) {
+  try {
+    const parsed = JSON.parse(data);
+    if (typeof parsed?.deviceId === 'string') return parsed.deviceId.trim();
+  } catch {
+    // Controller labels can contain a plain ID.
+  }
+  return data.trim();
+}
+
+function AndroidQRScanner({ onScan }: DeviceQRScannerProps) {
+  const { colors, radii } = useAppTheme();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const operation = useRef<{ dispose: () => void } | null>(null);
+
+  useEffect(() => () => {
+    operation.current?.dispose();
+    operation.current = null;
+  }, []);
+
+  const scan = async (fromPhoto: boolean) => {
+    if (operation.current) return;
+    const attempt = { dispose: () => {} };
+    operation.current = attempt;
+    setBusy(true);
+    setError(null);
+    try {
+      if (fromPhoto) {
+        const photo = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'] });
+        if (photo.canceled || operation.current !== attempt) return;
+        const codes = await scanFromURLAsync(photo.assets[0].uri, ['qr']);
+        if (operation.current !== attempt) return;
+        if (codes[0]?.data) onScan(readDeviceId(codes[0].data));
+        else setError('No QR code found. Choose a photo with a clear view of the code.');
+      } else {
+        let receivedCode = false;
+        const subscription = CameraView.onModernBarcodeScanned(({ data }) => {
+          if (receivedCode || !data || operation.current !== attempt) return;
+          receivedCode = true;
+          onScan(readDeviceId(data));
+        });
+        attempt.dispose = () => subscription.remove();
+        await CameraView.launchScanner({ barcodeTypes: ['qr'] });
+      }
+    } catch (err) {
+      const canceled = err instanceof Error && /cancel/i.test(err.message);
+      if (!canceled && operation.current === attempt) {
+        setError(fromPhoto
+          ? 'Could not read this photo. Try another photo or enter the ID.'
+          : 'Could not open the QR scanner. Try again, choose a photo, or enter the ID.');
+      }
+    } finally {
+      if (operation.current === attempt) {
+        attempt.dispose();
+        operation.current = null;
+        setBusy(false);
+      }
+    }
+  };
+
+  return (
+    <View style={[styles.permissionContainer, { backgroundColor: colors.surface, borderRadius: radii.card, borderColor: colors.border }]}>
+      <View style={[styles.iconWrap, { backgroundColor: colors.palette.lime }]}>
+        <Ionicons name="qr-code-outline" size={30} color={colors.palette.forest} />
+      </View>
+      <Text style={[styles.permissionTitle, { color: colors.text }]}>Scan controller QR code</Text>
+      <Text style={[styles.permissionSubtitle, { color: colors.textMuted }]}>
+        Point the camera at the controller’s pairing code or choose a photo of it.
+      </Text>
+      {error && <Text accessibilityRole="alert" style={[styles.permissionSubtitle, { color: colors.palette.critical }]}>{error}</Text>}
+      <TouchableOpacity
+        disabled={busy}
+        style={[styles.primaryBtn, { backgroundColor: busy ? colors.palette.sage : colors.primary, borderRadius: radii.xl }]}
+        onPress={() => void scan(false)}
+      >
+        <Text style={styles.primaryBtnText}>{busy ? 'Reading QR code…' : 'Open QR scanner'}</Text>
+      </TouchableOpacity>
+      <TouchableOpacity
+        disabled={busy}
+        style={[styles.secondaryBtn, { borderColor: colors.border, borderRadius: radii.xl }]}
+        onPress={() => void scan(true)}
+      >
+        <Text style={[styles.secondaryBtnText, { color: colors.palette.forest }]}>Choose QR photo</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+function InlineQRScanner({
+  onScan,
+  onManualInputPress,
 }: DeviceQRScannerProps) {
   const { colors, radii } = useAppTheme();
   const [permission, requestPermission, getPermission] = useCameraPermissions({ get: false });
@@ -33,7 +131,7 @@ export function DeviceQRScanner({
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraFailed, setCameraFailed] = useState(false);
   const [torch, setTorch] = useState(false);
-  const [scanned, setScanned] = useState(false);
+  const [appActive, setAppActive] = useState(AppState.currentState !== 'background' && AppState.currentState !== 'inactive');
   const scanLocked = useRef(false);
 
   useEffect(() => {
@@ -50,10 +148,21 @@ export function DeviceQRScanner({
     };
     refreshPermission();
     const subscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active') refreshPermission();
+      setAppActive(state === 'active');
+      if (state === 'active') {
+        refreshPermission();
+      } else {
+        setCameraReady(false);
+      }
     });
     return () => subscription.remove();
   }, [getPermission]);
+
+  useEffect(() => {
+    if (!permission?.granted || !appActive || cameraReady || cameraFailed) return;
+    const timeout = setTimeout(() => setCameraFailed(true), 10000);
+    return () => clearTimeout(timeout);
+  }, [appActive, cameraFailed, cameraReady, permission?.granted]);
 
   const handlePermissionPress = async () => {
     setPermissionError(false);
@@ -85,23 +194,11 @@ export function DeviceQRScanner({
     transform: [{ translateY: scanLineY.value }],
   }));
 
-  const handleBarcodeScanned = (result: BarcodeScanningResult) => {
-    if (scanDisabled || scanLocked.current) return;
+  const handleBarcodeScanned = (result: { data: string }) => {
+    if (scanLocked.current) return;
     scanLocked.current = true;
-    setScanned(true);
 
-    let deviceId = result.data.trim();
-    try {
-      // Check if QR data is JSON: {"deviceId": "esp8266-xxxx", ...}
-      const parsed = JSON.parse(result.data);
-      if (typeof parsed?.deviceId === 'string') {
-        deviceId = parsed.deviceId.trim();
-      }
-    } catch {
-      // Fallback: raw text ID
-    }
-
-    onScan(deviceId);
+    onScan(readDeviceId(result.data));
   };
 
   if (!permission && !permissionError) {
@@ -165,8 +262,8 @@ export function DeviceQRScanner({
 
   return (
     <View style={[styles.cameraWrapper, { borderRadius: radii.card }]}>
-      <CameraView
-        style={StyleSheet.absoluteFill}
+      {appActive && <CameraView
+        style={styles.camera}
         facing="back"
         enableTorch={torch}
         barcodeScannerSettings={{
@@ -177,11 +274,10 @@ export function DeviceQRScanner({
           setCameraReady(false);
           setCameraFailed(true);
         }}
-        onBarcodeScanned={scanned || scanDisabled ? undefined : handleBarcodeScanned}
-      />
+        onBarcodeScanned={handleBarcodeScanned}
+      />}
 
-      {/* Semi-transparent dark overlay with center cutout */}
-      <View style={styles.reticleOverlay}>
+      <View pointerEvents="box-none" style={styles.reticleOverlay}>
         {/* Top Controls */}
         <View style={styles.topControls}>
           <TouchableOpacity
@@ -242,12 +338,15 @@ const styles = StyleSheet.create({
     position: 'relative',
     backgroundColor: '#000000',
   },
+  camera: {
+    flex: 1,
+    width: '100%',
+  },
   reticleOverlay: {
     ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 20,
-    backgroundColor: 'rgba(0, 0, 0, 0.45)',
   },
   topControls: {
     flexDirection: 'row',

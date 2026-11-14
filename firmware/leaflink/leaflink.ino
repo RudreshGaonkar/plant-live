@@ -58,7 +58,7 @@
 #define FIREBASE_API_KEY   "AIzaSyBV1o12illTDwQlw1K1kwYJ0QhIaipzZ7E"
 
 // Device Identity: Unique Device ID (e.g., leaf-node-01 or generated from ESP ChipID)
-String deviceId = "leaf-node-01";
+const char deviceId[] = "leaf-node-01";
 String deviceEmail = "leaf-node-01@devices.leaflink.local";
 String devicePassword = "LeafLinkDeviceSecretKey123!";
 
@@ -134,16 +134,16 @@ unsigned long lastConfigPollMs = 0;
 unsigned long lastCommandPollMs = 0;
 bool hasUnsyncedReservoirChange = false; // Tracks unconfirmed offline/online reservoir water deductions
 
-// Stream Dirty Flags for safe main-loop processing
-volatile bool flagCommandDirty = false;
+// Pending RTDB writes
 bool flagTelemetryDirty = false;
 bool flagAckDirty = false;
 bool flagBottleDirty = false;
 bool flagWaterLogDirty = false;
 bool flagControlResetDirty = false;
-volatile bool streamNeedsReconnect = true;
-unsigned long nextStreamAttempt = 0;
 unsigned long nextWriteAttempt = 0;
+constexpr uint32_t TLS_MIN_FREE_HEAP = 12000;
+constexpr uint32_t TLS_MIN_FREE_BLOCK = 6144;
+constexpr uint32_t RTDB_WRITE_HEAP_HEADROOM = 14 * 1024;
 String pendingAckId, pendingAckStatus, pendingAckReason;
 int pendingAckCapacity = 0;
 unsigned long completedRunSeconds = 0;
@@ -166,13 +166,12 @@ struct PendingWaterLog {
 PendingWaterLog pendingWaterLog;
 
 void flushPendingWrites();
-void closeCommandStream();
+bool hasTlsHeap();
 void publishPumpState(bool active);
 
 // Hardware Instances
 DHT dht(PIN_DHT, DHTTYPE);
 FirebaseData fbdo;
-FirebaseData streamData;
 FirebaseAuth auth;
 FirebaseConfig fbConfig;
 WiFiManager wm;
@@ -186,11 +185,9 @@ void appendHistorySnapshot();
 void checkAutoWatering();
 void startPump(int durationSec, String trigger, String cmdId = "");
 void stopPump();
-void streamCallback(FirebaseStream data);
-void streamTimeoutCallback(bool timeout);
-void processControlStreamUpdate();
-void processCommandStreamUpdate();
-void processConfigStreamUpdate();
+void pollControl();
+void pollCommand();
+void pollConfig();
 void handleCommand(FirebaseJson &json);
 void updateCommandAck(String cmdId, String status, String reason = "");
 void logWateringEvent(String trigger, int durationSec, float before, float after, String note);
@@ -234,7 +231,7 @@ void setup() {
   Serial.println(chipId);
   Serial.print(F("[INFO] Active Device ID: "));
   Serial.println(deviceId);
-  Serial.printf("[Identity] Active deviceId: %s | Stream path: devices/%s/command\n", deviceId.c_str(), deviceId.c_str());
+  Serial.printf("[Identity] Active deviceId: %s | Command path: devices/%s/command\n", deviceId, deviceId);
 
   // 4. WiFiManager Setup (Captive Portal for initial setup)
   wm.setConfigPortalTimeout(300); // 5 minutes timeout to allow sufficient time for Wi-Fi setup
@@ -243,9 +240,9 @@ void setup() {
   Serial.println(apName);
 
   // Large Device ID Display Notice on Captive Portal
-  String htmlIdNotice = "<div style='text-align:center; background:#e8f5e9; border:2px solid #2e7d32; border-radius:10px; padding:15px; margin-bottom:20px; font-family:sans-serif;'>"
+  String htmlIdNotice = String("<div style='text-align:center; background:#e8f5e9; border:2px solid #2e7d32; border-radius:10px; padding:15px; margin-bottom:20px; font-family:sans-serif;'>"
                         "<span style='font-size:13px; color:#2e7d32; font-weight:bold; letter-spacing:1px; display:block;'>YOUR LEAFLINK DEVICE ID</span>"
-                        "<strong style='font-size:26px; color:#1b5e20; display:block; margin-top:5px;'>" + deviceId + "</strong>"
+                        "<strong style='font-size:26px; color:#1b5e20; display:block; margin-top:5px;'>") + deviceId + "</strong>"
                         "<small style='font-size:11px; color:#4caf50; margin-top:5px; display:block;'>Enter or auto-detect this ID in your LeafLink app</small>"
                         "</div>";
   WiFiManagerParameter custom_id_notice(htmlIdNotice.c_str());
@@ -254,7 +251,7 @@ void setup() {
   // Serve Device Info Endpoint for Mobile App Auto-Detection
   wm.setWebServerCallback([](){
     wm.server->on("/api/info", [](){
-      String jsonPayload = "{\"deviceId\":\"" + deviceId + "\",\"chipId\":\"" + String(ESP.getChipId(), HEX) + "\"}";
+      String jsonPayload = String("{\"deviceId\":\"") + deviceId + "\",\"chipId\":\"" + String(ESP.getChipId(), HEX) + "\"}";
       wm.server->sendHeader("Access-Control-Allow-Origin", "*");
       wm.server->send(200, "application/json", jsonPayload);
     });
@@ -296,12 +293,13 @@ void setup() {
   fbConfig.cert.data = nullptr; // Clock-independent TLS; Firebase account auth remains enabled.
 
   // Size BearSSL buffers for the Firebase TLS handshake (reduced to prevent heap exhaustion)
-  fbdo.setBSSLBufferSize(2048, 512);
+  // FirebaseData applies these sizes to its internal BearSSL client.
+  fbdo.setBSSLBufferSize(4096, 1024);
   fbdo.setResponseSize(1024);
-  streamData.setBSSLBufferSize(2048, 512);
-  streamData.setResponseSize(1024);
 
   Firebase.begin(&fbConfig, &auth);
+  Firebase.RTDB.setReadTimeout(&fbdo, 10000);
+  Firebase.RTDB.setwriteSizeLimit(&fbdo, "tiny");
   Firebase.reconnectWiFi(true);
 
 
@@ -318,7 +316,7 @@ void loop() {
 
   // 1. Independent Hardware Cutoff (Must run at the very top of loop())
   // Ensure MAX_PUMP_RUN_MS (15 seconds) and pumpDurationLimit cutoff check runs at the
-  // very top of loop() before any network or stream checks so a stalled Wi-Fi or Firebase
+  // very top of loop() before any network checks so a stalled Wi-Fi or Firebase
   // call can NEVER delay turning PIN_RELAY HIGH (RELAY_OFF).
   if (isPumpActive) {
     if ((currentMs - pumpStartTime >= pumpDurationLimit) || (currentMs - pumpStartTime >= MAX_PUMP_RUN_MS)) {
@@ -347,49 +345,22 @@ void loop() {
   }
 
   if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
+    // Prioritize commands before lower-frequency configuration and telemetry traffic.
+    if (!isPumpActive && !flagControlResetDirty &&
+        currentMs - lastCommandPollMs >= 1500UL && hasTlsHeap()) {
+      lastCommandPollMs = currentMs;
+      pollCommand();
+      fbdo.clear();
+    }
+
     flushPendingWrites();
 
-    // Config and legacy control are polled separately from the command stream.
-    if (lastConfigPollMs == 0 || currentMs - lastConfigPollMs >= 5000) {
+    if ((lastConfigPollMs == 0 || currentMs - lastConfigPollMs >= 10000UL) && hasTlsHeap()) {
       lastConfigPollMs = currentMs;
-      if (ESP.getFreeHeap() < 12000) {
-        closeCommandStream();
-      }
-      if (ESP.getFreeHeap() >= 10000) {
-        processConfigStreamUpdate();
-        if (!flagControlResetDirty) processControlStreamUpdate();
-      }
+      pollConfig();
+      if (!flagControlResetDirty) pollControl();
       fbdo.clear();
     }
-    // Direct 2-second idle command polling via fbdo or immediate stream dirty flag
-    if (!isPumpActive && !flagControlResetDirty &&
-        (currentMs - lastCommandPollMs >= 2000UL || flagCommandDirty)) {
-      lastCommandPollMs = currentMs;
-      flagCommandDirty = false;
-      processCommandStreamUpdate();
-      fbdo.clear();
-    }
-
-    if (!isPumpActive && currentMs - lastHistoryMs >= HISTORY_INTERVAL_MS) {
-      lastHistoryMs = currentMs;
-      closeCommandStream();
-      if (ESP.getFreeHeap() >= 10000) appendHistorySnapshot();
-      fbdo.clear();
-    }
-
-    if (!isPumpActive && streamNeedsReconnect && (long)(millis() - nextStreamAttempt) >= 0) {
-      closeCommandStream();
-      nextStreamAttempt = millis() + 3000;
-      String streamPath = "devices/" + deviceId + "/command";
-      if (ESP.getFreeHeap() >= 10000 && Firebase.RTDB.beginStream(&streamData, streamPath.c_str())) {
-        streamNeedsReconnect = false;
-        Firebase.RTDB.setStreamCallback(&streamData, streamCallback, streamTimeoutCallback);
-      } else {
-        streamData.clear();
-      }
-    }
-  } else if (WiFi.status() != WL_CONNECTED && !streamNeedsReconnect) {
-    closeCommandStream();
   }
 
   // 6. Embedded Autonomous Auto-Watering Engine (Spec §8.1)
@@ -480,7 +451,8 @@ void readSensors() {
 bool transmitTelemetry() {
   if (WiFi.status() != WL_CONNECTED || !Firebase.ready()) return false;
 
-  String path = "devices/" + deviceId + "/telemetry";
+  char path[sizeof(deviceId) + sizeof("devices//telemetry") - 1];
+  snprintf(path, sizeof(path), "devices/%s/telemetry", deviceId);
   FirebaseJson json;
   json.set("soilRaw", telemetry.soilRaw);
   json.set("soilMoisture", (int)round(telemetry.soilMoisture));
@@ -508,18 +480,20 @@ bool transmitTelemetry() {
   json.set("rssi", telemetry.rssi);
   json.set("ts/.sv", "timestamp");
 
-  if (!Firebase.RTDB.updateNode(&fbdo, path.c_str(), &json)) {
-    Serial.printf("[Telemetry] Update failed: %s\n", fbdo.errorReason().c_str());
+  // Request an empty response while still checking the server's write result.
+  if (!Firebase.RTDB.updateNodeSilent(&fbdo, path, &json)) {
+    Serial.printf("[Telemetry] Update failed (%d): %s\n", fbdo.httpCode(), fbdo.errorReason().c_str());
     return false;
   }
 
   // Heartbeat timestamp
-  String statusPath = "devices/" + deviceId + "/status";
+  char statusPath[sizeof(deviceId) + sizeof("devices//status") - 1];
+  snprintf(statusPath, sizeof(statusPath), "devices/%s/status", deviceId);
   FirebaseJson statusJson;
   statusJson.set("online", true);
   statusJson.set("lastSeen/.sv", "timestamp");
   statusJson.set("firmware", "v1.0.4-esp8266");
-  if (!Firebase.RTDB.updateNode(&fbdo, statusPath.c_str(), &statusJson)) {
+  if (!Firebase.RTDB.updateNodeSilent(&fbdo, statusPath, &statusJson)) {
     Serial.printf("[Heartbeat] Update failed: %s\n", fbdo.errorReason().c_str());
     return false;
   }
@@ -532,11 +506,9 @@ bool transmitTelemetry() {
 void appendHistorySnapshot() {
   if (WiFi.status() != WL_CONNECTED || !Firebase.ready()) return;
 
-  Firebase.RTDB.removeStreamCallback(&streamData);
-  Firebase.RTDB.endStream(&streamData);
-  streamNeedsReconnect = true;
 
-  String path = "history/" + deviceId;
+  char path[sizeof(deviceId) + sizeof("history/") - 1];
+  snprintf(path, sizeof(path), "history/%s", deviceId);
   FirebaseJson json;
   json.set("ts/.sv", "timestamp");
   json.set("soilMoisture", (int)round(telemetry.soilMoisture));
@@ -546,8 +518,9 @@ void appendHistorySnapshot() {
     json.set("light", telemetry.light);
   }
 
-  Firebase.RTDB.pushJSON(&fbdo, path.c_str(), &json);
-  Serial.println(F("[History] Snapshot appended to RTDB"));
+  if (!Firebase.RTDB.pushJSONAsync(&fbdo, path, &json)) {
+    Serial.printf("[History] Snapshot send failed: %s\n", fbdo.errorReason().c_str());
+  }
 }
 
 // ==========================================
@@ -557,7 +530,7 @@ void checkAutoWatering() {
   static unsigned long lastIdentityCheckMs = 0;
   if (millis() - lastIdentityCheckMs >= 10000) {
     lastIdentityCheckMs = millis();
-    Serial.printf("[Identity] Active deviceId: %s | Stream path: devices/%s/command\n", deviceId.c_str(), deviceId.c_str());
+    Serial.printf("[Identity] Active deviceId: %s | Command path: devices/%s/command\n", deviceId, deviceId);
   }
 
   if (!hasInitialConfigSynced || config.mode != "auto") return;
@@ -620,15 +593,7 @@ void checkAutoWatering() {
 void publishPumpState(bool active) {
   telemetry.isPumpActive = active;
   telemetry.pumpOn = active;
-  if (WiFi.status() != WL_CONNECTED || !Firebase.ready()) return;
-
-  String path = "devices/" + deviceId + "/telemetry";
-  FirebaseJson json;
-  json.set("pumpOn", active);
-  json.set("isPumpActive", active);
-  json.set("ts/.sv", "timestamp");
-  Firebase.RTDB.updateNode(&fbdo, path.c_str(), &json);
-  fbdo.clear();
+  flagTelemetryDirty = true;
 }
 
 void startPump(int durationSec, String trigger, String cmdId) {
@@ -653,7 +618,7 @@ void startPump(int durationSec, String trigger, String cmdId) {
   digitalWrite(PIN_RELAY, LOW);
   Serial.printf("[PUMP] Activated for %d seconds (Trigger: %s) - digitalWrite(PIN_RELAY, LOW)\n", safeDuration, trigger.c_str());
 
-  // Publish pumpOn: true immediately without blocking the 15-second hardware cutoff timer
+  // Queue pump status after the relay is active.
   publishPumpState(true);
 }
 
@@ -703,43 +668,18 @@ void stopPump() {
 }
 
 // ==========================================
-// RTDB STREAM CALLBACKS & DIRTY FLAG DISPATCH
+// RTDB POLLING
 // ==========================================
-void closeCommandStream() {
-  Firebase.RTDB.removeStreamCallback(&streamData);
-  Firebase.RTDB.endStream(&streamData);
-  streamData.clear();
-  streamNeedsReconnect = true;
+bool hasTlsHeap() {
+  return ESP.getFreeHeap() >= TLS_MIN_FREE_HEAP &&
+         ESP.getMaxFreeBlockSize() >= TLS_MIN_FREE_BLOCK;
 }
 
-void streamCallback(FirebaseStream data) {
-  const String path = data.dataPath();
-  if (path == "/" && data.dataType() == "json") {
-    FirebaseJsonData id, ack;
-    FirebaseJson &command = data.jsonObject();
-    if (!command.get(id, "id") || id.stringValue == lastProcessedCommandId) return;
-    command.get(ack, "ack/status");
-    if (ack.stringValue == "done" || ack.stringValue == "failed" ||
-        ack.stringValue == "rejected" || ack.stringValue == "running") return;
-    flagCommandDirty = true;
-  } else if (path != "/" && path != "/ack" && !path.startsWith("/ack/")) {
-    flagCommandDirty = true;
-  }
-}
-
-void streamTimeoutCallback(bool timeout) {
-  if (timeout) {
-    streamNeedsReconnect = true;
-  }
-}
-
-// ==========================================
-// SAFE MAIN-LOOP STREAM RE-FETCH PROCESSORS
-// ==========================================
-void processControlStreamUpdate() {
+void pollControl() {
   // Legacy /control pump-start path retired: only validated /command requests can activate the pump.
-  String ctrlPath = "devices/" + deviceId + "/control";
-  if (Firebase.RTDB.getJSON(&fbdo, ctrlPath.c_str())) {
+  char ctrlPath[sizeof(deviceId) + sizeof("devices//control") - 1];
+  snprintf(ctrlPath, sizeof(ctrlPath), "devices/%s/control", deviceId);
+  if (Firebase.RTDB.getJSON(&fbdo, ctrlPath)) {
     if (fbdo.dataType() == "json") {
       FirebaseJson &json = fbdo.jsonObject();
       FirebaseJsonData dVal;
@@ -757,13 +697,11 @@ void processControlStreamUpdate() {
   }
 }
 
-void processCommandStreamUpdate() {
-  if (ESP.getFreeHeap() < 12000) {
-    closeCommandStream();
-  }
-  if (ESP.getFreeHeap() < 10000) return;
-  String cmdPath = "devices/" + deviceId + "/command";
-  if (Firebase.RTDB.getJSON(&fbdo, cmdPath.c_str())) {
+void pollCommand() {
+  if (!hasTlsHeap()) return;
+  char cmdPath[sizeof(deviceId) + sizeof("devices//command") - 1];
+  snprintf(cmdPath, sizeof(cmdPath), "devices/%s/command", deviceId);
+  if (Firebase.RTDB.getJSON(&fbdo, cmdPath)) {
     if (fbdo.dataType() == "json") {
       FirebaseJson &json = fbdo.jsonObject();
       handleCommand(json);
@@ -771,11 +709,12 @@ void processCommandStreamUpdate() {
   }
 }
 
-void processConfigStreamUpdate() {
+void pollConfig() {
   const DeviceConfig previous = config;
-  String cfgPath = "devices/" + deviceId + "/config";
+  char cfgPath[sizeof(deviceId) + sizeof("devices//config") - 1];
+  snprintf(cfgPath, sizeof(cfgPath), "devices/%s/config", deviceId);
   bool hasValidMode = false;
-  if (Firebase.RTDB.getJSON(&fbdo, cfgPath.c_str())) {
+  if (Firebase.RTDB.getJSON(&fbdo, cfgPath)) {
     if (fbdo.dataType() == "json") {
       FirebaseJson &json = fbdo.jsonObject();
       FirebaseJsonData result;
@@ -848,8 +787,9 @@ void processConfigStreamUpdate() {
         lightUpdate.set("light");
       }
       lightUpdate.set("ts/.sv", "timestamp");
-      String telemPath = "devices/" + deviceId + "/telemetry";
-      Firebase.RTDB.updateNode(&fbdo, telemPath.c_str(), &lightUpdate);
+      char telemPath[sizeof(deviceId) + sizeof("devices//telemetry") - 1];
+      snprintf(telemPath, sizeof(telemPath), "devices/%s/telemetry", deviceId);
+      Firebase.RTDB.updateNodeSilent(&fbdo, telemPath, &lightUpdate);
       fbdo.clear();
     }
     flagTelemetryDirty = true;
@@ -915,7 +855,6 @@ void handleCommand(FirebaseJson &json) {
   // 1. Water Now Command
   if (type == "waterNow") {
     lastProcessedCommandId = cmdId;
-    updateCommandAck(cmdId, "running");
 
     // Explicitly bypass soil moisture condition check (moisture >= targetMax or 100%) for manual watering
     Serial.printf("[Command] Manual waterNow received: explicitly bypassing moisture check (Moisture: %.1f%%)\n",
@@ -933,6 +872,7 @@ void handleCommand(FirebaseJson &json) {
 
     // Activate relay pin (LOW) and start pump for requested duration regardless of moisture level
     startPump(durationSec, "manual", cmdId);
+    updateCommandAck(cmdId, "running");
   }
   // 2. Calibrate Dry Sensor Command
   else if (type == "calibrateDry") {
@@ -941,8 +881,9 @@ void handleCommand(FirebaseJson &json) {
     config.soilDryRaw = telemetry.soilRaw;
     bool fsOk = saveConfigToFS();
 
-    String path = "devices/" + deviceId + "/config/calibration/soilDryRaw";
-    bool rtdbOk = Firebase.RTDB.setInt(&fbdo, path.c_str(), config.soilDryRaw);
+    char path[sizeof(deviceId) + sizeof("devices//config/calibration/soilDryRaw") - 1];
+    snprintf(path, sizeof(path), "devices/%s/config/calibration/soilDryRaw", deviceId);
+    bool rtdbOk = Firebase.RTDB.setInt(&fbdo, path, config.soilDryRaw);
     if (fsOk && rtdbOk) {
       updateCommandAck(cmdId, "done");
       Serial.printf("[Calibrate] Dry raw captured: %d\n", config.soilDryRaw);
@@ -958,8 +899,9 @@ void handleCommand(FirebaseJson &json) {
     config.soilWetRaw = telemetry.soilRaw;
     bool fsOk = saveConfigToFS();
 
-    String path = "devices/" + deviceId + "/config/calibration/soilWetRaw";
-    bool rtdbOk = Firebase.RTDB.setInt(&fbdo, path.c_str(), config.soilWetRaw);
+    char path[sizeof(deviceId) + sizeof("devices//config/calibration/soilWetRaw") - 1];
+    snprintf(path, sizeof(path), "devices/%s/config/calibration/soilWetRaw", deviceId);
+    bool rtdbOk = Firebase.RTDB.setInt(&fbdo, path, config.soilWetRaw);
     if (fsOk && rtdbOk) {
       updateCommandAck(cmdId, "done");
       Serial.printf("[Calibrate] Wet raw captured: %d\n", config.soilWetRaw);
@@ -1004,29 +946,6 @@ void updateCommandAck(String cmdId, String status, String reason) {
   pendingAckStatus = status;
   pendingAckReason = reason;
   flagAckDirty = true;
-
-  if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
-    if (ESP.getFreeHeap() < 12000) {
-      closeCommandStream();
-    }
-    String ackPath = "devices/" + deviceId + "/command/ack";
-    FirebaseJson ack;
-    ack.set("id", cmdId);
-    ack.set("status", status);
-    if (reason.length()) ack.set("reason", reason);
-    if (pendingAckCapacity > 0) {
-      ack.set("capacityMl", pendingAckCapacity);
-      pendingAckCapacity = 0;
-    }
-    ack.set("ts/.sv", "timestamp");
-    ack.set("timestamp/.sv", "timestamp");
-    bool ackOk = Firebase.RTDB.setJSON(&fbdo, ackPath.c_str(), &ack);
-    Serial.printf("[Command] Ack write for %s (%s): %s\n", cmdId.c_str(), status.c_str(), ackOk ? "SUCCESS" : "FAILED");
-    if (ackOk) {
-      flagAckDirty = false;
-    }
-    fbdo.clear();
-  }
 }
 
 void flushPendingWrites() {
@@ -1034,19 +953,20 @@ void flushPendingWrites() {
   nextWriteAttempt = millis() + 1000;
 
   bool hasWrites = flagBottleDirty || flagControlResetDirty || flagAckDirty || flagWaterLogDirty || flagTelemetryDirty;
-  if (!hasWrites) return;
+  const bool historyDue = !isPumpActive && millis() - lastHistoryMs >= HISTORY_INTERVAL_MS;
+  if (!hasWrites && !historyDue) return;
 
-  Serial.printf("[Identity] Active deviceId: %s | Stream path: devices/%s/command\n", deviceId.c_str(), deviceId.c_str());
+  Serial.printf("[Identity] Active deviceId: %s | Command path: devices/%s/command\n", deviceId, deviceId);
   Serial.printf("[Heap] Free heap before flushPendingWrites: %d bytes\n", ESP.getFreeHeap());
 
-  bool streamClosed = false;
-  if (ESP.getFreeHeap() < 12000) {
-    closeCommandStream();
-    streamClosed = true;
+  if (!hasTlsHeap() || ESP.getFreeHeap() < RTDB_WRITE_HEAP_HEADROOM) {
+    Serial.printf("[Heap] Deferring RTDB writes: %u free, %u largest block, RSSI %ld dBm\n",
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(ESP.getMaxFreeBlockSize()), WiFi.RSSI());
+    return;
   }
-  if (ESP.getFreeHeap() < 10000) return;
 
-  String path = "devices/" + deviceId;
+  char path[sizeof(deviceId) + sizeof("devices//control") - 1];
 
   if (flagBottleDirty) {
     FirebaseJson bottle;
@@ -1054,7 +974,8 @@ void flushPendingWrites() {
     String remaining = String(config.remainingMl);
     bottle.setJsonData(String("{\"bottle/remainingMl\":") + remaining +
                        ",\"remainingMl\":" + remaining + "}");
-    if (Firebase.RTDB.updateNode(&fbdo, (path + "/config").c_str(), &bottle)) {
+    snprintf(path, sizeof(path), "devices/%s/config", deviceId);
+    if (Firebase.RTDB.updateNodeSilent(&fbdo, path, &bottle)) {
       flagBottleDirty = false;
       if (hasUnsyncedReservoirChange) {
         hasUnsyncedReservoirChange = false;
@@ -1069,31 +990,36 @@ void flushPendingWrites() {
     FirebaseJson control;
     control.set("pumpState", false);
     control.set("manualOverride", false);
-    if (Firebase.RTDB.updateNode(&fbdo, (path + "/control").c_str(), &control)) {
+    snprintf(path, sizeof(path), "devices/%s/control", deviceId);
+    if (Firebase.RTDB.updateNodeSilent(&fbdo, path, &control)) {
       flagControlResetDirty = false;
     }
   }
   if (flagAckDirty) {
-    String ackPath = path + "/command/ack";
+    char ackPath[sizeof(deviceId) + sizeof("devices//command/ack") - 1];
+    snprintf(ackPath, sizeof(ackPath), "devices/%s/command/ack", deviceId);
     FirebaseJson ack;
+    // PATCH removes optional fields left by an earlier acknowledgment.
+    ack.setJsonData("{\"reason\":null,\"capacityMl\":null}");
     ack.set("id", pendingAckId);
     ack.set("status", pendingAckStatus);
     if (pendingAckReason.length()) ack.set("reason", pendingAckReason);
     if (pendingAckCapacity > 0) {
       ack.set("capacityMl", pendingAckCapacity);
-      pendingAckCapacity = 0;
     }
     ack.set("ts/.sv", "timestamp");
     ack.set("timestamp/.sv", "timestamp");
-    bool ackOk = Firebase.RTDB.setJSON(&fbdo, ackPath.c_str(), &ack);
+    bool ackOk = Firebase.RTDB.updateNodeSilent(&fbdo, ackPath, &ack);
     Serial.printf("[Command] Flush ack write for %s (%s): %s\n", pendingAckId.c_str(), pendingAckStatus.c_str(), ackOk ? "SUCCESS" : "FAILED");
     if (ackOk) {
+      pendingAckCapacity = 0;
       flagAckDirty = false;
     }
   }
   if (flagWaterLogDirty && pendingWaterLog.valid) {
     if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
-      String logPath = "waterLogs/" + deviceId;
+      char logPath[sizeof(deviceId) + sizeof("waterLogs/") - 1];
+      snprintf(logPath, sizeof(logPath), "waterLogs/%s", deviceId);
       FirebaseJson json;
       json.set("ts/.sv", "timestamp");
       json.set("trigger", pendingWaterLog.trigger);
@@ -1102,7 +1028,7 @@ void flushPendingWrites() {
       json.set("moistureAfter", (int)round(pendingWaterLog.after));
       json.set("note", pendingWaterLog.note);
 
-      if (Firebase.RTDB.pushJSON(&fbdo, logPath.c_str(), &json)) {
+      if (Firebase.RTDB.pushJSON(&fbdo, logPath, &json)) {
         Serial.println(F("[WaterLog] Appended watering event log to RTDB"));
         pendingWaterLog.valid = false;
         flagWaterLogDirty = false;
@@ -1115,10 +1041,12 @@ void flushPendingWrites() {
     flagTelemetryDirty = !transmitTelemetry();
   }
 
-  fbdo.clear();
-  if (streamClosed) {
-    streamNeedsReconnect = true;
+  if (historyDue && hasTlsHeap()) {
+    lastHistoryMs = millis();
+    appendHistorySnapshot();
   }
+
+  fbdo.clear();
   Serial.printf("[Heap] Free heap after flushPendingWrites: %d bytes\n", ESP.getFreeHeap());
 }
 
