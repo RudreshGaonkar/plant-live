@@ -103,17 +103,6 @@ struct TelemetryData {
 
 TelemetryData telemetry;
 
-// Helper to compute remaining auto cooldown seconds from lastAutoCycleMs
-unsigned long getAutoCooldownRemainingSec() {
-  if (lastAutoCycleMs == 0) return 0;
-  unsigned long now = millis();
-  unsigned long elapsed = now - lastAutoCycleMs;
-  if (elapsed >= AUTO_COOLDOWN_MS) {
-    return 0;
-  }
-  return (AUTO_COOLDOWN_MS - elapsed) / 1000UL;
-}
-
 // Pump Execution Tracking
 bool isPumpActive = false;
 unsigned long pumpStartTime = 0;
@@ -127,6 +116,17 @@ String lastProcessedCommandId = "";
 unsigned long lastTelemetryMs = 0;
 unsigned long lastHistoryMs = 0;
 unsigned long lastAutoCycleMs = 0;
+
+// Helper to compute remaining auto cooldown seconds from lastAutoCycleMs
+unsigned long getAutoCooldownRemainingSec() {
+  if (lastAutoCycleMs == 0) return 0;
+  unsigned long now = millis();
+  unsigned long elapsed = now - lastAutoCycleMs;
+  if (elapsed >= AUTO_COOLDOWN_MS) {
+    return 0;
+  }
+  return (AUTO_COOLDOWN_MS - elapsed) / 1000UL;
+}
 
 // Cloud Synchronization Flags
 bool hasInitialConfigSynced = false;

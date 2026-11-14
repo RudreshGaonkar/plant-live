@@ -3,8 +3,8 @@
  * Clean QR code scanner using `expo-camera` for pairing ESP8266 devices.
  * Supports torch toggle, camera permission requests, and animated scanning reticle.
  */
-import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import { AppState, Linking, View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import Animated, {
@@ -19,16 +19,56 @@ import { useAppTheme } from '@/theme';
 export interface DeviceQRScannerProps {
   onScan: (deviceId: string) => void;
   onManualInputPress?: () => void;
+  scanDisabled?: boolean;
 }
 
 export function DeviceQRScanner({
   onScan,
   onManualInputPress,
+  scanDisabled = false,
 }: DeviceQRScannerProps) {
   const { colors, radii } = useAppTheme();
-  const [permission, requestPermission] = useCameraPermissions();
+  const [permission, requestPermission, getPermission] = useCameraPermissions({ get: false });
+  const [permissionError, setPermissionError] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraFailed, setCameraFailed] = useState(false);
   const [torch, setTorch] = useState(false);
   const [scanned, setScanned] = useState(false);
+  const scanLocked = useRef(false);
+
+  useEffect(() => {
+    const refreshPermission = () => {
+      void getPermission()
+        .then(({ granted }) => {
+          setPermissionError(false);
+          if (!granted) {
+            setCameraReady(false);
+            setCameraFailed(false);
+          }
+        })
+        .catch(() => setPermissionError(true));
+    };
+    refreshPermission();
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') refreshPermission();
+    });
+    return () => subscription.remove();
+  }, [getPermission]);
+
+  const handlePermissionPress = async () => {
+    setPermissionError(false);
+    try {
+      if (!permission) {
+        await getPermission();
+      } else if (permission.canAskAgain) {
+        await requestPermission();
+      } else {
+        await Linking.openSettings();
+      }
+    } catch {
+      setPermissionError(true);
+    }
+  };
 
   // Animated laser scanline
   const scanLineY = useSharedValue(0);
@@ -46,25 +86,25 @@ export function DeviceQRScanner({
   }));
 
   const handleBarcodeScanned = (result: BarcodeScanningResult) => {
-    if (scanned) return;
+    if (scanDisabled || scanLocked.current) return;
+    scanLocked.current = true;
     setScanned(true);
 
+    let deviceId = result.data.trim();
     try {
       // Check if QR data is JSON: {"deviceId": "esp8266-xxxx", ...}
       const parsed = JSON.parse(result.data);
-      if (parsed.deviceId) {
-        onScan(parsed.deviceId);
-        return;
+      if (typeof parsed?.deviceId === 'string') {
+        deviceId = parsed.deviceId.trim();
       }
     } catch {
       // Fallback: raw text ID
     }
 
-    onScan(result.data.trim());
+    onScan(deviceId);
   };
 
-  // Permission not granted or requested
-  if (!permission) {
+  if (!permission && !permissionError) {
     return (
       <View style={[styles.permissionContainer, { backgroundColor: colors.surface, borderRadius: radii.card }]}>
         <Ionicons name="camera-outline" size={36} color={colors.palette.forest} />
@@ -75,23 +115,37 @@ export function DeviceQRScanner({
     );
   }
 
-  if (!permission.granted) {
+  if (!permission?.granted || cameraFailed) {
+    const actionLabel = cameraFailed
+      ? 'Retry camera'
+      : !permission
+        ? 'Retry permission check'
+        : permission.canAskAgain
+          ? 'Grant Camera Permission'
+          : 'Open Settings';
+
     return (
       <View style={[styles.permissionContainer, { backgroundColor: colors.surface, borderRadius: radii.card, borderColor: colors.border }]}>
         <View style={[styles.iconWrap, { backgroundColor: colors.palette.lime }]}>
           <Ionicons name="camera" size={32} color={colors.palette.forest} />
         </View>
-        <Text style={[styles.permissionTitle, { color: colors.text }]}>Camera Access Required</Text>
+        <Text style={[styles.permissionTitle, { color: colors.text }]}>
+          {cameraFailed ? 'Camera could not start' : 'Camera Access Required'}
+        </Text>
         <Text style={[styles.permissionSubtitle, { color: colors.textMuted }]}>
-          Scan the QR code on your ESP8266 plant companion to pair it instantly.
+          {cameraFailed
+            ? 'Retry on a physical device or enter the controller ID manually.'
+            : permissionError
+              ? 'Camera access could not be checked or changed. Try again or enter the controller ID manually.'
+              : 'Scan the QR code on your ESP8266 plant companion to pair it instantly.'}
         </Text>
 
         <TouchableOpacity
           style={[styles.primaryBtn, { backgroundColor: colors.primary, borderRadius: radii.xl }]}
-          onPress={requestPermission}
+          onPress={cameraFailed ? () => setCameraFailed(false) : handlePermissionPress}
         >
           <Ionicons name="checkmark-circle-outline" size={18} color={colors.palette.white} style={{ marginRight: 6 }} />
-          <Text style={styles.primaryBtnText}>Grant Camera Permission</Text>
+          <Text style={styles.primaryBtnText}>{actionLabel}</Text>
         </TouchableOpacity>
 
         {onManualInputPress && (
@@ -118,7 +172,12 @@ export function DeviceQRScanner({
         barcodeScannerSettings={{
           barcodeTypes: ['qr'],
         }}
-        onBarcodeScanned={scanned ? undefined : handleBarcodeScanned}
+        onCameraReady={() => setCameraReady(true)}
+        onMountError={() => {
+          setCameraReady(false);
+          setCameraFailed(true);
+        }}
+        onBarcodeScanned={scanned || scanDisabled ? undefined : handleBarcodeScanned}
       />
 
       {/* Semi-transparent dark overlay with center cutout */}
@@ -156,7 +215,7 @@ export function DeviceQRScanner({
         </View>
 
         <Text style={styles.instructionText}>
-          Align device QR code within frame
+          {cameraReady ? 'Align device QR code within frame' : 'Starting camera…'}
         </Text>
 
         {/* Quick Fallback Actions */}

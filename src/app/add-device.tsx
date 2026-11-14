@@ -7,7 +7,7 @@
  * 4. Bottle Setup & 10s Pump Flow Test (capacity + measured flow rate calculation)
  * 5. Confirmation & 3D Plant Pop-In
  */
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -24,7 +24,7 @@ import {
   ToastAndroid,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useIsFocused } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import Animated, {
   useSharedValue,
@@ -61,6 +61,7 @@ const SPECIES_PRESETS = [
 
 export default function AddDeviceScreen() {
   const { colors, radii, spacing } = useAppTheme();
+  const isFocused = useIsFocused();
   const addDevice = useLiveDevice((s) => s.addDevice);
   const setActiveDeviceId = useSession((s) => s.setActiveDeviceId);
   const user = useSession((s) => s.user);
@@ -80,6 +81,9 @@ export default function AddDeviceScreen() {
   const [deviceIdInput, setDeviceIdInput] = useState<string>('');
   const [isVerifyingOnline, setIsVerifyingOnline] = useState<boolean>(false);
   const [isDeviceOnline, setIsDeviceOnline] = useState<boolean>(false);
+  const [pairingError, setPairingError] = useState<string | null>(null);
+  const [scannerAttempt, setScannerAttempt] = useState(0);
+  const pairingInProgress = useRef(false);
   const [isAutoDetecting, setIsAutoDetecting] = useState<boolean>(false);
   const [autoDetectBanner, setAutoDetectBanner] = useState<{
     type: 'success' | 'error';
@@ -135,25 +139,70 @@ export default function AddDeviceScreen() {
 
   // Step 1: Handle scanned or manual device ID with real RTDB online verification
   const handleDeviceIdSelected = async (id: string) => {
+    if (pairingInProgress.current) return;
     const cleanId = id.trim();
-    if (!cleanId) return;
     setDeviceIdInput(cleanId);
-    setIsVerifyingOnline(true);
     setIsDeviceOnline(false);
+    setPairingError(null);
 
+    if (!cleanId || /[./#$\[\]]/.test(cleanId) || [...cleanId].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) {
+      setPairingError('Enter a valid LeafLink controller ID or scan its pairing QR code again.');
+      return;
+    }
+    const uid = user?.uid;
+    if (!uid) {
+      setPairingError('Sign in before pairing a controller.');
+      return;
+    }
+
+    const metaOwnerRef = ref(db, `devices/${cleanId}/meta/ownerUid`);
+    const ownerRef = ref(db, `owners/${cleanId}`);
+    const hasOwnershipConflict = async () => {
+      const owners = await Promise.all([fbGet(metaOwnerRef), fbGet(ownerRef)]);
+      return owners.some((owner) => owner.exists() && owner.val() !== uid);
+    };
+
+    pairingInProgress.current = true;
+    setIsVerifyingOnline(true);
     try {
+      if (await hasOwnershipConflict()) {
+        setPairingError('This controller is already claimed by another account.');
+        return;
+      }
+      // The server rules also enforce ownership if another account claims during this check.
+      await set(metaOwnerRef, uid);
       const snap = await fbGet(ref(db, `devices/${cleanId}/status`));
       if (snap.exists() && snap.val()?.online) {
         setIsDeviceOnline(true);
       } else {
-        setIsDeviceOnline(false);
+        setPairingError('This controller is offline or has not checked in yet. Connect it to Wi-Fi and retry.');
       }
     } catch (err) {
-      console.warn('[AddDevice] Status verification error:', err);
-      setIsDeviceOnline(false);
+      const permissionDenied = err instanceof Error && /permission.?denied/i.test(err.message);
+      if (permissionDenied && await hasOwnershipConflict().catch(() => false)) {
+        setPairingError('This controller is already claimed by another account.');
+      } else {
+        console.warn('[AddDevice] Controller verification failed:', err);
+        setPairingError(permissionDenied
+          ? 'Access to this controller was denied. Check your account and retry.'
+          : 'Could not verify the controller. Check your internet connection and retry.');
+      }
     } finally {
+      pairingInProgress.current = false;
       setIsVerifyingOnline(false);
     }
+  };
+
+  const handleDeviceIdChange = (id: string) => {
+    setDeviceIdInput(id);
+    setIsDeviceOnline(false);
+    setPairingError(null);
+  };
+
+  const handleScanAgain = () => {
+    handleDeviceIdChange('');
+    setConnectTab('qr');
+    setScannerAttempt((attempt) => attempt + 1);
   };
 
   const handleOpenWifiSettings = async () => {
@@ -214,7 +263,7 @@ export default function AddDeviceScreen() {
       const detectedId: string = data?.deviceId || (data?.chipId ? `LeafLink-${data.chipId}` : '');
 
       if (detectedId) {
-        setDeviceIdInput(detectedId);
+        handleDeviceIdChange(detectedId);
         Vibration.vibrate(100);
         setAutoDetectBanner({
           type: 'success',
@@ -317,12 +366,9 @@ export default function AddDeviceScreen() {
       },
     };
 
-    // Claim ownership before writing protected configuration.
+    // Finalize config and user-device links after Step 1 has claimed ownership.
     if (user?.uid) {
       try {
-        const metaOwnerRef = ref(db, `devices/${devId}/meta/ownerUid`);
-        await set(metaOwnerRef, user.uid);
-
         await updateDeviceConfigInRTDB(devId, newRecord.config);
         await update(ref(db), {
           [`users/${user.uid}/devices/${devId}`]: true,
@@ -708,10 +754,12 @@ export default function AddDeviceScreen() {
             </View>
 
             {/* QR Scanner Mode */}
-            {connectTab === 'qr' && (
+            {isFocused && connectTab === 'qr' && (
               <DeviceQRScanner
+                key={scannerAttempt}
                 onScan={handleDeviceIdSelected}
                 onManualInputPress={() => setConnectTab('manual')}
+                scanDisabled={isVerifyingOnline || isAutoDetecting || pairingError !== null}
               />
             )}
 
@@ -729,7 +777,7 @@ export default function AddDeviceScreen() {
                     },
                   ]}
                   onPress={handleAutoDetect}
-                  disabled={isAutoDetecting}
+                  disabled={isAutoDetecting || isVerifyingOnline}
                   activeOpacity={0.8}
                 >
                   <View style={styles.autoDetectBtnContent}>
@@ -791,7 +839,8 @@ export default function AddDeviceScreen() {
                   placeholder="e.g. LeafLink-A6A61A"
                   placeholderTextColor={colors.textMuted}
                   value={deviceIdInput}
-                  onChangeText={setDeviceIdInput}
+                  onChangeText={handleDeviceIdChange}
+                  editable={!isVerifyingOnline && !isAutoDetecting}
                   autoCapitalize="none"
                 />
 
@@ -804,11 +853,37 @@ export default function AddDeviceScreen() {
                     },
                   ]}
                   onPress={() => handleDeviceIdSelected(deviceIdInput.trim())}
-                  disabled={!deviceIdInput.trim()}
+                  disabled={!deviceIdInput.trim() || isVerifyingOnline || isAutoDetecting}
                 >
                   <Ionicons name="checkmark" size={18} color={colors.palette.white} style={{ marginRight: 6 }} />
                   <Text style={styles.primaryBtnText}>Connect Hardware</Text>
                 </TouchableOpacity>
+              </View>
+            )}
+
+            {pairingError && !isVerifyingOnline && (
+              <View style={[styles.card, { backgroundColor: colors.surface, borderRadius: radii.card }]}>
+                <Text accessibilityRole="alert" style={[styles.onlineConfirmTitle, { color: colors.text }]}>
+                  {pairingError}
+                </Text>
+                {!!deviceIdInput && (
+                  <TouchableOpacity
+                    style={[styles.continueBtn, { backgroundColor: colors.primary, borderRadius: radii.xl }]}
+                    onPress={() => handleDeviceIdSelected(deviceIdInput)}
+                    disabled={isAutoDetecting}
+                  >
+                    <Text style={styles.continueBtnText}>Retry</Text>
+                  </TouchableOpacity>
+                )}
+                {connectTab === 'qr' && (
+                  <TouchableOpacity
+                    style={[styles.continueBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.xl }]}
+                    onPress={handleScanAgain}
+                    disabled={isAutoDetecting}
+                  >
+                    <Text style={styles.continueBtnText}>Scan again</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             )}
 
