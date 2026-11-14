@@ -52,3 +52,11 @@ uiLayout.md
 secrets.txt
 .recall_scratchpad.md
 .remem_context_feed.md
+
+
+*node_modules/
+*.wrangler/
+*dist/
+*.dev.vars
+*.dev.vars.*
+secrets.txt
