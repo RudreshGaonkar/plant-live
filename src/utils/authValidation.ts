@@ -197,6 +197,7 @@ export function mapAuthError(
 export const loginSchema = z.object({
   email: z
     .string()
+    .trim()
     .min(1, 'Email address is required')
     .superRefine((val, ctx) => {
       const res = validateEmail(val, false);
@@ -220,6 +221,7 @@ export const registerSchema = z
   .object({
     name: z
       .string()
+      .trim()
       .min(1, 'Name is required')
       .superRefine((val, ctx) => {
         const res = validateDisplayName(val);
@@ -232,6 +234,7 @@ export const registerSchema = z
       }),
     email: z
       .string()
+      .trim()
       .min(1, 'Email address is required')
       .superRefine((val, ctx) => {
         const res = validateEmail(val, true);
@@ -320,6 +323,7 @@ export function mapChangePasswordError(
 export const forgotPasswordSchema = z.object({
   email: z
     .string()
+    .trim()
     .min(1, 'Email address is required')
     .superRefine((val, ctx) => {
       const res = validateEmail(val, false);
@@ -364,4 +368,24 @@ export function mapPasswordResetError(
     default:
       return mapAuthError(error, fallback);
   }
+}
+
+export function isValidOtp(code: string): boolean {
+  return code.length === 6 && !/[^0-9]/.test(code);
+}
+
+function parseBoundedDecimal(raw: string, min: number, max: number): number | null {
+  const input = raw.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(input)) return null;
+  const value = Number(input);
+  return Number.isFinite(value) && value >= min && value <= max ? value : null;
+}
+
+export function parseBottleCapacity(raw: string): number | null {
+  return parseBoundedDecimal(raw, 250, 2000);
+}
+
+export function parsePumpFlow(measuredMl: string): number | null {
+  const volume = parseBoundedDecimal(measuredMl, 50, 300);
+  return volume === null ? null : volume / 10;
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Text, ActivityIndicator, TouchableOpacity, StyleSheet } from 'react-native';
 import Animated, {
   useSharedValue,
@@ -9,18 +9,14 @@ import Animated, {
   useReducedMotion,
   Easing,
 } from 'react-native-reanimated';
-import { router } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
 import { useSession } from '@/store/useSession';
 import { useAppTheme } from '@/theme';
 
 export default function Index() {
-  const { user, isAuthReady, hasResolvedAuth, pairingStatus, retryBoot } = useSession();
+  const { pairingStatus, retryBoot } = useSession();
   const { colors, radii } = useAppTheme();
   const [hasTimedOut, setHasTimedOut] = useState<boolean>(false);
-  const [isLayoutReady, setIsLayoutReady] = useState<boolean>(false);
   const [isImageReady, setIsImageReady] = useState<boolean>(false);
-  const hasHiddenSplashRef = useRef<boolean>(false);
 
   const reducedMotion = useReducedMotion();
   const markOpacity = useSharedValue(reducedMotion ? 1 : 0.85);
@@ -28,26 +24,6 @@ export default function Index() {
   const markTranslateY = useSharedValue(reducedMotion ? 0 : 6);
 
   const showRecovery = hasTimedOut || pairingStatus === 'unavailable';
-
-  const hideSplashOnce = useCallback(() => {
-    if (hasHiddenSplashRef.current) return;
-    hasHiddenSplashRef.current = true;
-    SplashScreen.hideAsync().catch(() => {});
-  }, []);
-
-  // One-shot hide when full-screen background has laid out and local mark has loaded
-  useEffect(() => {
-    if (isLayoutReady && isImageReady) {
-      hideSplashOnce();
-    }
-  }, [isLayoutReady, isImageReady, hideSplashOnce]);
-
-  // Recovery fallback: hide splash screen if recovery card commits content
-  useEffect(() => {
-    if (showRecovery) {
-      hideSplashOnce();
-    }
-  }, [showRecovery, hideSplashOnce]);
 
   // Mark animation: 0.9/0.98 -> 1/1 over 200ms, then reversing breathing pulse (1 <-> 1.025)
   useEffect(() => {
@@ -104,22 +80,6 @@ export default function Index() {
     transform: [{ scale: markScale.value }, { translateY: markTranslateY.value }],
   }));
 
-  // Navigate when startup readiness conditions are satisfied (never delayed by animation)
-  useEffect(() => {
-    if (!isAuthReady || !hasResolvedAuth) return;
-
-    if (!user) {
-      // Confirmed sign-out routes cleanly to Login
-      router.replace('/(auth)/login');
-      return;
-    }
-
-    // Authenticated: route to home once devices resolved (paired, cached offline, or confirmed unpaired)
-    if (pairingStatus === 'paired' || pairingStatus === 'cached' || pairingStatus === 'unpaired') {
-      router.replace('/(tabs)/home');
-    }
-  }, [user, isAuthReady, hasResolvedAuth, pairingStatus]);
-
   // 7-second end-to-end boot deadline
   useEffect(() => {
     if (hasTimedOut) return;
@@ -134,14 +94,9 @@ export default function Index() {
     retryBoot();
   };
 
-  const handleContinueToLogin = () => {
-    router.replace('/(auth)/login');
-  };
-
   return (
     <View
       style={styles.container}
-      onLayout={() => setIsLayoutReady(true)}
     >
       <View style={styles.centerContent}>
         <Animated.Image
@@ -162,7 +117,7 @@ export default function Index() {
           <View style={styles.timeoutCard}>
             <Text style={styles.timeoutTitle}>Connecting took longer than expected</Text>
             <Text style={styles.timeoutSubtitle}>
-              Check your connection or proceed directly to sign in.
+              Check your connection and try again.
             </Text>
             <View style={styles.buttonRow}>
               <TouchableOpacity
@@ -174,17 +129,6 @@ export default function Index() {
               >
                 <Text style={[styles.retryButtonText, { color: colors.palette.forest }]}>
                   Retry
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={handleContinueToLogin}
-                style={[
-                  styles.loginButton,
-                  { borderColor: colors.palette.sage, borderRadius: radii.full },
-                ]}
-              >
-                <Text style={[styles.loginButtonText, { color: colors.palette.mist }]}>
-                  Sign In
                 </Text>
               </TouchableOpacity>
             </View>
@@ -243,14 +187,5 @@ const styles = StyleSheet.create({
   retryButtonText: {
     fontSize: 14,
     fontWeight: '700',
-  },
-  loginButton: {
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderWidth: 1,
-  },
-  loginButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
   },
 });

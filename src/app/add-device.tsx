@@ -45,6 +45,7 @@ import { useLiveDevice, PlantLocation, DeviceRecord, createDefaultDeviceRecord }
 import { useSession } from '@/store/useSession';
 import { LocationCard } from '@/components/LocationCard';
 import { DeviceQRScanner } from '@/components/DeviceQRScanner';
+import { parseBottleCapacity, parsePumpFlow } from '@/utils/authValidation';
 import { DEFAULT_CALIBRATION } from '@/services/calibration';
 import { PlantScene3D } from '@/components/Plant3D/PlantScene3D';
 import { updateDeviceConfigInRTDB, sendDeviceCommand } from '@/services/devices';
@@ -67,15 +68,6 @@ export default function AddDeviceScreen() {
   const addDevice = useLiveDevice((s) => s.addDevice);
   const setActiveDeviceId = useSession((s) => s.setActiveDeviceId);
   const user = useSession((s) => s.user);
-  const isAuthReady = useSession((s) => s.isAuthReady);
-
-  // Guard add-device when signed out
-  useEffect(() => {
-    if (isAuthReady && !user) {
-      router.replace('/(auth)/login');
-    }
-  }, [user, isAuthReady]);
-
   const [step, setStep] = useState<number>(1);
   const [showWifiGuide, setShowWifiGuide] = useState(false);
 
@@ -87,6 +79,7 @@ export default function AddDeviceScreen() {
   const scrollView = useRef<ScrollView>(null);
   const deviceIdField = useRef<TextInput>(null);
   const pairingInProgress = useRef(false);
+  const autoDetecting = useRef(false);
   const [isAutoDetecting, setIsAutoDetecting] = useState<boolean>(false);
   const [autoDetectBanner, setAutoDetectBanner] = useState<{
     type: 'success' | 'error';
@@ -107,6 +100,8 @@ export default function AddDeviceScreen() {
   }, [connectTab, isFocused, step]);
 
   // STEP 2 State: Plant Details & Location
+  const plantNameField = useRef<TextInput>(null);
+  const [plantNameError, setPlantNameError] = useState(false);
   const [plantName, setPlantName] = useState<string>('Indoor Monstera');
   const [selectedSpecies, setSelectedSpecies] = useState<string>('Monstera');
   const [customSpecies, setCustomSpecies] = useState<string>('');
@@ -119,10 +114,16 @@ export default function AddDeviceScreen() {
 
   // STEP 4 State: Bottle & Pump Test
   const [bottleCapacity, setBottleCapacity] = useState<string>('500');
+  const testingPump = useRef(false);
   const [isTestingPump, setIsTestingPump] = useState<boolean>(false);
   const [pumpTestCountdown, setPumpTestCountdown] = useState<number>(10);
   const [measuredMl, setMeasuredMl] = useState<string>('150');
-  const [calculatedFlow, setCalculatedFlow] = useState<number>(15);
+  const capacityField = useRef<TextInput>(null);
+  const measuredVolumeField = useRef<TextInput>(null);
+  const finishing = useRef(false);
+  const [isFinishing, setIsFinishing] = useState(false);
+  const [bottleError, setBottleError] = useState<string | null>(null);
+  const calculatedFlow = parsePumpFlow(measuredMl);
 
   // Pulse animation for waiting state
   const pulseScale = useSharedValue(1);
@@ -162,6 +163,7 @@ export default function AddDeviceScreen() {
     setPairingError(null);
 
     if (!cleanId || /[./#$\[\]]/.test(cleanId) || [...cleanId].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) {
+      deviceIdField.current?.focus();
       setPairingError('Enter a valid LeafLink controller ID or scan its pairing QR code again.');
       return;
     }
@@ -248,6 +250,8 @@ export default function AddDeviceScreen() {
 
   // Step 1: Auto-Detect Hardware from ESP8266 Access Point (192.168.4.1)
   const handleAutoDetect = async () => {
+    if (autoDetecting.current) return;
+    autoDetecting.current = true;
     setIsAutoDetecting(true);
     setAutoDetectBanner(null);
 
@@ -301,17 +305,20 @@ export default function AddDeviceScreen() {
         ToastAndroid.show(errorMsg, ToastAndroid.LONG);
       }
     } finally {
+      autoDetecting.current = false;
       setIsAutoDetecting(false);
     }
   };
 
   // Step 4: Run 10-second pump test with real hardware command dispatch
   const startPumpTest = async () => {
+    if (testingPump.current) return;
     const devId = deviceIdInput.trim();
     if (!devId) {
       Alert.alert('Device Required', 'Please connect a device before testing the pump.');
       return;
     }
+    testingPump.current = true;
     setIsTestingPump(true);
     setPumpTestCountdown(10);
 
@@ -325,6 +332,7 @@ export default function AddDeviceScreen() {
       setPumpTestCountdown((prev) => {
         if (prev <= 1) {
           clearInterval(interval);
+          testingPump.current = false;
           setIsTestingPump(false);
           return 0;
         }
@@ -333,23 +341,35 @@ export default function AddDeviceScreen() {
     }, 1000);
   };
 
-  const handleMeasuredMlChange = (val: string) => {
-    setMeasuredMl(val);
-    const num = parseFloat(val);
-    if (!isNaN(num) && num > 0) {
-      setCalculatedFlow(parseFloat((num / 10).toFixed(1)));
+  const validateBottle = () => {
+    const capacityMl = parseBottleCapacity(bottleCapacity);
+    const flowMlPerSec = calculatedFlow;
+    if (capacityMl === null || flowMlPerSec === null) {
+      setBottleError(capacityMl === null
+        ? 'Enter a bottle capacity from 250 to 2,000 mL.'
+        : 'Enter a measured volume from 50 to 300 mL for a flow of 5 to 30 mL/s.');
+      (capacityMl === null ? capacityField : measuredVolumeField).current?.focus();
+      return null;
     }
+    setBottleError(null);
+    return { capacityMl, flowMlPerSec };
   };
 
   // Finish Setup: Build final device record and commit
   const handleFinalFinish = async () => {
+    if (finishing.current) return;
+    const bottle = validateBottle();
+    if (!bottle) {
+      setStep(4);
+      return;
+    }
     const devId = deviceIdInput.trim();
     if (!devId) {
       Alert.alert('Device Required', 'Please pair or enter a valid controller ID.');
       return;
     }
     const effectiveSpecies =
-      selectedSpecies === 'Custom' ? customSpecies || 'Houseplant' : selectedSpecies;
+      selectedSpecies === 'Custom' ? customSpecies.trim() || 'Houseplant' : selectedSpecies;
 
     const thresholds = {
       indoor: { moistureMin: 35, moistureMax: 65, tempMax: 32, humidityMax: 75, pumpDurationSec: 5 },
@@ -357,13 +377,13 @@ export default function AddDeviceScreen() {
       terrace: { moistureMin: 25, moistureMax: 55, tempMax: 38, humidityMax: 85, pumpDurationSec: 5 },
     }[selectedLocation];
 
-    const capacityNum = parseInt(bottleCapacity, 10) || 500;
+    const name = plantName.trim();
 
     const newRecord: DeviceRecord = {
       ...createDefaultDeviceRecord(devId),
       config: {
-        name: plantName,
-        plantName,
+        name,
+        plantName: name,
         plantSpecies: effectiveSpecies,
         location: selectedLocation,
         mode: 'auto',
@@ -373,61 +393,71 @@ export default function AddDeviceScreen() {
         },
         calibration,
         bottle: {
-          capacityMl: capacityNum,
-          flowMlPerSec: calculatedFlow || 15,
-          remainingMl: capacityNum,
+          ...bottle,
+          remainingMl: bottle.capacityMl,
         },
         pairedAt: Date.now(),
       },
     };
 
-    // Finalize config and user-device links after Step 1 has claimed ownership.
-    if (user?.uid) {
-      try {
-        await updateDeviceConfigInRTDB(devId, newRecord.config);
-        await update(ref(db), {
-          [`users/${user.uid}/devices/${devId}`]: true,
-          [`owners/${devId}`]: user.uid,
+    finishing.current = true;
+    setIsFinishing(true);
+    let completed = false;
+    try {
+      // Finalize config and user-device links after Step 1 has claimed ownership.
+      if (user?.uid) {
+        try {
+          await updateDeviceConfigInRTDB(devId, newRecord.config);
+          await update(ref(db), {
+            [`users/${user.uid}/devices/${devId}`]: true,
+            [`owners/${devId}`]: user.uid,
+          });
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'Could not claim device ownership.';
+          console.error('[AddDevice] Ownership claim or config sync failed:', message);
+          Alert.alert(
+            'Pairing Failed',
+            message || 'Could not claim device ownership. Ensure the device is available and try again.'
+          );
+          return;
+        }
+      } else {
+        // Local/simulator fallback if unauthenticated
+        try {
+          await updateDeviceConfigInRTDB(devId, newRecord.config);
+        } catch {
+          // Local-only mode
+        }
+      }
+
+      // 2. Commit to local store & persistence only after claim and sync success
+      const liveRecord = useLiveDevice.getState().devices[devId];
+      addDevice({ ...newRecord, ...(liveRecord && {
+        telemetry: liveRecord.telemetry,
+        status: liveRecord.status,
+        isConfigHydrated: liveRecord.isConfigHydrated,
+      }) });
+      useLiveDevice.getState().setActiveDeviceId(devId);
+      setActiveDeviceId(devId);
+      if (user?.uid) {
+        await AsyncStorage.setItem(`@plant_live_active_device_${user.uid}`, devId).catch((err) => {
+          console.warn('[AddDevice] Failed to persist active device ID to AsyncStorage:', err);
         });
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Could not claim device ownership.';
-        console.error('[AddDevice] Ownership claim or config sync failed:', message);
-        Alert.alert(
-          'Pairing Failed',
-          message || 'Could not claim device ownership. Ensure the device is available and try again.'
-        );
-        return;
       }
-    } else {
-      // Local/simulator fallback if unauthenticated
-      try {
-        await updateDeviceConfigInRTDB(devId, newRecord.config);
-      } catch {
-        // Local-only mode
+
+      completed = true;
+      Alert.alert('Plant Ready!', `${name} has been paired successfully.`, [
+        {
+          text: 'Open Dashboard',
+          onPress: () => router.replace('/(tabs)/home'),
+        },
+      ]);
+    } finally {
+      if (!completed) {
+        finishing.current = false;
+        setIsFinishing(false);
       }
     }
-
-    // 2. Commit to local store & persistence only after claim and sync success
-    const liveRecord = useLiveDevice.getState().devices[devId];
-    addDevice({ ...newRecord, ...(liveRecord && {
-      telemetry: liveRecord.telemetry,
-      status: liveRecord.status,
-      isConfigHydrated: liveRecord.isConfigHydrated,
-    }) });
-    useLiveDevice.getState().setActiveDeviceId(devId);
-    setActiveDeviceId(devId);
-    if (user?.uid) {
-      await AsyncStorage.setItem(`@plant_live_active_device_${user.uid}`, devId).catch((err) => {
-        console.warn('[AddDevice] Failed to persist active device ID to AsyncStorage:', err);
-      });
-    }
-
-    Alert.alert('Plant Ready!', `${plantName} has been paired successfully.`, [
-      {
-        text: 'Open Dashboard',
-        onPress: () => router.replace('/(tabs)/home'),
-      },
-    ]);
   };
 
   // Filtered plant species presets
@@ -443,6 +473,7 @@ export default function AddDeviceScreen() {
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
       <ScrollView
         ref={scrollView}
+        style={{ flex: 1 }}
         automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={[styles.container, { padding: spacing.md }]}
@@ -958,8 +989,12 @@ export default function AddDeviceScreen() {
               <Text style={[styles.label, { color: colors.text }]}>Plant Name</Text>
               <TextInput
                 style={[styles.input, { borderColor: colors.border, borderRadius: radii.md, color: colors.text }]}
+                ref={plantNameField}
                 value={plantName}
-                onChangeText={setPlantName}
+                onChangeText={(value) => {
+                  setPlantName(value);
+                  setPlantNameError(false);
+                }}
                 placeholder="e.g. Balcony Tulsi"
                 placeholderTextColor={colors.textMuted}
               />
@@ -1042,9 +1077,19 @@ export default function AddDeviceScreen() {
               />
             </View>
 
+            {plantNameError && (
+              <Text accessibilityRole="alert" style={{ color: colors.palette.warningText }}>{'Enter a plant name.'}</Text>
+            )}
             <TouchableOpacity
               style={[styles.primaryBtn, { backgroundColor: colors.primary, borderRadius: radii.xl, marginTop: 10 }]}
-              onPress={() => setStep(3)}
+              onPress={() => {
+                if (!plantName.trim()) {
+                  setPlantNameError(true);
+                  plantNameField.current?.focus();
+                  return;
+                }
+                setStep(3);
+              }}
             >
               <Text style={styles.primaryBtnText}>Proceed to Sensor Calibration</Text>
               <Ionicons name="arrow-forward" size={16} color={colors.palette.white} style={{ marginLeft: 6 }} />
@@ -1118,8 +1163,12 @@ export default function AddDeviceScreen() {
               <TextInput
                 style={[styles.input, { borderColor: colors.border, borderRadius: radii.md, color: colors.text }]}
                 keyboardType="numeric"
+                ref={capacityField}
                 value={bottleCapacity}
-                onChangeText={setBottleCapacity}
+                onChangeText={(value) => {
+                  setBottleCapacity(value);
+                  setBottleError(null);
+                }}
                 placeholder="500"
                 placeholderTextColor={colors.textMuted}
               />
@@ -1128,7 +1177,10 @@ export default function AddDeviceScreen() {
                 {['250', '500', '750', '1000'].map((cap) => (
                   <TouchableOpacity
                     key={cap}
-                    onPress={() => setBottleCapacity(cap)}
+                    onPress={() => {
+                      setBottleCapacity(cap);
+                      setBottleError(null);
+                    }}
                     style={[
                       styles.capChip,
                       {
@@ -1186,8 +1238,12 @@ export default function AddDeviceScreen() {
               <TextInput
                 style={[styles.input, { borderColor: colors.border, borderRadius: radii.md, color: colors.text }]}
                 keyboardType="numeric"
+                ref={measuredVolumeField}
                 value={measuredMl}
-                onChangeText={handleMeasuredMlChange}
+                onChangeText={(value) => {
+                  setMeasuredMl(value);
+                  setBottleError(null);
+                }}
                 placeholder="150"
                 placeholderTextColor={colors.textMuted}
               />
@@ -1195,14 +1251,17 @@ export default function AddDeviceScreen() {
               <View style={[styles.flowDisplay, { backgroundColor: colors.palette.mist, borderRadius: radii.md }]}>
                 <Text style={[styles.flowLabel, { color: colors.textMuted }]}>Calculated Flow Speed</Text>
                 <Text style={[styles.flowVal, { color: colors.palette.forest }]}>
-                  {calculatedFlow} ml/sec
+                  {calculatedFlow === null ? '—' : `${calculatedFlow} mL/s`}
                 </Text>
               </View>
             </View>
 
+            {bottleError && (
+              <Text accessibilityRole="alert" style={{ color: colors.palette.warningText }}>{bottleError}</Text>
+            )}
             <TouchableOpacity
               style={[styles.primaryBtn, { backgroundColor: colors.primary, borderRadius: radii.xl, marginTop: 10 }]}
-              onPress={() => setStep(5)}
+              onPress={() => { if (validateBottle()) setStep(5); }}
             >
               <Text style={styles.primaryBtnText}>Review & Finish</Text>
               <Ionicons name="arrow-forward" size={16} color={colors.palette.white} style={{ marginLeft: 6 }} />
@@ -1263,7 +1322,7 @@ export default function AddDeviceScreen() {
               <View style={styles.specRow}>
                 <Text style={[styles.specKey, { color: colors.textMuted }]}>Reservoir</Text>
                 <Text style={[styles.specVal, { color: colors.text }]}>
-                  {bottleCapacity} ml (~{Math.round(parseInt(bottleCapacity, 10) / (calculatedFlow * 5))} waterings)
+                  {bottleCapacity} ml (~{calculatedFlow === null ? '—' : Math.round(Number(bottleCapacity) / (calculatedFlow * 5))} waterings)
                 </Text>
               </View>
             </View>
@@ -1271,6 +1330,7 @@ export default function AddDeviceScreen() {
             <TouchableOpacity
               style={[styles.primaryBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.xl, marginTop: 12 }]}
               onPress={handleFinalFinish}
+              disabled={isFinishing}
             >
               <Ionicons name="checkmark-done" size={20} color={colors.palette.white} style={{ marginRight: 8 }} />
               <Text style={styles.primaryBtnText}>Finish Setup & Open Dashboard</Text>

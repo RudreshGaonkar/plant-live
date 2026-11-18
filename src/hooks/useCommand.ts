@@ -4,9 +4,7 @@
  * - Max 15s pump runtime cap per command
  * - 60s cooldown enforcement between manual waterings
  * - Empty reservoir guard (checks bottle remainingMl)
- * - Saturated soil warning (checks moistureMax threshold)
  * - Real-time command/ack tracking: idle -> sent -> received -> running -> done / timeout
- * - Automatic water log creation under waterLogs/{deviceId}
  * - Haptic feedback on pump activation and completion
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -43,8 +41,7 @@ export interface UseCommandReturn {
   refillBottle: () => void;
 }
 
-// 60-second cooldown constant
-const COOLDOWN_DURATION_SEC = 60;
+const pendingByDevice = new Map<string, string>();
 // Maximum safe runtime constant
 const MAX_PUMP_RUNTIME_SEC = 15;
 
@@ -57,41 +54,45 @@ export function useCommand(): UseCommandReturn {
   const [commandDeviceId, setCommandDeviceId] = useState<string | null>(null);
   const [stage, setStage] = useState<CommandLifecycleStage>('idle');
   const [activeDuration, setActiveDuration] = useState<number>(5);
-  const [cooldownSecondsLeft, setCooldownSecondsLeft] = useState<number>(0);
+  const [now, setNow] = useState(Date.now);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const activeCmdIdRef = useRef<string | null>(null);
   const timeoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const cooldownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastMoistureBeforeRef = useRef<number>(50);
+  const pendingKey = useRef<string | null>(null);
   const pumpObservedActiveRef = useRef<boolean>(false);
 
   const deviceId = device?.id ?? '';
+  const uid = useSession((s) => s.user?.uid);
   const pairingStatus = useSession((s) => s.pairingStatus);
 
-  // Cooldown countdown timer
+  const cooldownUntil = useLiveDevice((state) => state.manualCooldownUntilByDevice[deviceId] ?? 0);
+  const cooldownSecondsLeft = Math.max(0, Math.min(60, Math.ceil((cooldownUntil - now) / 1000)));
   useEffect(() => {
-    if (cooldownSecondsLeft > 0) {
-      cooldownTimerRef.current = setInterval(() => {
-        setCooldownSecondsLeft((prev) => {
-          if (prev <= 1) {
-            if (cooldownTimerRef.current) clearInterval(cooldownTimerRef.current);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
+    const tickCooldown = () => setNow(Date.now());
+    const initialTick = setTimeout(tickCooldown, 0);
+    if (cooldownUntil <= Date.now()) return () => clearTimeout(initialTick);
+    const tick = setInterval(tickCooldown, 1000);
+    const end = setTimeout(() => {
+      clearInterval(tick);
+      tickCooldown();
+    }, Math.max(0, cooldownUntil - Date.now()));
     return () => {
-      if (cooldownTimerRef.current) clearInterval(cooldownTimerRef.current);
+      clearTimeout(initialTick);
+      clearInterval(tick);
+      clearTimeout(end);
     };
-  }, [cooldownSecondsLeft]);
+  }, [cooldownUntil]);
 
   // Synchronize with store watering seconds
   const secondsRemaining = isWateringActive ? wateringSecondsLeft : 0;
 
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const clearPendingCommand = useCallback(() => {
+    if (pendingKey.current && pendingByDevice.get(pendingKey.current) === activeCmdIdRef.current) {
+      pendingByDevice.delete(pendingKey.current);
+    }
+    pendingKey.current = null;
     activeCmdIdRef.current = null;
     pumpObservedActiveRef.current = false;
     unsubscribeRef.current?.();
@@ -100,16 +101,16 @@ export function useCommand(): UseCommandReturn {
     timeoutTimerRef.current = null;
   }, []);
 
-  useEffect(() => clearPendingCommand, [deviceId, clearPendingCommand]);
+  useEffect(() => clearPendingCommand, [uid, clearPendingCommand]);
 
   const resetCommandState = useCallback(() => {
-    clearPendingCommand();
+    if (activeCmdIdRef.current) return;
     setStage('idle');
     setErrorMessage(null);
     if (deviceId) {
       useLiveDevice.getState().resetWateringState(deviceId);
     }
-  }, [clearPendingCommand, deviceId]);
+  }, [deviceId]);
 
   const isPumpActiveTelemetry = Boolean(device?.telemetry?.pumpOn || device?.telemetry?.isPumpActive);
   const isOnline = Boolean(device?.status?.online);
@@ -133,16 +134,23 @@ export function useCommand(): UseCommandReturn {
 
   // Core command dispatcher with Optimistic UI feedback
   const dispatchWaterCommand = useCallback(
-    async (clampedDuration: number, currentMoisture: number): Promise<boolean> => {
-      if (activeCmdIdRef.current || !deviceId) return false;
+    async (clampedDuration: number): Promise<boolean> => {
+      const key = JSON.stringify([uid, deviceId]);
+      const state = useLiveDevice.getState();
+      if (!uid || useSession.getState().user?.uid !== uid || state.activeDeviceId !== deviceId ||
+          state.isWateringActive || activeCmdIdRef.current || pendingByDevice.has(key)) return false;
       console.log('[LeafLink] Active Device ID:', deviceId);
       const cmdId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      pendingKey.current = key;
+      pendingByDevice.set(key, cmdId);
       activeCmdIdRef.current = cmdId;
+      const stillCurrent = () => activeCmdIdRef.current === cmdId && useSession.getState().user?.uid === uid;
       setCommandDeviceId(deviceId);
       pumpObservedActiveRef.current = false;
 
       // Extended timeout: covers full watering duration + 20s network buffer for controller ack flush
       timeoutTimerRef.current = setTimeout(() => {
+        if (!stillCurrent()) return;
         clearPendingCommand();
         setStage('timeout');
         setErrorMessage("Device didn't respond. Check Wi-Fi connection.");
@@ -151,12 +159,12 @@ export function useCommand(): UseCommandReturn {
 
       const unsubCommand = listenToDeviceCommand(deviceId, (command) => {
         const ack = command?.ack;
-        if (activeCmdIdRef.current !== cmdId || ack?.id !== cmdId) return;
+        if (!stillCurrent() || ack?.id !== cmdId) return;
 
         if (ack.status === 'done') {
           clearPendingCommand();
           setStage('done');
-          setCooldownSecondsLeft(COOLDOWN_DURATION_SEC);
+          useLiveDevice.getState().startManualCooldown(deviceId);
           useLiveDevice.getState().resetWateringState(deviceId);
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => null);
         } else if (ack.status === 'rejected' || ack.status === 'failed') {
@@ -170,7 +178,7 @@ export function useCommand(): UseCommandReturn {
       });
 
       const unsubStore = useLiveDevice.subscribe((state) => {
-        if (activeCmdIdRef.current !== cmdId) return;
+        if (!stillCurrent()) return;
         const targetDev = state.devices[deviceId];
         if (!targetDev) return;
 
@@ -179,7 +187,7 @@ export function useCommand(): UseCommandReturn {
           if (ack.status === 'done') {
             clearPendingCommand();
             setStage('done');
-            setCooldownSecondsLeft(COOLDOWN_DURATION_SEC);
+            useLiveDevice.getState().startManualCooldown(deviceId);
             useLiveDevice.getState().resetWateringState(deviceId);
             Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => null);
             return;
@@ -203,7 +211,7 @@ export function useCommand(): UseCommandReturn {
           pumpObservedActiveRef.current = false;
           clearPendingCommand();
           setStage('done');
-          setCooldownSecondsLeft(COOLDOWN_DURATION_SEC);
+          useLiveDevice.getState().startManualCooldown(deviceId);
           useLiveDevice.getState().resetWateringState(deviceId);
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => null);
         }
@@ -217,7 +225,6 @@ export function useCommand(): UseCommandReturn {
       // 1. Initial State: "Sending request" awaiting controller acknowledgement
       setErrorMessage(null);
       setStage('sent');
-      lastMoistureBeforeRef.current = currentMoisture;
       useLiveDevice.getState().triggerWaterNow(clampedDuration, deviceId);
 
       // Haptic pulse on command initiation
@@ -229,27 +236,33 @@ export function useCommand(): UseCommandReturn {
           type: 'waterNow',
           durationSec: clampedDuration,
         }, cmdId).catch((err: unknown) => {
-          if (activeCmdIdRef.current !== cmdId) return;
+          if (!stillCurrent()) return;
           clearPendingCommand();
           setStage('timeout');
           setErrorMessage(err instanceof Error ? err.message : 'Failed to dispatch command.');
+          useLiveDevice.getState().resetWateringState(deviceId);
         });
 
         return true;
       } catch (err) {
-        if (activeCmdIdRef.current !== cmdId) return false;
+        if (!stillCurrent()) return false;
         clearPendingCommand();
         setStage('timeout');
         setErrorMessage(err instanceof Error ? err.message : 'Failed to dispatch command.');
+        useLiveDevice.getState().resetWateringState(deviceId);
         return false;
       }
     },
-    [deviceId, clearPendingCommand]
+    [uid, deviceId, clearPendingCommand]
   );
 
   // Execute Water Now with safety checks (manual watering explicitly bypasses soil moisture checks)
   const executeWaterNow = useCallback(
-    async (requestedDuration: number = 5, forceIfWet: boolean = true): Promise<boolean> => {
+    async (requestedDuration: number = 5): Promise<boolean> => {
+      if (!Number.isFinite(requestedDuration)) {
+        Alert.alert('Invalid Duration', 'Enter a watering duration from 1 to 15 seconds.');
+        return false;
+      }
       if (!device || !deviceId) {
         Alert.alert('No Device Connected', 'Please pair or select a plant device first.');
         return false;
@@ -286,17 +299,17 @@ export function useCommand(): UseCommandReturn {
       const clampedDuration = Math.max(1, Math.min(MAX_PUMP_RUNTIME_SEC, Math.round(requestedDuration)));
       setActiveDuration(clampedDuration);
 
-      // Safety Guard 2: 60s Cooldown enforcement
-      if (cooldownSecondsLeft > 0) {
+      const deadline = useLiveDevice.getState().manualCooldownUntilByDevice[deviceId] ?? 0;
+      const cooldownLeft = Math.ceil((deadline - Date.now()) / 1000);
+      if (cooldownLeft > 0) {
         Alert.alert(
           'Pump Cooldown Active',
-          `Please wait ${cooldownSecondsLeft} seconds before triggering another manual cycle.`
+          `Please wait ${cooldownLeft} seconds before triggering another manual cycle.`
         );
         return false;
       }
 
-      const currentMoisture = device.telemetry?.soilMoisture ?? 0;
-      return dispatchWaterCommand(clampedDuration, currentMoisture);
+      return dispatchWaterCommand(clampedDuration);
     },
     [
       device,
@@ -304,7 +317,6 @@ export function useCommand(): UseCommandReturn {
       pairingStatus,
       isReserveKnown,
       hasSufficientReserve,
-      cooldownSecondsLeft,
       storeRefillBottle,
       dispatchWaterCommand,
     ]

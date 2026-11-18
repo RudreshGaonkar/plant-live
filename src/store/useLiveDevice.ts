@@ -21,6 +21,7 @@ export interface DeviceConfig {
     tempMax: number;
     humidityMax: number;
     pumpDurationSec: number;
+    waterDurationSec?: number;
   };
   sensors: {
     lightMode: LightMode;
@@ -34,6 +35,9 @@ export interface DeviceConfig {
     flowMlPerSec: number;
     remainingMl: number;
   };
+  pumpDurationSec?: number;
+  waterDurationSec?: number;
+  flowMlPerSec?: number;
   bottleCapacityMl?: number;
   remainingMl?: number;
   pairedAt: number;
@@ -93,6 +97,8 @@ export interface WaterLog {
   note?: string;
 }
 
+export type SnapshotStatus = 'loading' | 'ready' | 'empty' | 'error';
+
 export interface DeviceRecord {
   id: string;
   config: DeviceConfig;
@@ -107,6 +113,8 @@ export interface DeviceRecord {
     [key: string]: any;
   };
   isConfigHydrated?: boolean;
+  configStatus?: SnapshotStatus;
+  telemetryStatus?: SnapshotStatus;
 }
 
 export interface WeatherData {
@@ -128,6 +136,8 @@ export interface LiveDeviceStore {
   activeDeviceId: string;
   wateringDeviceId: string | null;
   waterLogs: WaterLog[];
+  manualCooldownUntilByDevice: Record<string, number>;
+  startManualCooldown: (deviceId: string) => void;
   isWateringActive: boolean;
   isWatering: boolean;
   isCommandPending: boolean;
@@ -162,6 +172,8 @@ export interface LiveDeviceStore {
 export const createDefaultDeviceRecord = (id: string): DeviceRecord => ({
   id,
   isConfigHydrated: false,
+  configStatus: 'loading',
+  telemetryStatus: 'loading',
   config: {
     name: '',
     plantName: '',
@@ -208,11 +220,20 @@ export const createDefaultDeviceRecord = (id: string): DeviceRecord => ({
 let activeWateringTimer: ReturnType<typeof setInterval> | null = null;
 const inFlightRefills = new Map<string, Promise<RefillOutcome>>();
 
+const modeWrites = new Set<string>();
+
 export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   devices: {},
   activeDeviceId: '',
   wateringDeviceId: null,
   waterLogs: [],
+  manualCooldownUntilByDevice: {},
+  startManualCooldown: (deviceId) => set((state) => ({
+    manualCooldownUntilByDevice: {
+      ...state.manualCooldownUntilByDevice,
+      [deviceId]: Date.now() + 60_000,
+    },
+  })),
   isWateringActive: false,
   isWatering: false,
   isCommandPending: false,
@@ -297,14 +318,15 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   },
 
   resetWateringState: (targetDeviceId?: string) => {
-    if (activeWateringTimer) {
+    const { activeDeviceId, devices, wateringDeviceId } = get();
+    const targetId = targetDeviceId || activeDeviceId;
+    const resetGlobal = (wateringDeviceId || activeDeviceId) === targetId;
+    if (resetGlobal && activeWateringTimer) {
       clearInterval(activeWateringTimer);
       activeWateringTimer = null;
     }
-    const { activeDeviceId, devices } = get();
-    const targetId = targetDeviceId || activeDeviceId;
     if (!targetId || !devices[targetId]) {
-      set({
+      if (resetGlobal) set({
         isWateringActive: false,
         isWatering: false,
         isCommandPending: false,
@@ -316,11 +338,13 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     const active = devices[targetId];
 
     set({
-      isWateringActive: false,
-      isWatering: false,
-      isCommandPending: false,
-      wateringSecondsLeft: 0,
-      wateringDeviceId: null,
+      ...(resetGlobal && {
+        isWateringActive: false,
+        isWatering: false,
+        isCommandPending: false,
+        wateringSecondsLeft: 0,
+        wateringDeviceId: null,
+      }),
       devices: {
         ...devices,
         [targetId]: {
@@ -462,6 +486,11 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     const prevMode = active.config.mode;
     const nextMode = prevMode === 'auto' ? 'manual' : 'auto';
 
+    const account = auth.currentUser;
+    const writeKey = JSON.stringify([account?.uid, targetId]);
+    if (modeWrites.has(writeKey)) return;
+    modeWrites.add(writeKey);
+
     // Optimistically update local state
     set({
       devices: {
@@ -479,10 +508,11 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
     try {
       await update(ref(db, `devices/${targetId}/config`), { mode: nextMode });
     } catch (err: any) {
+      if (auth.currentUser !== account) return;
       // Revert local state with an error toast if the write fails
       const currentDevices = get().devices;
       const currentActive = currentDevices[targetId];
-      if (currentActive) {
+      if (currentActive?.config.mode === nextMode) {
         set({
           devices: {
             ...currentDevices,
@@ -508,6 +538,8 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
       } catch {
         console.warn('[toggleMode] Mode Update Failed:', errorMsg);
       }
+    } finally {
+      modeWrites.delete(writeKey);
     }
   },
 
@@ -712,10 +744,16 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
   },
 
   clearDeviceState: () => {
+    if (activeWateringTimer) clearInterval(activeWateringTimer);
+    activeWateringTimer = null;
     set({
       devices: {},
       activeDeviceId: '',
       waterLogs: [],
+      manualCooldownUntilByDevice: {},
+      wateringDeviceId: null,
+      isCommandPending: false,
+      isWatering: false,
       isWateringActive: false,
       wateringSecondsLeft: 0,
       weather: null,
@@ -866,6 +904,7 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
             pumpOn: isPump,
             ts: Number.isFinite(telemetry.soilMoisture) ? (telemetry.ts ?? 0) : (active.telemetry?.ts ?? 0),
           },
+          telemetryStatus: 'ready',
         },
       },
     });
@@ -881,6 +920,7 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
           [deviceId]: {
             ...device,
             telemetry: null,
+            telemetryStatus: 'empty',
           },
         },
       });
@@ -922,9 +962,22 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
         [targetId]: {
           ...active,
           isConfigHydrated: true,
+          configStatus: 'ready',
           config: {
             ...active.config,
             ...configPartial,
+            thresholds: {
+              ...active.config.thresholds,
+              ...configPartial.thresholds,
+              pumpDurationSec:
+                configPartial.thresholds?.pumpDurationSec ??
+                configPartial.thresholds?.waterDurationSec ??
+                configPartial.pumpDurationSec ??
+                configPartial.waterDurationSec ??
+                active.config.thresholds.pumpDurationSec,
+            },
+            sensors: { ...active.config.sensors, ...configPartial.sensors },
+            calibration: { ...active.config.calibration, ...configPartial.calibration },
             bottleCapacityMl: resolvedCapacity,
             remainingMl: resolvedRemaining,
             bottle: {
@@ -932,7 +985,7 @@ export const useLiveDevice = create<LiveDeviceStore>((set, get) => ({
               ...rawBottle,
               capacityMl: resolvedCapacity,
               remainingMl: resolvedRemaining,
-              flowMlPerSec: rawBottle.flowMlPerSec ?? currentBottle.flowMlPerSec ?? 15,
+              flowMlPerSec: rawBottle.flowMlPerSec ?? configPartial.flowMlPerSec ?? currentBottle.flowMlPerSec ?? 15,
             },
           },
         },

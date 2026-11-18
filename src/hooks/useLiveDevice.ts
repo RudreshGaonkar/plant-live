@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { ref, onValue, runTransaction } from 'firebase/database';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db } from '@/services/firebase';
 import { useSession } from '@/store/useSession';
 import {
@@ -8,7 +8,7 @@ import {
   DeviceConfig,
   DeviceTelemetry,
   DeviceStatus,
-  createDefaultDeviceRecord,
+  SnapshotStatus,
 } from '@/store/useLiveDevice';
 
 export type {
@@ -31,168 +31,117 @@ export { computePlantHealthState, createDefaultDeviceRecord } from '@/store/useL
 export const useLiveDevice = useLiveDeviceStore;
 
 export function useLiveDeviceSync() {
-  const user = useSession((s) => s.user);
-  const activeDeviceId = useLiveDeviceStore((s) => s.activeDeviceId);
-  const setActiveDeviceId = useLiveDeviceStore((s) => s.setActiveDeviceId);
-  const [pairings, setPairings] = useState<{ uid: string; ids: string[] }>();
+  const uid = useSession((state) => state.user?.uid);
+  const paired = useSession((state) => state.pairingStatus === 'paired');
+  const bootLoading = useSession((state) => state.isLoading);
+  const activeDeviceId = useLiveDeviceStore((state) => state.activeDeviceId);
+  const deviceIds = useLiveDeviceStore(useShallow((state) => Object.keys(state.devices)));
 
-  // 1. Sync User Device List & Hydrate paired devices into store
   useEffect(() => {
-    if (!user?.uid) return;
-    const uid = user.uid;
+    if (!uid || bootLoading) return;
     let active = true;
-    let revision = 0;
-    const userDevicesRef = ref(db, `users/${user.uid}/devices`);
-    const unsubUserDevices = onValue(userDevicesRef, async (snapshot) => {
-      const currentRevision = ++revision;
-      if (snapshot.exists()) {
-        const val = snapshot.val();
-        const deviceIds =
-          typeof val === 'object' && val !== null
-            ? Object.keys(val).filter((k) => Boolean(val[k]))
-            : [];
+    const unsubscribe = onValue(ref(db, `users/${uid}/devices`), (snapshot) => {
+      if (!active || useSession.getState().user?.uid !== uid) return;
+      const membership = snapshot.val();
+      const ids = membership && typeof membership === 'object'
+        ? Object.keys(membership).filter((id) => Boolean(membership[id]))
+        : [];
+      const activeId = useLiveDeviceStore.getState().seedDeviceRecords(ids);
+      useSession.setState({
+        activeDeviceId: activeId,
+        pairingStatus: ids.length ? 'paired' : 'unpaired',
+      });
+    }, (error) => console.warn('[LeafLink] Device membership unavailable:', error.message));
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [uid, bootLoading]);
 
-        setPairings({ uid, ids: deviceIds });
-
-        if (deviceIds.length > 0) {
-          // Hydrate active device from AsyncStorage if valid
-          let savedId: string | null = null;
-          try {
-            savedId = await AsyncStorage.getItem(`@plant_live_active_device_${user.uid}`);
-          } catch (err) {
-            console.warn('[useLiveDevice] Failed to read stored active device:', err);
-          }
-
-          if (!active || revision !== currentRevision) return;
-
-          // Reconcile and seed records atomically using seedDeviceRecords
-          useLiveDeviceStore.getState().seedDeviceRecords(deviceIds, savedId);
-
-          if (
-            useSession.getState().user?.uid === uid &&
-            useSession.getState().pairingStatus !== 'paired'
-          ) {
-            useSession.setState({ pairingStatus: 'paired' });
-          }
-        } else {
-          useLiveDeviceStore.getState().clearDeviceState();
-          if (
-            useSession.getState().user?.uid === uid &&
-            useSession.getState().pairingStatus !== 'unpaired'
-          ) {
-            useSession.setState({ pairingStatus: 'unpaired', activeDeviceId: '' });
-          }
-        }
-      } else {
-        setPairings({ uid, ids: [] });
-        useLiveDeviceStore.getState().clearDeviceState();
-        if (
-          useSession.getState().user?.uid === uid &&
-          useSession.getState().pairingStatus !== 'unpaired'
-        ) {
-          useSession.setState({ pairingStatus: 'unpaired', activeDeviceId: '' });
-        }
+  useEffect(() => {
+    if (!uid || bootLoading) return;
+    let active = true;
+    const unsubs = deviceIds.map((deviceId) => {
+      const isCurrent = () => active && useSession.getState().user?.uid === uid &&
+        Boolean(useLiveDeviceStore.getState().devices[deviceId]);
+      const setStatus = (field: 'configStatus' | 'telemetryStatus', status: SnapshotStatus) => {
+        if (!isCurrent()) return;
+        useLiveDeviceStore.setState(({ devices }) => ({
+          devices: { ...devices, [deviceId]: { ...devices[deviceId], [field]: status } },
+        }));
+      };
+      const deviceRef = `devices/${deviceId}`;
+      if (paired) {
+        void runTransaction(ref(db, `${deviceRef}/meta/ownerUid`), (owner) => owner === null ? uid : undefined, {
+          applyLocally: false,
+        }).catch((error) => console.warn('[LeafLink] Ownership backfill failed:', error.message));
       }
+      const timeout = setTimeout(() => {
+        const record = useLiveDeviceStore.getState().devices[deviceId];
+        if (record?.configStatus === 'loading') setStatus('configStatus', 'error');
+        if (record?.telemetryStatus === 'loading') setStatus('telemetryStatus', 'error');
+      }, 8000);
+
+      const configUnsub = onValue(ref(db, `${deviceRef}/config`), (snapshot) => {
+        if (!isCurrent()) return;
+        if (snapshot.exists()) {
+          useLiveDeviceStore.getState().updateConfig(snapshot.val() as DeviceConfig, deviceId);
+        } else {
+          setStatus('configStatus', 'empty');
+        }
+      }, () => setStatus('configStatus', 'error'));
+      const telemetryUnsub = onValue(ref(db, `${deviceRef}/telemetry`), (snapshot) => {
+        if (!isCurrent()) return;
+        if (snapshot.exists()) {
+          useLiveDeviceStore.getState().updateTelemetry(snapshot.val() as DeviceTelemetry, deviceId);
+        } else {
+          useLiveDeviceStore.getState().clearTelemetry(deviceId);
+        }
+      }, () => setStatus('telemetryStatus', 'error'));
+      const statusUnsub = onValue(ref(db, `${deviceRef}/status`), (snapshot) => {
+        if (!isCurrent() || !snapshot.exists()) return;
+        const status = snapshot.val() as DeviceStatus;
+        useLiveDeviceStore.setState(({ devices }) => ({
+          devices: {
+            ...devices,
+            [deviceId]: { ...devices[deviceId], status: { ...devices[deviceId].status, ...status } },
+          },
+        }));
+      }, (error) => console.warn('[LeafLink] Device status unavailable:', error.message));
+      return () => {
+        clearTimeout(timeout);
+        configUnsub();
+        telemetryUnsub();
+        statusUnsub();
+      };
     });
 
     return () => {
       active = false;
-      unsubUserDevices();
+      unsubs.forEach((unsubscribe) => unsubscribe());
     };
-  }, [user?.uid, setActiveDeviceId]);
+  }, [uid, bootLoading, deviceIds, paired]);
 
-  // 2. Realtime Sync for ALL Paired Devices (config, status, telemetry) so switcher dropdown has live data
   useEffect(() => {
-    if (!pairings || pairings.uid !== user?.uid) return;
-
-    const unsubs: (() => void)[] = [];
-
-    pairings.ids.forEach((devId) => {
-      const ownerRef = ref(db, `devices/${devId}/meta/ownerUid`);
-      void runTransaction(ownerRef, (owner) => owner === null ? pairings.uid : undefined, {
-        applyLocally: false,
-      }).catch((error) => {
-        console.warn(`[LeafLink] Ownership backfill failed for ${devId}:`, error.message);
-      });
-
-      // Config listener
-      const configRef = ref(db, `devices/${devId}/config`);
-      unsubs.push(
-        onValue(configRef, (snapshot) => {
-          if (snapshot.exists()) {
-            const config = snapshot.val() as DeviceConfig;
-            useLiveDeviceStore.getState().updateConfig(config, devId);
-          }
-        })
-      );
-
-      // Status listener
-      const statusRef = ref(db, `devices/${devId}/status`);
-      unsubs.push(
-        onValue(statusRef, (snapshot) => {
-          if (snapshot.exists()) {
-            const status = snapshot.val() as DeviceStatus;
-            useLiveDeviceStore.setState((prev) => {
-              const cur = prev.devices[devId] || createDefaultDeviceRecord(devId);
-              return {
-                devices: {
-                  ...prev.devices,
-                  [devId]: { ...cur, status: { ...cur.status, ...status } },
-                },
-              };
-            });
-          }
-        })
-      );
-
-      // Telemetry listener
-      const telemetryRef = ref(db, `devices/${devId}/telemetry`);
-      unsubs.push(
-        onValue(telemetryRef, (snapshot) => {
-          if (snapshot.exists()) {
-            const telemetry = snapshot.val() as DeviceTelemetry;
-            useLiveDeviceStore.getState().updateTelemetry(telemetry, devId);
-          } else {
-            useLiveDeviceStore.getState().clearTelemetry(devId);
-          }
-        }, (error) => {
-          console.warn(`[LeafLink] Telemetry unavailable for ${devId}:`, error.message);
-          useLiveDeviceStore.getState().clearTelemetry(devId);
-        })
-      );
-    });
-
-    return () => {
-      unsubs.forEach((unsub) => unsub());
-    };
-  }, [pairings, user?.uid]);
-
-  // 3. Realtime Sync for Active Device Control State
-  useEffect(() => {
-    if (!activeDeviceId) return;
-
+    if (!uid || !activeDeviceId) return;
+    let active = true;
     const controlRef = ref(db, `devices/${activeDeviceId}/control`);
-    const unsubControl = onValue(controlRef, (snapshot) => {
-      if (snapshot.exists()) {
-        const control = snapshot.val();
-        useLiveDeviceStore.setState((prev) => {
-          const cur = prev.devices[activeDeviceId] || createDefaultDeviceRecord(activeDeviceId);
-          return {
-            devices: {
-              ...prev.devices,
-              [activeDeviceId]: {
-                ...cur,
-                control: { ...cur.control, ...control },
-              },
-            },
-          };
+    const unsubscribe = onValue(controlRef, (snapshot) => {
+      if (!active || useSession.getState().user?.uid !== uid || !snapshot.exists()) return;
+      const { devices } = useLiveDeviceStore.getState();
+      const device = devices[activeDeviceId];
+      if (device) {
+        useLiveDeviceStore.setState({
+          devices: {
+            ...devices,
+            [activeDeviceId]: { ...device, control: { ...device.control, ...snapshot.val() } },
+          },
         });
       }
-    });
-
+    }, (error) => console.warn('[LeafLink] Controller state unavailable:', error.message));
     return () => {
-      unsubControl();
+      active = false;
+      unsubscribe();
     };
-  }, [activeDeviceId]);
-
+  }, [uid, activeDeviceId]);
 }

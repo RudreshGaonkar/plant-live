@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { PasswordInput } from '@/components/PasswordInput';
+import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -6,7 +7,6 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
-  KeyboardAvoidingView,
   Platform,
   ScrollView,
   Image,
@@ -14,7 +14,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useForm, Controller, FieldErrors } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -33,6 +32,7 @@ import {
 export default function LoginScreen() {
   const { colors, radii } = useAppTheme();
   const [authError, setAuthError] = useState<string | null>(null);
+  const submitting = useRef(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Forgot Password Modal States
@@ -40,11 +40,9 @@ export default function LoginScreen() {
   const [resetEmail, setResetEmail] = useState('');
   const [resetError, setResetError] = useState<string | null>(null);
   const [resetSuccess, setResetSuccess] = useState<string | null>(null);
+  const sendingReset = useRef(false);
+  const resetEmailInput = useRef<TextInput>(null);
   const [isSendingReset, setIsSendingReset] = useState(false);
-
-  useEffect(() => {
-    SplashScreen.hideAsync().catch(() => {});
-  }, []);
 
   const emailInputRef = useRef<TextInput>(null);
   const passwordInputRef = useRef<TextInput>(null);
@@ -72,27 +70,28 @@ export default function LoginScreen() {
   };
 
   const handleCloseForgotPassword = () => {
-    if (isSendingReset) return;
+    if (sendingReset.current) return;
     setForgotModalOpen(false);
     setResetError(null);
     setResetSuccess(null);
   };
 
   const handleSendPasswordReset = async () => {
-    if (isSendingReset) return;
+    if (sendingReset.current) return;
     setResetError(null);
     setResetSuccess(null);
 
-    const trimmedEmail = resetEmail.trim();
-    const validation = validateEmail(trimmedEmail, false);
-    if (!validation.valid) {
+    const validation = validateEmail(resetEmail);
+    if (!validation.valid || validation.value === undefined) {
+      resetEmailInput.current?.focus();
       setResetError(validation.error || 'Please enter a valid email address.');
       return;
     }
 
+    sendingReset.current = true;
     setIsSendingReset(true);
     try {
-      await sendPasswordResetEmail(auth, trimmedEmail);
+      await sendPasswordResetEmail(auth, validation.value);
       setResetSuccess(PASSWORD_RESET_CONFIRMATION_MESSAGE);
     } catch (err: unknown) {
       const msg = mapPasswordResetError(err);
@@ -102,21 +101,23 @@ export default function LoginScreen() {
         setResetError(msg);
       }
     } finally {
+      sendingReset.current = false;
       setIsSendingReset(false);
     }
   };
 
   const onSubmit = async (data: LoginFormData) => {
+    if (submitting.current) return;
+    submitting.current = true;
     setAuthError(null);
     setIsSubmitting(true);
     try {
-      const trimmedEmail = data.email.trim();
-      await signInWithEmailAndPassword(auth, trimmedEmail, data.password);
-      router.replace('/(tabs)/home');
+      await signInWithEmailAndPassword(auth, data.email, data.password);
     } catch (err: unknown) {
       const errorMsg = mapAuthError(err, 'Failed to sign in. Please check your credentials.');
       setAuthError(errorMsg);
     } finally {
+      submitting.current = false;
       setIsSubmitting(false);
     }
   };
@@ -136,12 +137,10 @@ export default function LoginScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.keyboardView}
-      >
+      <View style={styles.scrollFrame}>
         <ScrollView
           contentContainerStyle={styles.scrollContent}
+          automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
           keyboardShouldPersistTaps="handled"
         >
           {/* Header Brand */}
@@ -279,12 +278,12 @@ export default function LoginScreen() {
                       color={colors.textMuted}
                       style={styles.inputIcon}
                     />
-                    <TextInput
+                    <PasswordInput
                       ref={passwordInputRef}
+                      accessibilityLabel="Password"
                       style={[styles.input, { color: colors.text }]}
                       placeholder="••••••••"
                       placeholderTextColor={colors.palette.sage}
-                      secureTextEntry
                       autoCapitalize="none"
                       autoCorrect={false}
                       autoComplete="current-password"
@@ -364,7 +363,7 @@ export default function LoginScreen() {
             </View>
           </View>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </View>
 
       {/* ── FORGOT PASSWORD MODAL ────────────────────────────────────── */}
       <Modal
@@ -373,7 +372,12 @@ export default function LoginScreen() {
         transparent
         onRequestClose={handleCloseForgotPassword}
       >
-        <View style={styles.modalBackdrop}>
+        <ScrollView
+          style={styles.modalBackdrop}
+          automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={styles.resetModalContent}
+        >
           <View
             style={[
               styles.resetModalSheet,
@@ -480,6 +484,7 @@ export default function LoginScreen() {
                   autoComplete="email"
                   textContentType="emailAddress"
                   keyboardType="email-address"
+                  ref={resetEmailInput}
                   value={resetEmail}
                   onChangeText={(text) => {
                     setResetEmail(text);
@@ -512,7 +517,7 @@ export default function LoginScreen() {
               )}
             </TouchableOpacity>
           </View>
-        </View>
+        </ScrollView>
       </Modal>
     </SafeAreaView>
   );
@@ -522,9 +527,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  keyboardView: {
-    flex: 1,
-  },
+  scrollFrame: { flex: 1 },
   scrollContent: {
     padding: 24,
     paddingBottom: 40,
@@ -640,9 +643,8 @@ const styles = StyleSheet.create({
   modalBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.45)',
-    justifyContent: 'center',
-    padding: 20,
   },
+  resetModalContent: { flexGrow: 1, justifyContent: 'center', padding: 20 },
   resetModalSheet: {
     padding: 22,
     borderWidth: 1.5,

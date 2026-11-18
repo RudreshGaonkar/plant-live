@@ -1,3 +1,4 @@
+import { SkeletonLoader } from '@/components/SkeletonLoader';
 /**
  * Tab Layout – "The Stage" Architecture
  * Uses FloatingDock as a custom tab bar with Expo Router Tabs.
@@ -5,9 +6,8 @@
  */
 import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator } from 'react-native';
-import { Tabs, router, useSegments, Redirect } from 'expo-router';
+import { Tabs, router, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import * as SplashScreen from 'expo-splash-screen';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { ref, onValue } from 'firebase/database';
 import { db } from '@/services/firebase';
@@ -15,14 +15,13 @@ import { FloatingDock } from '@/components/FloatingDock';
 import { WaterNowSheet } from '@/components/WaterNowSheet';
 import { useLiveDevice, useLiveDeviceSync } from '@/hooks/useLiveDevice';
 import { useAlertEngine } from '@/hooks/useAlertEngine';
-import { useSession } from '@/store/useSession';
+import { normalizePrefs, useSession } from '@/store/useSession';
 
 export default function TabLayout() {
   const segments = useSegments();
   const [waterSheetVisible, setWaterSheetVisible] = useState(false);
 
   const user = useSession((s) => s.user);
-  const isAuthReady = useSession((s) => s.isAuthReady);
   const pairingStatus = useSession((s) => s.pairingStatus);
   const retryBoot = useSession((s) => s.retryBoot);
 
@@ -31,37 +30,25 @@ export default function TabLayout() {
   const { unreadCount } = useAlertEngine();
 
   useEffect(() => {
-    if (pairingStatus === 'unavailable') {
-      SplashScreen.hideAsync().catch(() => {});
-    }
-  }, [pairingStatus]);
-
-  // UID-scoped preferences listener reading users/{uid}/prefs/units ('C' | 'F')
-  useEffect(() => {
-    if (!user?.uid) return;
+    if (!user?.uid || pairingStatus === 'pending') return;
     const uid = user.uid;
-    const unitsRef = ref(db, `users/${uid}/prefs/units`);
-    const unsub = onValue(unitsRef, (snapshot) => {
-      if (snapshot.exists()) {
-        const val = snapshot.val();
-        if (val === 'C' || val === 'F') {
-          useSession.getState().setPrefs({ units: val });
-        }
+    let active = true;
+    const unsubscribe = onValue(ref(db, `users/${uid}/prefs`), (snapshot) => {
+      if (active && useSession.getState().user?.uid === uid) {
+        useSession.getState().setPrefs(normalizePrefs(snapshot.val()));
       }
-    });
-
+    }, (error) => console.warn('[LeafLink] Preferences unavailable:', error.message));
     return () => {
-      unsub();
+      active = false;
+      unsubscribe();
     };
-  }, [user?.uid]);
+  }, [user?.uid, pairingStatus]);
 
-  // Guard protected tab routes when !user && isAuthReady
-  if (isAuthReady && !user) {
-    return <Redirect href="/(auth)/login" />;
-  }
-
-  // Guard direct or deep-link entry while startup pairing resolution is pending
-  if (!isAuthReady || pairingStatus === 'pending') {
+  if (pairingStatus === 'pending') {
+    const route = segments.at(-1);
+    if (route === 'history' || route === 'settings' || route === 'home' || route === '(tabs)') {
+      return <SkeletonLoader screen={route === '(tabs)' ? 'home' : route} />;
+    }
     return (
       <View style={{ flex: 1, backgroundColor: '#16221A', justifyContent: 'center', alignItems: 'center' }}>
         <StatusBar style="light" />

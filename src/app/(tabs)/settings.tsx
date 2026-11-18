@@ -3,7 +3,7 @@
  * Production-ready UI with local avatar picker, inline user info editing,
  * plant passport thresholds, and clean collapsible accordion secondary options.
  */
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -16,6 +16,7 @@ import {
   Image,
   TextInput,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -42,8 +43,11 @@ import {
   verifyEmailOtp,
 } from '@/services/emailOtp';
 import { useAppTheme } from '@/theme';
-import { useLiveDevice, DeviceConfig } from '@/store/useLiveDevice';
+import { useLiveDevice } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
+import { useDeviceSettingsEdits } from '@/hooks/useDeviceSettingsEdits';
+import { SkeletonLoader } from '@/components/SkeletonLoader';
+import { PasswordInput } from '@/components/PasswordInput';
 import { RefillConfirmationModal } from '@/components/RefillConfirmation';
 import {
   updateDeviceConfigInRTDB,
@@ -57,7 +61,9 @@ import {
 } from '@/services/devices';
 import { formatTemperature } from '@/utils/temperature';
 import {
-  changePasswordSchema,
+  changePasswordWithCurrentSchema,
+  isValidOtp,
+  validateDisplayName,
   mapChangePasswordError,
 } from '@/utils/authValidation';
 import {
@@ -88,45 +94,18 @@ export default function SettingsScreen() {
 
   // Store bindings
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
-  const updateThresholds = useLiveDevice((s) => s.updateThresholds);
-  const updateConfig = useLiveDevice((s) => s.updateConfig);
-  const updateCalibration = useLiveDevice((s) => s.updateCalibration);
 
   // Calibration Wizard modal state
-  const [calibrationModalOpen, setCalibrationModalOpen] = useState<boolean>(false);
+  const [calibrationScope, setCalibrationScope] = useState<string | null>(null);
   const [showRefillModal, setShowRefillModal] = useState<boolean>(false);
   const [isRemovingDevice, setIsRemovingDevice] = useState<boolean>(false);
 
-  // Explicit sync state for persistent leaf updates
-  type SyncState = 'idle' | 'pending' | 'saved' | 'error';
-  interface FieldSyncStatus {
-    state: SyncState;
-    error?: string;
-  }
-  const [syncStatus, setSyncStatus] = useState<Record<string, FieldSyncStatus>>({});
-
-  // Scoped drafts for device & user
-  const [bottleCapacityDraft, setBottleCapacityDraft] = useState<number | null>(null);
-  const [pumpFlowDraft, setPumpFlowDraft] = useState<number | null>(null);
-  const [thresholdDrafts, setThresholdDrafts] = useState<Partial<DeviceConfig['thresholds']>>({});
+  const currentUid = user?.uid || '';
+  const activeDevId = device?.id || '';
+  const edits = useDeviceSettingsEdits(currentUid, activeDevId);
   const [displayNameDraft, setDisplayNameDraft] = useState<string | null>(null);
 
-  // Reset device-scoped drafts on device switch to ignore stale completions
-  const activeDevId = device?.id || '';
-  const prevDeviceIdRef = React.useRef(activeDevId);
-  React.useEffect(() => {
-    if (prevDeviceIdRef.current !== activeDevId) {
-      prevDeviceIdRef.current = activeDevId;
-      setBottleCapacityDraft(null);
-      setPumpFlowDraft(null);
-      setThresholdDrafts({});
-      setSyncStatus({});
-    }
-  }, [activeDevId]);
-
-  // Reset user-scoped drafts on account switch
-  const currentUid = user?.uid || '';
-  const prevUidRef = React.useRef(currentUid);
+  const prevUidRef = useRef(currentUid);
   React.useEffect(() => {
     if (prevUidRef.current !== currentUid) {
       prevUidRef.current = currentUid;
@@ -134,42 +113,9 @@ export default function SettingsScreen() {
     }
   }, [currentUid]);
 
-  const activeBottleCapacity = bottleCapacityDraft ?? device?.config?.bottle?.capacityMl ?? 1000;
-  const activePumpFlow = pumpFlowDraft ?? device?.config?.bottle?.flowMlPerSec ?? 15;
-
-  const saveField = async (
-    fieldKey: string,
-    targetDeviceId: string,
-    writer: () => Promise<any>
-  ) => {
-    setSyncStatus((prev) => ({ ...prev, [fieldKey]: { state: 'pending' } }));
-    try {
-      await writer();
-      // Guard against device switches during async write
-      if (useLiveDevice.getState().activeDeviceId !== targetDeviceId) {
-        return;
-      }
-      setSyncStatus((prev) => ({ ...prev, [fieldKey]: { state: 'saved' } }));
-      setTimeout(() => {
-        setSyncStatus((prev) => {
-          if (prev[fieldKey]?.state === 'saved') {
-            return { ...prev, [fieldKey]: { state: 'idle' } };
-          }
-          return prev;
-        });
-      }, 2500);
-    } catch (err: any) {
-      if (useLiveDevice.getState().activeDeviceId !== targetDeviceId) {
-        return;
-      }
-      const msg = err?.message || 'Save failed';
-      setSyncStatus((prev) => ({ ...prev, [fieldKey]: { state: 'error', error: msg } }));
-    }
-  };
-
   const renderSyncBadge = (fieldKey: string) => {
-    const status = syncStatus[fieldKey];
-    if (!status || status.state === 'idle') return null;
+    const status = edits.status(fieldKey);
+    if (!status) return null;
 
     if (status.state === 'pending') {
       return (
@@ -190,11 +136,13 @@ export default function SettingsScreen() {
     if (status.state === 'error') {
       return (
         <TouchableOpacity
-          onPress={() => Alert.alert('Sync Error', status.error || 'Write failed. Please check connection and retry.')}
+          accessibilityRole="button"
+          accessibilityLabel={`Retry save. ${status.error}`}
+          onPress={status.retry}
           style={styles.syncBadgeError}
         >
           <Ionicons name="alert-circle" size={13} color={colors.palette.critical} />
-          <Text style={[styles.syncTextError, { color: colors.palette.critical }]}>Error</Text>
+          <Text style={[styles.syncTextError, { color: colors.palette.critical }]}>Retry · {status.error}</Text>
         </TouchableOpacity>
       );
     }
@@ -207,23 +155,22 @@ export default function SettingsScreen() {
     terrace: { moistureMin: 25, moistureMax: 55, tempMax: 32, humidityMax: 80, pumpDurationSec: 5 },
   };
 
-  const handleSelectLocation = async (loc: 'indoor' | 'balcony' | 'terrace') => {
-    if (!device?.id) return;
-    const targetId = device.id;
-    const defaults = LOCATION_PRESETS[loc];
-    await saveField('location', targetId, async () => {
-      await updateDeviceLocationAndPreset(targetId, loc, defaults);
-      updateConfig({ location: loc }, targetId);
-      updateThresholds(defaults);
-    });
-  };
+  const handleSelectLocation = (loc: 'indoor' | 'balcony' | 'terrace') =>
+    edits.save('location', (id) => updateDeviceLocationAndPreset(id, loc, LOCATION_PRESETS[loc]));
 
   // User Profile Form States
   const displayNameInput = displayNameDraft ?? (user?.displayName || '');
+  const savingName = useRef(false);
+  const displayNameField = useRef<TextInput>(null);
   const [isUpdatingName, setIsUpdatingName] = useState<boolean>(false);
   const [isPickingAvatar, setIsPickingAvatar] = useState<boolean>(false);
 
   // Change Password Modal States
+  const passwordBusy = useRef(false);
+  const currentPasswordField = useRef<TextInput>(null);
+  const newPasswordField = useRef<TextInput>(null);
+  const confirmPasswordField = useRef<TextInput>(null);
+  const otpField = useRef<TextInput>(null);
   const [passwordModalOpen, setPasswordModalOpen] = useState<boolean>(false);
   const [currentPassword, setCurrentPassword] = useState<string>('');
   const [newPassword, setNewPassword] = useState<string>('');
@@ -268,7 +215,7 @@ export default function SettingsScreen() {
     try {
       await updateTempUnit(unit);
     } catch (err) {
-      console.warn('[settings] Failed to persist units:', err);
+      Alert.alert('Temperature Units Could Not Be Saved', err instanceof Error ? err.message : 'Try again.');
     }
   };
 
@@ -276,7 +223,7 @@ export default function SettingsScreen() {
     try {
       await toggleQuietHours(val);
     } catch (err) {
-      console.warn('[settings] Failed to persist quietHours:', err);
+      Alert.alert('Quiet Hours Could Not Be Saved', err instanceof Error ? err.message : 'Try again.');
     }
   };
 
@@ -284,7 +231,7 @@ export default function SettingsScreen() {
     try {
       await updateAlertPref(key, val);
     } catch (err) {
-      console.warn('[settings] Failed to persist alert toggle:', err);
+      Alert.alert('Alert Preference Could Not Be Saved', err instanceof Error ? err.message : 'Try again.');
     }
   };
 
@@ -435,18 +382,20 @@ export default function SettingsScreen() {
 
   // Display Name Update Handler
   const handleSaveDisplayName = async () => {
-    const trimmed = displayNameInput.trim();
-    if (!trimmed) {
-      Alert.alert('Invalid Name', 'Display name cannot be empty.');
+    if (savingName.current) return;
+    const validation = validateDisplayName(displayNameInput);
+    if (!validation.valid || validation.value === undefined) {
+      Alert.alert('Invalid Name', validation.error ?? 'Please enter a valid name.', [
+        { text: 'OK', onPress: () => displayNameField.current?.focus() },
+      ]);
       return;
     }
-    if (trimmed === user?.displayName) {
-      return;
-    }
+    if (validation.value === user?.displayName) return;
 
+    savingName.current = true;
     try {
       setIsUpdatingName(true);
-      await updateUserDisplayName(trimmed);
+      await updateUserDisplayName(validation.value);
       setDisplayNameDraft(null);
       Alert.alert('Profile Saved', 'Your display name has been updated successfully.');
     } catch (err: any) {
@@ -464,6 +413,7 @@ export default function SettingsScreen() {
         Alert.alert('Update Failed', err?.message || 'Failed to update display name.');
       }
     } finally {
+      savingName.current = false;
       setIsUpdatingName(false);
     }
   };
@@ -498,8 +448,11 @@ export default function SettingsScreen() {
   };
 
   const handleClosePasswordModal = () => {
-    if (isUpdatingPassword || isSendingOtp || isVerifyingOtp) return;
+    if (passwordBusy.current) return;
     setPasswordModalOpen(false);
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
     setOtpStep('passwords');
     setOtpCode('');
     setPasswordError(null);
@@ -508,6 +461,7 @@ export default function SettingsScreen() {
 
   // Password Update Handler
   const handleSavePassword = async () => {
+    if (passwordBusy.current) return;
     setPasswordError(null);
     setPasswordSuccess(null);
 
@@ -517,23 +471,24 @@ export default function SettingsScreen() {
       return;
     }
 
-    const trimmedCurrent = currentPassword.trim();
-    if (!trimmedCurrent) {
-      setPasswordError('Current password is required.');
-      return;
-    }
-
-    const parseResult = changePasswordSchema.safeParse({
-      currentPassword: trimmedCurrent,
+    const parseResult = changePasswordWithCurrentSchema.safeParse({
+      currentPassword,
       newPassword,
       confirmPassword,
     });
     if (!parseResult.success) {
-      const firstError = parseResult.error.issues[0]?.message || 'Please check your passwords.';
-      setPasswordError(firstError);
+      const issue = parseResult.error.issues[0];
+      const fields = {
+        currentPassword: currentPasswordField,
+        newPassword: newPasswordField,
+        confirmPassword: confirmPasswordField,
+      };
+      fields[issue?.path[0] as keyof typeof fields]?.current?.focus();
+      setPasswordError(issue?.message || 'Please check your passwords.');
       return;
     }
 
+    passwordBusy.current = true;
     try {
       setIsUpdatingPassword(true);
       const currentUser = auth.currentUser;
@@ -542,7 +497,7 @@ export default function SettingsScreen() {
       }
 
       // 1. Re-authenticate with current password
-      const credential = EmailAuthProvider.credential(currentUser.email, trimmedCurrent);
+      const credential = EmailAuthProvider.credential(currentUser.email, currentPassword);
       await reauthenticateWithCredential(currentUser, credential);
 
       // 2. If OTP worker is configured, request OTP and transition modal to OTP input
@@ -550,6 +505,8 @@ export default function SettingsScreen() {
         setIsSendingOtp(true);
         try {
           await sendEmailOtp();
+          setCurrentPassword('');
+          setConfirmPassword('');
           setOtpStep('otp');
           setOtpCooldown(60);
           setPasswordSuccess('A 6-digit verification code has been sent to your email.');
@@ -577,12 +534,14 @@ export default function SettingsScreen() {
       const friendlyMessage = mapChangePasswordError(err, 'Failed to change password.');
       setPasswordError(friendlyMessage);
     } finally {
+      passwordBusy.current = false;
       setIsUpdatingPassword(false);
     }
   };
 
   const handleResendOtp = async () => {
-    if (otpCooldown > 0 || isSendingOtp) return;
+    if (otpCooldown > 0 || passwordBusy.current) return;
+    passwordBusy.current = true;
     setPasswordError(null);
     setPasswordSuccess(null);
     try {
@@ -597,23 +556,26 @@ export default function SettingsScreen() {
         setOtpCooldown(err.retryAfter);
       }
     } finally {
+      passwordBusy.current = false;
       setIsSendingOtp(false);
     }
   };
 
   const handleVerifyOtpAndChangePassword = async () => {
+    if (passwordBusy.current) return;
     setPasswordError(null);
     setPasswordSuccess(null);
 
-    const trimmedCode = otpCode.trim();
-    if (!trimmedCode || !/^\d{6}$/.test(trimmedCode)) {
+    if (!isValidOtp(otpCode)) {
+      otpField.current?.focus();
       setPasswordError('Please enter a valid 6-digit verification code.');
       return;
     }
 
+    passwordBusy.current = true;
     try {
       setIsVerifyingOtp(true);
-      await verifyEmailOtp(trimmedCode);
+      await verifyEmailOtp(otpCode);
 
       const currentUser = auth.currentUser;
       if (!currentUser) {
@@ -633,6 +595,7 @@ export default function SettingsScreen() {
       const msg = err?.message || 'Verification failed. Please try again.';
       setPasswordError(msg);
     } finally {
+      passwordBusy.current = false;
       setIsVerifyingOtp(false);
     }
   };
@@ -644,8 +607,11 @@ export default function SettingsScreen() {
         text: 'Sign Out',
         style: 'destructive',
         onPress: async () => {
-          await signOut();
-          router.replace('/(auth)/login');
+          try {
+            await signOut();
+          } catch {
+            Alert.alert('Sign Out Failed', 'Please try again.');
+          }
         },
       },
     ]);
@@ -721,7 +687,6 @@ export default function SettingsScreen() {
 
               // 5. Sign out & route to login
               await signOut();
-              router.replace('/(auth)/login');
             } catch (err: any) {
               console.warn('[handleDeleteAccount] Error deleting account:', err);
               if (err?.code === 'auth/requires-recent-login') {
@@ -786,8 +751,9 @@ export default function SettingsScreen() {
       Alert.alert('Calibration could not be saved', error instanceof Error ? error.message : 'Try again.');
       return;
     }
-    updateCalibration(values, device.id);
-    setCalibrationModalOpen(false);
+    if (useSession.getState().user?.uid !== currentUid ||
+        useLiveDevice.getState().activeDeviceId !== device.id) return;
+    setCalibrationScope(null);
     Alert.alert(
       'Calibration Saved',
       `Soil sensor calibrated!\nDry Air Raw: ${values.soilDryRaw}\nWet Water Raw: ${values.soilWetRaw}`
@@ -797,11 +763,19 @@ export default function SettingsScreen() {
   const config = device?.config;
   const status = device?.status;
   const telemetry = device?.telemetry;
+  const missingConfig = device?.isConfigHydrated === false &&
+    (device.configStatus === 'empty' || device.configStatus === 'error');
   const isNameChanged = displayNameInput.trim() !== (user?.displayName || '');
+
+  if (device?.configStatus === 'loading' && !device.isConfigHydrated) {
+    return <SkeletonLoader screen="settings" />;
+  }
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
       <ScrollView
+        automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
+        keyboardShouldPersistTaps="handled"
         contentContainerStyle={[styles.container, { padding: spacing.md }]}
         showsVerticalScrollIndicator={false}
       >
@@ -1042,6 +1016,7 @@ export default function SettingsScreen() {
             <Text style={[styles.inputLabel, { color: colors.textMuted }]}>Display Name</Text>
             <View style={styles.inputWithActionRow}>
               <TextInput
+                ref={displayNameField}
                 value={displayNameInput}
                 onChangeText={setDisplayNameDraft}
                 placeholder="Enter your name"
@@ -1099,7 +1074,7 @@ export default function SettingsScreen() {
         </View>
 
         {/* ── CONDITIONAL HARDWARE PASSPORT OR EMPTY PROMPT ─────────── */}
-        {!device ? (
+        {!device || missingConfig ? (
           <View
             style={[
               styles.card,
@@ -1115,17 +1090,19 @@ export default function SettingsScreen() {
           >
             <Ionicons name="leaf-outline" size={48} color={colors.palette.sage} />
             <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12, marginBottom: 6 }]}>
-              No Active Plant Device
+              {missingConfig ? 'Controller Settings Unavailable' : 'No Active Plant Device'}
             </Text>
             <Text style={[styles.emptyDesc, { color: colors.textMuted, textAlign: 'center', marginBottom: 18 }]}>
-              Pair your LeafLink controller to manage automated watering, soil moisture bounds, and sensor calibration.
+              {missingConfig
+                ? 'Check your connection and retry to load watering and sensor settings.'
+                : 'Pair your LeafLink controller to manage automated watering, soil moisture bounds, and sensor calibration.'}
             </Text>
             <TouchableOpacity
-              onPress={() => router.push('/add-device' as any)}
+              onPress={() => missingConfig ? void useSession.getState().retryBoot() : router.push('/add-device')}
               style={[styles.primaryBtn, { backgroundColor: colors.palette.forest, borderRadius: radii.md }]}
             >
               <Ionicons name="add" size={18} color={colors.palette.white} />
-              <Text style={[styles.primaryBtnText, { color: colors.palette.white }]}>Add Device</Text>
+              <Text style={[styles.primaryBtnText, { color: colors.palette.white }]}>{missingConfig ? 'Retry Connection' : 'Add Device'}</Text>
             </TouchableOpacity>
           </View>
         ) : (
@@ -1178,6 +1155,7 @@ export default function SettingsScreen() {
                     return (
                       <TouchableOpacity
                         key={loc}
+                        disabled={edits.status('location')?.state === 'pending'}
                         activeOpacity={0.8}
                         onPress={() => handleSelectLocation(loc)}
                         style={[
@@ -1207,6 +1185,7 @@ export default function SettingsScreen() {
                     );
                   })}
                 </View>
+                {renderSyncBadge('location')}
               </View>
 
               <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
@@ -1215,55 +1194,44 @@ export default function SettingsScreen() {
               <SliderControl
                 label="Start Watering Below"
                 description="Triggers auto-watering when soil drops below this %"
-                value={thresholdDrafts.moistureMin ?? config!.thresholds.moistureMin}
+                value={edits.draft('moistureMin') ?? config!.thresholds.moistureMin}
                 min={10}
                 max={50}
                 step={5}
                 unit="%"
                 accentColor={colors.palette.warningBorder}
-                onChange={(val) => setThresholdDrafts((p) => ({ ...p, moistureMin: val }))}
-                onSlidingCancel={() => setThresholdDrafts((p) => ({ ...p, moistureMin: undefined }))}
-                onSlidingComplete={async (val) => {
-                  if (!device?.id) return;
-                  const targetId = device.id;
-                  await saveField('moistureMin', targetId, async () => {
-                    await updateDeviceThreshold(targetId, 'moistureMin', val);
-                    updateThresholds({ moistureMin: val });
-                    setThresholdDrafts((p) => ({ ...p, moistureMin: undefined }));
-                  });
-                }}
+                key={`${edits.scope}:moistureMin`}
+                disabled={edits.status('moistureMin')?.state === 'pending'}
+                feedback={renderSyncBadge('moistureMin')}
+                onChange={(val) => edits.setDraft('moistureMin', val)}
+                onSlidingCancel={() => edits.setDraft('moistureMin')}
+                onSlidingComplete={(val) => void edits.save('moistureMin', (id) => updateDeviceThreshold(id, 'moistureMin', val))}
               />
 
               <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
-              {/* Stop Watering At Slider */}
               <SliderControl
-                label="Stop Watering At"
-                description="Target soil saturation limit for irrigation shut-off"
-                value={thresholdDrafts.moistureMax ?? config!.thresholds.moistureMax}
+                label="Upper Moisture Threshold"
+                description="Upper end of the target soil moisture range"
+                value={edits.draft('moistureMax') ?? config!.thresholds.moistureMax}
                 min={50}
                 max={90}
                 step={5}
                 unit="%"
                 accentColor={colors.palette.forest}
-                onChange={(val) => setThresholdDrafts((p) => ({ ...p, moistureMax: val }))}
-                onSlidingCancel={() => setThresholdDrafts((p) => ({ ...p, moistureMax: undefined }))}
-                onSlidingComplete={async (val) => {
-                  if (!device?.id) return;
-                  const targetId = device.id;
-                  await saveField('moistureMax', targetId, async () => {
-                    await updateDeviceThreshold(targetId, 'moistureMax', val);
-                    updateThresholds({ moistureMax: val });
-                    setThresholdDrafts((p) => ({ ...p, moistureMax: undefined }));
-                  });
-                }}
+                key={`${edits.scope}:moistureMax`}
+                disabled={edits.status('moistureMax')?.state === 'pending'}
+                feedback={renderSyncBadge('moistureMax')}
+                onChange={(val) => edits.setDraft('moistureMax', val)}
+                onSlidingCancel={() => edits.setDraft('moistureMax')}
+                onSlidingComplete={(val) => void edits.save('moistureMax', (id) => updateDeviceThreshold(id, 'moistureMax', val))}
               />
 
               <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
 
               {/* Max Temperature Limit Slider - Keeps position and step in Celsius */}
               {(() => {
-                const currentTempC = thresholdDrafts.tempMax ?? config!.thresholds.tempMax;
+                const currentTempC = edits.draft('tempMax') ?? config!.thresholds.tempMax;
                 const tempBadgeUnit = tempUnit === 'F' ? `°C (${formatTemperature(currentTempC, 'F')})` : '°C';
                 return (
                   <SliderControl
@@ -1279,17 +1247,12 @@ export default function SettingsScreen() {
                     step={1}
                     unit={tempBadgeUnit}
                     accentColor={colors.palette.warningBorder}
-                    onChange={(val) => setThresholdDrafts((p) => ({ ...p, tempMax: val }))}
-                    onSlidingCancel={() => setThresholdDrafts((p) => ({ ...p, tempMax: undefined }))}
-                    onSlidingComplete={async (val) => {
-                      if (!device?.id) return;
-                      const targetId = device.id;
-                      await saveField('tempMax', targetId, async () => {
-                        await updateDeviceThreshold(targetId, 'tempMax', val);
-                        updateThresholds({ tempMax: val });
-                        setThresholdDrafts((p) => ({ ...p, tempMax: undefined }));
-                      });
-                    }}
+                    key={`${edits.scope}:tempMax`}
+                    disabled={edits.status('tempMax')?.state === 'pending'}
+                    feedback={renderSyncBadge('tempMax')}
+                    onChange={(val) => edits.setDraft('tempMax', val)}
+                    onSlidingCancel={() => edits.setDraft('tempMax')}
+                    onSlidingComplete={(val) => void edits.save('tempMax', (id) => updateDeviceThreshold(id, 'tempMax', val))}
                   />
                 );
               })()}
@@ -1300,23 +1263,18 @@ export default function SettingsScreen() {
               <SliderControl
                 label="Max Humidity Limit"
                 description="Coastal guard delays watering when ambient air humidity is high"
-                value={thresholdDrafts.humidityMax ?? config!.thresholds.humidityMax}
+                value={edits.draft('humidityMax') ?? config!.thresholds.humidityMax}
                 min={40}
                 max={95}
                 step={5}
                 unit="%"
                 accentColor={colors.palette.forest}
-                onChange={(val) => setThresholdDrafts((p) => ({ ...p, humidityMax: val }))}
-                onSlidingCancel={() => setThresholdDrafts((p) => ({ ...p, humidityMax: undefined }))}
-                onSlidingComplete={async (val) => {
-                  if (!device?.id) return;
-                  const targetId = device.id;
-                  await saveField('humidityMax', targetId, async () => {
-                    await updateDeviceThreshold(targetId, 'humidityMax', val);
-                    updateThresholds({ humidityMax: val });
-                    setThresholdDrafts((p) => ({ ...p, humidityMax: undefined }));
-                  });
-                }}
+                key={`${edits.scope}:humidityMax`}
+                disabled={edits.status('humidityMax')?.state === 'pending'}
+                feedback={renderSyncBadge('humidityMax')}
+                onChange={(val) => edits.setDraft('humidityMax', val)}
+                onSlidingCancel={() => edits.setDraft('humidityMax')}
+                onSlidingComplete={(val) => void edits.save('humidityMax', (id) => updateDeviceThreshold(id, 'humidityMax', val))}
               />
 
               <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
@@ -1325,23 +1283,18 @@ export default function SettingsScreen() {
               <SliderControl
                 label="Watering Duration"
                 description="Run-time per automatic irrigation cycle (max 15s)"
-                value={thresholdDrafts.pumpDurationSec ?? config!.thresholds.pumpDurationSec}
+                value={edits.draft('pumpDurationSec') ?? config!.thresholds.pumpDurationSec}
                 min={1}
                 max={15}
                 step={1}
                 unit="s"
                 accentColor={colors.palette.sage}
-                onChange={(val) => setThresholdDrafts((p) => ({ ...p, pumpDurationSec: val }))}
-                onSlidingCancel={() => setThresholdDrafts((p) => ({ ...p, pumpDurationSec: undefined }))}
-                onSlidingComplete={async (val) => {
-                  if (!device?.id) return;
-                  const targetId = device.id;
-                  await saveField('pumpDurationSec', targetId, async () => {
-                    await updateDevicePumpDuration(targetId, val);
-                    updateThresholds({ pumpDurationSec: val });
-                    setThresholdDrafts((p) => ({ ...p, pumpDurationSec: undefined }));
-                  });
-                }}
+                key={`${edits.scope}:pumpDurationSec`}
+                disabled={edits.status('pumpDurationSec')?.state === 'pending'}
+                feedback={renderSyncBadge('pumpDurationSec')}
+                onChange={(val) => edits.setDraft('pumpDurationSec', val)}
+                onSlidingCancel={() => edits.setDraft('pumpDurationSec')}
+                onSlidingComplete={(val) => void edits.save('pumpDurationSec', (id) => updateDevicePumpDuration(id, val))}
               />
             </View>
 
@@ -1377,7 +1330,7 @@ export default function SettingsScreen() {
               </Text>
             </View>
             <TouchableOpacity
-              onPress={() => setCalibrationModalOpen(true)}
+              onPress={() => setCalibrationScope(edits.scope)}
               style={[
                 styles.actionBtnOutline,
                 { borderColor: colors.palette.forest, borderRadius: radii.sm },
@@ -1406,20 +1359,10 @@ export default function SettingsScreen() {
             </View>
             <Switch
               value={config.sensors?.lightMode === 'digital' || config.sensors?.lightMode === 'analog'}
-              onValueChange={async (val) => {
-                if (!device?.id) return;
-                const targetId = device.id;
-                const nextMode = val ? 'digital' : 'none';
-                await saveField('lightMode', targetId, async () => {
-                  await updateDeviceLightMode(targetId, nextMode);
-                  updateConfig({
-                    sensors: {
-                      ...config.sensors,
-                      lightMode: nextMode,
-                    },
-                  }, targetId);
-                });
-              }}
+              disabled={edits.status('lightMode')?.state === 'pending'}
+              onValueChange={(val) => void edits.save(
+                'lightMode', (id) => updateDeviceLightMode(id, val ? 'digital' : 'none')
+              )}
               trackColor={{ false: colors.palette.mist, true: colors.palette.forest }}
               thumbColor={colors.palette.white}
             />
@@ -1431,31 +1374,18 @@ export default function SettingsScreen() {
           <SliderControl
             label="Bottle Size"
             description="Volume of water bottle attached to the plant node"
-            value={activeBottleCapacity}
+            value={edits.draft('bottleCapacity') ?? config.bottle.capacityMl}
             min={250}
             max={2000}
             step={50}
             unit=" ml"
             accentColor={colors.palette.forest}
-            onChange={(val) => setBottleCapacityDraft(val)}
-            onSlidingCancel={() => setBottleCapacityDraft(null)}
-            onSlidingComplete={async (val) => {
-              if (!device?.id) return;
-              const targetId = device.id;
-              await saveField('bottleCapacity', targetId, async () => {
-                const res = await updateBottleCapacityWithTransaction(targetId, val);
-                updateConfig({
-                  bottleCapacityMl: res.capacityMl,
-                  remainingMl: res.remainingMl,
-                  bottle: {
-                    ...config!.bottle,
-                    capacityMl: res.capacityMl,
-                    remainingMl: res.remainingMl,
-                  },
-                }, targetId);
-                setBottleCapacityDraft(null);
-              });
-            }}
+            key={`${edits.scope}:bottleCapacity`}
+            disabled={edits.status('bottleCapacity')?.state === 'pending'}
+            feedback={renderSyncBadge('bottleCapacity')}
+            onChange={(val) => edits.setDraft('bottleCapacity', val)}
+            onSlidingCancel={() => edits.setDraft('bottleCapacity')}
+            onSlidingComplete={(val) => void edits.save('bottleCapacity', (id) => updateBottleCapacityWithTransaction(id, val))}
           />
 
           <View style={[styles.cardDivider, { backgroundColor: colors.palette.mist }]} />
@@ -1464,28 +1394,18 @@ export default function SettingsScreen() {
           <SliderControl
             label="Pump Speed"
             description="Adjusts the water-use estimate while the relay switches the pump on and off"
-            value={activePumpFlow}
+            value={edits.draft('flowMlPerSec') ?? config.bottle.flowMlPerSec}
             min={5}
             max={30}
             step={1}
             unit=" ml/s"
             accentColor={colors.palette.sage}
-            onChange={(val) => setPumpFlowDraft(val)}
-            onSlidingCancel={() => setPumpFlowDraft(null)}
-            onSlidingComplete={async (val) => {
-              if (!device?.id) return;
-              const targetId = device.id;
-              await saveField('flowMlPerSec', targetId, async () => {
-                await updateDeviceFlowRate(targetId, val);
-                updateConfig({
-                  bottle: {
-                    ...config!.bottle,
-                    flowMlPerSec: val,
-                  },
-                }, targetId);
-                setPumpFlowDraft(null);
-              });
-            }}
+            key={`${edits.scope}:flowMlPerSec`}
+            disabled={edits.status('flowMlPerSec')?.state === 'pending'}
+            feedback={renderSyncBadge('flowMlPerSec')}
+            onChange={(val) => edits.setDraft('flowMlPerSec', val)}
+            onSlidingCancel={() => edits.setDraft('flowMlPerSec')}
+            onSlidingComplete={(val) => void edits.save('flowMlPerSec', (id) => updateDeviceFlowRate(id, val))}
           />
 
           {/* Shortcut refill button */}
@@ -1663,7 +1583,7 @@ export default function SettingsScreen() {
                 )}
               </View>
 
-          {device && (
+          {device && !missingConfig && (
             <>
               {/* ACCORDION 2: Device Information & Network */}
           <View
@@ -2091,13 +2011,18 @@ export default function SettingsScreen() {
       </ScrollView>
 
       {/* ── CHANGE PASSWORD MODAL ────────────────────────────────────── */}
-      <Modal
-        visible={passwordModalOpen}
+      {passwordModalOpen && <Modal
+        visible
         animationType="slide"
         transparent
         onRequestClose={handleClosePasswordModal}
       >
-        <View style={styles.modalBackdrop}>
+        <ScrollView
+          style={styles.passwordModalScroll}
+          contentContainerStyle={styles.passwordModalContent}
+          automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
+          keyboardShouldPersistTaps="handled"
+        >
           <View
             style={[
               styles.passwordModalSheet,
@@ -2190,7 +2115,9 @@ export default function SettingsScreen() {
                 <Text style={[styles.inputLabel, { color: colors.textMuted }]}>
                   Current Password
                 </Text>
-                <TextInput
+                <PasswordInput
+                  ref={currentPasswordField}
+                  accessibilityLabel="Current password"
                   value={currentPassword}
                   onChangeText={(val) => {
                     setCurrentPassword(val);
@@ -2199,18 +2126,17 @@ export default function SettingsScreen() {
                   }}
                   placeholder="Enter current password"
                   placeholderTextColor={colors.palette.sage}
-                  secureTextEntry
                   autoCapitalize="none"
                   autoCorrect={false}
                   autoComplete="current-password"
                   textContentType="password"
                   editable={!isUpdatingPassword && !isSendingOtp}
-                  style={[
+                  style={{ color: colors.text, paddingHorizontal: 12 }}
+                  containerStyle={[
                     styles.modalTextInput,
                     {
                       backgroundColor: colors.palette.mist,
                       borderColor: colors.border,
-                      color: colors.text,
                       borderRadius: radii.sm,
                     },
                   ]}
@@ -2219,7 +2145,9 @@ export default function SettingsScreen() {
                 <Text style={[styles.inputLabel, { color: colors.textMuted, marginTop: 12 }]}>
                   New Password
                 </Text>
-                <TextInput
+                <PasswordInput
+                  ref={newPasswordField}
+                  accessibilityLabel="New password"
                   value={newPassword}
                   onChangeText={(val) => {
                     setNewPassword(val);
@@ -2228,18 +2156,17 @@ export default function SettingsScreen() {
                   }}
                   placeholder="Enter new password (min. 6 characters)"
                   placeholderTextColor={colors.palette.sage}
-                  secureTextEntry
                   autoCapitalize="none"
                   autoCorrect={false}
                   autoComplete="new-password"
                   textContentType="newPassword"
                   editable={!isUpdatingPassword && !isSendingOtp}
-                  style={[
+                  style={{ color: colors.text, paddingHorizontal: 12 }}
+                  containerStyle={[
                     styles.modalTextInput,
                     {
                       backgroundColor: colors.palette.mist,
                       borderColor: colors.border,
-                      color: colors.text,
                       borderRadius: radii.sm,
                     },
                   ]}
@@ -2248,7 +2175,9 @@ export default function SettingsScreen() {
                 <Text style={[styles.inputLabel, { color: colors.textMuted, marginTop: 12 }]}>
                   Confirm New Password
                 </Text>
-                <TextInput
+                <PasswordInput
+                  ref={confirmPasswordField}
+                  accessibilityLabel="Confirm new password"
                   value={confirmPassword}
                   onChangeText={(val) => {
                     setConfirmPassword(val);
@@ -2257,18 +2186,17 @@ export default function SettingsScreen() {
                   }}
                   placeholder="Re-type new password"
                   placeholderTextColor={colors.palette.sage}
-                  secureTextEntry
                   autoCapitalize="none"
                   autoCorrect={false}
                   autoComplete="new-password"
                   textContentType="newPassword"
                   editable={!isUpdatingPassword && !isSendingOtp}
-                  style={[
+                  style={{ color: colors.text, paddingHorizontal: 12 }}
+                  containerStyle={[
                     styles.modalTextInput,
                     {
                       backgroundColor: colors.palette.mist,
                       borderColor: colors.border,
-                      color: colors.text,
                       borderRadius: radii.sm,
                     },
                   ]}
@@ -2297,16 +2225,16 @@ export default function SettingsScreen() {
                   6-Digit Verification Code
                 </Text>
                 <TextInput
+                  ref={otpField}
                   value={otpCode}
                   onChangeText={(val) => {
-                    setOtpCode(val.replace(/\D/g, '').slice(0, 6));
+                    setOtpCode(val);
                     if (passwordError) setPasswordError(null);
                     if (passwordSuccess) setPasswordSuccess(null);
                   }}
                   placeholder="000000"
                   placeholderTextColor={colors.palette.sage}
                   keyboardType="number-pad"
-                  maxLength={6}
                   textContentType="oneTimeCode"
                   autoFocus
                   editable={!isVerifyingOtp}
@@ -2365,12 +2293,12 @@ export default function SettingsScreen() {
 
                 <TouchableOpacity
                   onPress={handleVerifyOtpAndChangePassword}
-                  disabled={isVerifyingOtp || otpCode.trim().length !== 6}
+                  disabled={isVerifyingOtp || isSendingOtp}
                   style={[
                     styles.savePasswordBtn,
                     {
                       backgroundColor:
-                        otpCode.trim().length === 6 && !isVerifyingOtp
+                        !isVerifyingOtp && !isSendingOtp
                           ? colors.palette.forest
                           : colors.palette.sage,
                       borderRadius: radii.md,
@@ -2388,15 +2316,15 @@ export default function SettingsScreen() {
               </View>
             )}
           </View>
-        </View>
-      </Modal>
+        </ScrollView>
+      </Modal>}
 
       {/* ── CALIBRATION WIZARD MODAL ─────────────────────────────────── */}
       <Modal
-        visible={calibrationModalOpen}
+        visible={calibrationScope === edits.scope}
         animationType="slide"
         transparent
-        onRequestClose={() => setCalibrationModalOpen(false)}
+        onRequestClose={() => setCalibrationScope(null)}
       >
         <View style={styles.modalBackdrop}>
           <View
@@ -2413,7 +2341,7 @@ export default function SettingsScreen() {
                 Soil Sensor Calibration
               </Text>
               <TouchableOpacity
-                onPress={() => setCalibrationModalOpen(false)}
+                onPress={() => setCalibrationScope(null)}
                 style={[styles.closeModalBtn, { backgroundColor: colors.palette.mist }]}
               >
                 <Ionicons name="close" size={20} color={colors.text} />
@@ -2425,7 +2353,7 @@ export default function SettingsScreen() {
                 deviceId={device.id}
                 initialValues={config.calibration}
                 onCalibrationComplete={handleCalibrationComplete}
-                onSkip={() => setCalibrationModalOpen(false)}
+                onSkip={() => setCalibrationScope(null)}
               />
             )}
           </View>
@@ -2934,6 +2862,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  passwordModalScroll: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.45)' },
+  passwordModalContent: { flexGrow: 1, justifyContent: 'flex-end' },
   passwordModalSheet: {
     padding: 20,
     paddingBottom: 36,

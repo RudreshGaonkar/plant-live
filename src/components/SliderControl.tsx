@@ -1,7 +1,7 @@
 /* eslint-disable react-hooks/refs */
 import { useAppTheme } from '@/theme';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useEffect, useRef } from 'react';
+import { type ReactNode, useEffect, useRef } from 'react';
 import {
   GestureResponderEvent,
   PanResponder,
@@ -23,6 +23,8 @@ export interface SliderControlProps {
   onSlidingCancel?: () => void;
   accentColor?: string;
   description?: string;
+  disabled?: boolean;
+  feedback?: ReactNode;
 }
 
 export function SliderControl({
@@ -37,6 +39,8 @@ export function SliderControl({
   onSlidingCancel,
   accentColor,
   description,
+  disabled = false,
+  feedback,
 }: SliderControlProps) {
   const { colors } = useAppTheme();
   const trackWidthRef = useRef<number>(200);
@@ -49,15 +53,15 @@ export function SliderControl({
     return Math.max(min, Math.min(max, stepped));
   };
 
-  const propsRef = useRef({ min, max, step, value, onChange, onSlidingComplete, onSlidingCancel });
+  const propsRef = useRef({ min, max, step, value, onChange, onSlidingComplete, onSlidingCancel, disabled });
   useEffect(() => {
-    propsRef.current = { min, max, step, value, onChange, onSlidingComplete, onSlidingCancel };
+    propsRef.current = { min, max, step, value, onChange, onSlidingComplete, onSlidingCancel, disabled };
   });
 
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponder: () => !propsRef.current.disabled,
+      onMoveShouldSetPanResponder: () => !propsRef.current.disabled,
       onPanResponderGrant: (evt: GestureResponderEvent) => {
         const currentProps = propsRef.current;
         startValueRef.current = currentProps.value;
@@ -137,6 +141,7 @@ export function SliderControl({
       {/* Slider Track with Minus / Plus Steppers */}
       <View style={styles.sliderControlRow}>
         <TouchableOpacity
+          disabled={disabled}
           onPress={handleDecrement}
           activeOpacity={0.7}
           style={[
@@ -184,6 +189,7 @@ export function SliderControl({
         </View>
 
         <TouchableOpacity
+          disabled={disabled}
           onPress={handleIncrement}
           activeOpacity={0.7}
           style={[
@@ -194,6 +200,7 @@ export function SliderControl({
           <Ionicons name="add" size={16} color={colors.text} />
         </TouchableOpacity>
       </View>
+      {feedback}
     </View>
   );
 }

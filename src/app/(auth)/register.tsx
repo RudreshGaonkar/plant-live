@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { PasswordInput } from '@/components/PasswordInput';
+import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -6,112 +7,29 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
-  KeyboardAvoidingView,
   Platform,
   ScrollView,
   Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useForm, Controller, FieldErrors } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { createUserWithEmailAndPassword, updateProfile, sendEmailVerification } from 'firebase/auth';
-import { ref, get, set, serverTimestamp } from 'firebase/database';
-import { auth, db } from '@/services/firebase';
+import { useSession } from '@/store/useSession';
 import { useAppTheme } from '@/theme';
 import { LegalPoliciesModal, LegalPolicyType } from '@/components';
 import { registerSchema, RegisterFormData, mapAuthError } from '@/utils/authValidation';
 
-export const completeUserSetup = async (uid: string, name: string, email: string) => {
-  const userRef = ref(db, `users/${uid}`);
-  let existingProfile: Record<string, unknown> = {};
-  let existingPrefs: Record<string, unknown> = {};
-
-  try {
-    const snap = await get(userRef);
-    if (snap.exists()) {
-      const val = snap.val() || {};
-      if (val.profile && typeof val.profile === 'object') {
-        existingProfile = val.profile;
-      }
-      if (val.prefs && typeof val.prefs === 'object') {
-        existingPrefs = val.prefs;
-      }
-    }
-  } catch {
-    // Continue even if pre-fetch fails
-  }
-
-  await set(userRef, {
-    profile: {
-      name,
-      displayName: name,
-      email,
-      createdAt: serverTimestamp(),
-      ...existingProfile,
-    },
-    prefs: {
-      units: 'C',
-      quietHours: { enabled: true, start: '22:00', end: '07:00' },
-      alerts: {
-        bottle: true,
-        dry: true,
-        wet: true,
-        heat: true,
-        offline: true,
-        watered: true,
-      },
-      ...existingPrefs,
-    },
-  });
-};
-
-export const registerUserWithEmail = async (
-  data: RegisterFormData,
-  deps?: {
-    setupUser?: typeof completeUserSetup;
-  }
-) => {
-  const trimmedEmail = data.email.trim();
-  const trimmedName = data.name.trim();
-
-  // Create new Auth account
-  const userCredential = await createUserWithEmailAndPassword(
-    auth,
-    trimmedEmail,
-    data.password
-  );
-  const currentUser = userCredential.user;
-
-  // Send email verification with non-fatal error handling
-  try {
-    await sendEmailVerification(currentUser);
-  } catch (sendErr) {
-    console.warn('[Register] Failed to send verification email (non-fatal):', sendErr);
-  }
-
-  await updateProfile(currentUser, { displayName: trimmedName });
-  const setupFn = deps?.setupUser || completeUserSetup;
-  await setupFn(currentUser.uid, trimmedName, trimmedEmail);
-
-  return currentUser;
-};
-
 export default function RegisterScreen() {
   const { colors, radii } = useAppTheme();
   const [authError, setAuthError] = useState<string | null>(null);
+  const submitting = useRef(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isProvisioningRetry, setIsProvisioningRetry] = useState(false);
   const [policyModal, setPolicyModal] = useState<{ visible: boolean; type: LegalPolicyType }>({
     visible: false,
     type: 'terms',
   });
-
-  useEffect(() => {
-    SplashScreen.hideAsync().catch(() => { });
-  }, []);
 
   const nameInputRef = useRef<TextInput>(null);
   const emailInputRef = useRef<TextInput>(null);
@@ -134,75 +52,44 @@ export default function RegisterScreen() {
   });
 
   const onSubmit = async (data: RegisterFormData) => {
+    if (submitting.current) return;
+    submitting.current = true;
     setAuthError(null);
     setIsSubmitting(true);
-    const trimmedEmail = data.email.trim();
-    const trimmedName = data.name.trim();
-
     try {
-      let currentUser = auth.currentUser;
-
-      // If user account is already created (e.g. earlier attempt reached Auth but failed RTDB setup)
-      if (currentUser && currentUser.email?.toLowerCase() === trimmedEmail.toLowerCase()) {
-        // Skip user creation and resume setup
-        await updateProfile(currentUser, { displayName: trimmedName });
-        await completeUserSetup(currentUser.uid, trimmedName, trimmedEmail);
-        setIsProvisioningRetry(false);
-        router.replace('/(tabs)/home');
-        return;
-      }
-
-      try {
-        await registerUserWithEmail(data);
-        setIsProvisioningRetry(false);
-        router.replace('/(tabs)/home');
-      } catch (innerErr: unknown) {
-        if (
-          auth.currentUser &&
-          auth.currentUser.email?.toLowerCase() === trimmedEmail.toLowerCase()
-        ) {
-          console.warn('[Register] Account created but setup incomplete:', innerErr);
-          setIsProvisioningRetry(true);
-          setAuthError(
-            'Your account was created, but completing profile setup failed. Please tap "Complete Setup" to finish.'
-          );
-          return;
-        }
-        throw innerErr;
-      }
+      await useSession.getState().registerUser(data);
     } catch (err: unknown) {
       const errorMsg = mapAuthError(err, 'Registration failed. Please try again.');
       setAuthError(errorMsg);
     } finally {
+      submitting.current = false;
       setIsSubmitting(false);
     }
   };
 
   const handlePressSubmit = () => {
-  handleSubmit(
-    onSubmit,
-    (formErrors: FieldErrors<RegisterFormData>) => {
-      if (formErrors.name) {
-        nameInputRef.current?.focus();
-      } else if (formErrors.email) {
-        emailInputRef.current?.focus();
-      } else if (formErrors.password) {
-        passwordInputRef.current?.focus();
-      } else if (formErrors.confirmPassword) {
-        confirmPasswordInputRef.current?.focus();
+    handleSubmit(
+      onSubmit,
+      (formErrors: FieldErrors<RegisterFormData>) => {
+        if (formErrors.name) {
+          nameInputRef.current?.focus();
+        } else if (formErrors.email) {
+          emailInputRef.current?.focus();
+        } else if (formErrors.password) {
+          passwordInputRef.current?.focus();
+        } else if (formErrors.confirmPassword) {
+          confirmPasswordInputRef.current?.focus();
+        }
       }
-    }
-  )();
-};
+    )();
+  };
 
-return (
-  <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]}>
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.keyboardView}
-    >
+  return (
+    <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]}>
       <ScrollView
+        style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
+        automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
         keyboardShouldPersistTaps="handled"
       >
         {/* Header */}
@@ -392,12 +279,12 @@ return (
                     color={colors.textMuted}
                     style={styles.inputIcon}
                   />
-                  <TextInput
+                  <PasswordInput
                     ref={passwordInputRef}
+                    accessibilityLabel="Password"
                     style={[styles.input, { color: colors.text }]}
                     placeholder="••••••••"
                     placeholderTextColor={colors.palette.sage}
-                    secureTextEntry
                     autoCapitalize="none"
                     autoCorrect={false}
                     autoComplete="new-password"
@@ -443,12 +330,12 @@ return (
                     color={colors.textMuted}
                     style={styles.inputIcon}
                   />
-                  <TextInput
+                  <PasswordInput
                     ref={confirmPasswordInputRef}
+                    accessibilityLabel="Confirm password"
                     style={[styles.input, { color: colors.text }]}
                     placeholder="••••••••"
                     placeholderTextColor={colors.palette.sage}
-                    secureTextEntry
                     autoCapitalize="none"
                     autoCorrect={false}
                     autoComplete="new-password"
@@ -485,7 +372,7 @@ return (
             ) : (
               <>
                 <Text style={[styles.primaryButtonText, { color: colors.palette.white }]}>
-                  {isProvisioningRetry ? 'Complete Setup' : 'Create Account'}
+                  Create Account
                 </Text>
                 <Ionicons name="arrow-forward" size={18} color={colors.palette.white} />
               </>
@@ -529,24 +416,21 @@ return (
           </View>
         </View>
       </ScrollView>
-    </KeyboardAvoidingView>
 
-    <LegalPoliciesModal
-      visible={policyModal.visible}
-      type={policyModal.type}
-      onClose={() => setPolicyModal((prev) => ({ ...prev, visible: false }))}
-    />
-  </SafeAreaView>
-);
+      <LegalPoliciesModal
+        visible={policyModal.visible}
+        type={policyModal.type}
+        onClose={() => setPolicyModal((prev) => ({ ...prev, visible: false }))}
+      />
+    </SafeAreaView>
+  );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  keyboardView: {
-    flex: 1,
-  },
+  scrollView: { flex: 1 },
   scrollContent: {
     padding: 24,
     paddingBottom: 40,

@@ -590,10 +590,10 @@ export default function ControlScreen() {
             <Ionicons name="leaf-outline" size={16} color={colors.palette.forest} />
             <View style={{ flex: 1 }}>
               <Text style={[styles.guardTitle, { color: colors.text }]}>
-                Wet Soil Guard (Live: {telemetry ? `${telemetry.soilMoisture}%` : '--'})
+                Soil Moisture (Live: {telemetry ? `${telemetry.soilMoisture}%` : '--'})
               </Text>
               <Text style={[styles.guardDesc, { color: colors.textMuted }]}>
-                Prompts for confirmation before watering if soil is already wet (&gt;{config.thresholds.moistureMax}%).
+                Manual watering runs for the selected duration at any soil moisture level.
               </Text>
             </View>
           </View>

@@ -1,3 +1,4 @@
+import { SkeletonLoader } from '@/components/SkeletonLoader';
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
@@ -28,6 +29,9 @@ import { convertTemperature, formatTemperature, getTemperatureUnitLabel } from '
 const toDisplayTemp = (tempC: number, unit: 'C' | 'F') => {
   return convertTemperature(tempC, unit);
 };
+
+const EMPTY_HISTORY: DeviceHistoryRecord[] = [];
+const EMPTY_LOGS: WaterLog[] = [];
 
 /**
  * Builds continuous historical telemetry data points strictly from real RTDB samples.
@@ -256,40 +260,54 @@ export default function HistoryScreen() {
   const insets = useSafeAreaInsets();
   const { colors, radii, spacing } = useAppTheme();
   const device = useLiveDevice((s) => s.devices[s.activeDeviceId]);
-  const waterLogs = useLiveDevice((s) => s.waterLogs);
+  const uid = useSession((state) => state.user?.uid);
+  const deviceId = device?.id;
   const tempUnit = useSession((s) => s.prefs.units);
 
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('24h');
   const [activeMetric, setActiveMetric] = useState<ChartMetricKey>('moisture');
   const [scrubFraction, setScrubFraction] = useState<number>(1.0); // 1.0 = newest
-  const [realHistory, setRealHistory] = useState<DeviceHistoryRecord[]>([]);
-  const [prevDeviceId, setPrevDeviceId] = useState<string | undefined>(device?.id);
+  const scope = JSON.stringify([uid, deviceId]);
+  const [historyByScope, setHistoryByScope] = useState<Record<string, {
+    status: 'ready' | 'empty' | 'error';
+    records: DeviceHistoryRecord[];
+  }>>({});
+  const [logsByScope, setLogsByScope] = useState<Record<string, WaterLog[]>>({});
+  const history = historyByScope[scope];
+  const realHistory = history?.records ?? EMPTY_HISTORY;
+  const waterLogs = logsByScope[scope] ?? EMPTY_LOGS;
 
-  // Stale chart samples are cleared immediately on device switch
-  if (device?.id !== prevDeviceId) {
-    setPrevDeviceId(device?.id);
-    setRealHistory([]);
-  }
-
-  // Persistent live listener to RTDB history for the active device
   useEffect(() => {
-    if (!device?.id) return;
-    const unsubscribe = listenToDeviceHistory(device.id, (records) => {
-      setRealHistory(records);
+    if (!uid || !deviceId) return;
+    let active = true;
+    const isCurrent = () => active && useSession.getState().user?.uid === uid &&
+      useLiveDevice.getState().activeDeviceId === deviceId;
+    const markError = () => {
+      if (isCurrent()) setHistoryByScope((previous) => ({
+        ...previous, [scope]: { status: 'error', records: previous[scope]?.records ?? EMPTY_HISTORY },
+      }));
+    };
+    const deadline = setTimeout(markError, 8000);
+    const stopHistory = listenToDeviceHistory(deviceId, (records) => {
+      if (!isCurrent()) return;
+      clearTimeout(deadline);
+      setHistoryByScope((previous) => ({
+        ...previous, [scope]: { status: records.length ? 'ready' : 'empty', records },
+      }));
+    }, 50, () => {
+      clearTimeout(deadline);
+      markError();
+    });
+    const stopLogs = listenToWaterLogs(deviceId, (logs) => {
+      if (isCurrent()) setLogsByScope((previous) => ({ ...previous, [scope]: logs }));
     });
     return () => {
-      unsubscribe();
+      active = false;
+      clearTimeout(deadline);
+      stopHistory();
+      stopLogs();
     };
-  }, [device?.id]);
-
-  // Subscribe to waterLogs independently when opening History directly
-  useEffect(() => {
-    if (!device?.id) return;
-    const unsubscribe = listenToWaterLogs(device.id, (logs) => {
-      useLiveDevice.setState({ waterLogs: logs });
-    });
-    return () => unsubscribe();
-  }, [device?.id]);
+  }, [uid, deviceId, scope]);
 
   // Available metrics based on sensors config — hoisted ABOVE early return to satisfy Rules of Hooks
   const availableMetrics: ChartMetricKey[] = useMemo(() => {
@@ -372,6 +390,10 @@ export default function HistoryScreen() {
     );
   }
 
+  if (!history || (device.configStatus === 'loading' && !device.isConfigHydrated)) {
+    return <SkeletonLoader screen="history" />;
+  }
+
   // Unit label
   const unit =
     activeMetric === 'moisture'
@@ -409,6 +431,10 @@ export default function HistoryScreen() {
           onScrub={setScrubFraction}
           cursorLabel={cursorLabel}
         />
+
+        {history.status === 'error' && (
+          <Text style={{ color: colors.textMuted }}>History is temporarily unavailable.</Text>
+        )}
 
         {/* ── Telemetry Chart Area ─────────────────────────────── */}
         <TelemetryChart

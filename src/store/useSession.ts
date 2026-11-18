@@ -1,5 +1,7 @@
 import { triggerAlertSessionClear } from '@/store/alertSessionBus';
 import { auth, db } from '@/services/firebase';
+import { ensureUserSetup, hasPendingRegistrationSetup, registerUserWithEmail, sendVerificationEmail, type VerificationEmailStatus } from '@/services/auth';
+import type { RegisterFormData } from '@/utils/authValidation';
 import { useLiveDevice } from '@/store/useLiveDevice';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -11,10 +13,19 @@ import {
   EmailAuthProvider,
   reauthenticateWithCredential,
   sendPasswordResetEmail as fbSendPasswordResetEmail,
-  sendEmailVerification as fbSendEmailVerification,
 } from 'firebase/auth';
 import { get as fbGet, ref, update } from 'firebase/database';
 import { create } from 'zustand';
+
+export type SessionRoutingState = 'resolving' | 'signed_out' | 'verification_pending' | 'verified';
+
+export function selectSessionRoutingState(
+  state: Pick<SessionState, 'isAuthReady' | 'hasResolvedAuth' | 'user' | 'isEmailVerified'>
+): SessionRoutingState {
+  if (!state.isAuthReady || !state.hasResolvedAuth) return 'resolving';
+  if (!state.user) return 'signed_out';
+  return state.isEmailVerified ? 'verified' : 'verification_pending';
+}
 
 export type PairingStatus = 'pending' | 'paired' | 'unpaired' | 'cached' | 'unavailable';
 
@@ -72,6 +83,8 @@ interface SessionState {
   activeDeviceId: string;
   prefs: UserPrefs;
   profileSyncError: string | null;
+  verificationEmailDelivery: { uid: string; status: VerificationEmailStatus } | null;
+  registerUser: (data: RegisterFormData) => Promise<User>;
   setUser: (user: UserProfile | null) => void;
   setPrefs: (partial: Partial<UserPrefs>) => void;
   updateTempUnit: (unit: 'C' | 'F') => Promise<void>;
@@ -86,6 +99,7 @@ interface SessionState {
   sendPasswordReset: (email: string) => Promise<void>;
   resendVerificationEmail: () => Promise<void>;
   refreshEmailVerification: () => Promise<boolean>;
+  retryRegistrationSetup: () => Promise<void>;
   setActiveDeviceId: (deviceId: string) => void;
   signOut: () => Promise<void>;
   initializeAuthListener: () => () => void;
@@ -93,154 +107,159 @@ interface SessionState {
 }
 
 let currentBootAttempt = 0;
-let lastResolvedUid: string | null = null;
+let receivedAuthCallback = false;
+const BOOT_TIMEOUT_MS = 5000;
+let verificationCheck: { user: User; promise: Promise<boolean> } | null = null;
 let authListenerUnsubscribe: (() => void) | null = null;
 
-async function hydrateUserSession(
-  firebaseUser: User,
-  attemptId: number,
-  set: (partial: Partial<SessionState> | ((state: SessionState) => Partial<SessionState>)) => void,
-  get: () => SessionState
-) {
-  // Reset pairingStatus if UID changed
-  if (lastResolvedUid !== firebaseUser.uid) {
-    lastResolvedUid = firebaseUser.uid;
-    set({ pairingStatus: 'pending' });
-  }
+type SetSession = (
+  partial: Partial<SessionState> | ((state: SessionState) => Partial<SessionState>)
+) => void;
 
-  // Hydrate user avatar asynchronously outside critical boot path
-  AsyncStorage.getItem(`@plant_live_avatar_${firebaseUser.uid}`)
-    .then((storedAvatar) => {
-      if (storedAvatar && get().user?.uid === firebaseUser.uid) {
-        set((state) => ({
-          user: state.user ? { ...state.user, avatarUri: storedAvatar } : null,
-        }));
-      }
-    })
-    .catch((err) => {
-      console.warn('[Session] Failed to read stored avatar:', err);
-    });
+function toSessionUser(user: User): UserProfile {
+  return {
+    uid: user.uid,
+    email: user.email,
+    displayName: user.displayName,
+    avatarUri: user.photoURL || null,
+    emailVerified: Boolean(user.emailVerified),
+  };
+}
 
-  const storageKey = `@plant_live_active_device_${firebaseUser.uid}`;
-  const cachedActiveIdPromise = AsyncStorage.getItem(storageKey).catch((storageErr) => {
-    console.warn('[Session] Failed to read stored activeDeviceId:', storageErr);
-    return null;
-  });
+function isCurrentBoot(uid: string, attemptId: number) {
+  return attemptId === currentBootAttempt && auth.currentUser?.uid === uid;
+}
 
-  let timerHandle: ReturnType<typeof setTimeout> | null = null;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timerHandle = setTimeout(() => {
-      reject(new Error('Device hydration timed out'));
-    }, 5000);
-  });
-
-  const userDevRef = ref(db, `users/${firebaseUser.uid}/devices`);
-  const rtdbPromise = fbGet(userDevRef);
-  const prefsRef = ref(db, `users/${firebaseUser.uid}/prefs`);
-  const prefsPromise = fbGet(prefsRef).catch(() => null);
-
-  let pairedDeviceId = '';
-  let resolvedStatus: PairingStatus = 'pending';
-  let resolvedPrefs: UserPrefs = { ...DEFAULT_USER_PREFS };
-
+async function boundedBootRead<T>(read: () => Promise<T>, fallback: T, deadline: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const [cachedActiveId, devSnap, prefsSnap] = await Promise.all([
-      cachedActiveIdPromise,
-      Promise.race([rtdbPromise, timeoutPromise]),
-      prefsPromise,
+    return await Promise.race([
+      Promise.resolve().then(read),
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), Math.max(0, deadline - Date.now()));
+      }),
     ]);
-
-    if (prefsSnap && prefsSnap.exists()) {
-      const pVal = prefsSnap.val();
-      resolvedPrefs = {
-        units: pVal.units === 'F' ? 'F' : 'C',
-        quietHours: {
-          enabled: typeof pVal.quietHours?.enabled === 'boolean' ? pVal.quietHours.enabled : DEFAULT_USER_PREFS.quietHours.enabled,
-          start: pVal.quietHours?.start || DEFAULT_USER_PREFS.quietHours.start,
-          end: pVal.quietHours?.end || DEFAULT_USER_PREFS.quietHours.end,
-        },
-        alerts: {
-          bottle: typeof pVal.alerts?.bottle === 'boolean' ? pVal.alerts.bottle : true,
-          dry: typeof pVal.alerts?.dry === 'boolean' ? pVal.alerts.dry : true,
-          wet: typeof pVal.alerts?.wet === 'boolean' ? pVal.alerts.wet : true,
-          heat: typeof pVal.alerts?.heat === 'boolean' ? pVal.alerts.heat : true,
-          offline: typeof pVal.alerts?.offline === 'boolean' ? pVal.alerts.offline : true,
-        },
-      };
-    }
-
-    if (devSnap.exists()) {
-      const val = devSnap.val();
-      const deviceIds =
-        typeof val === 'object' && val !== null
-          ? Object.keys(val).filter((k) => Boolean(val[k]))
-          : [];
-
-      if (deviceIds.length > 0) {
-        const preferredId =
-          cachedActiveId && deviceIds.includes(cachedActiveId) ? cachedActiveId : deviceIds[0];
-        pairedDeviceId = useLiveDevice.getState().seedDeviceRecords(deviceIds, preferredId);
-        resolvedStatus = 'paired';
-      } else {
-        // Confirmed successful empty snapshot: strictly unpaired
-        useLiveDevice.getState().clearDeviceState();
-        pairedDeviceId = '';
-        resolvedStatus = 'unpaired';
-        AsyncStorage.removeItem(storageKey).catch(() => {});
-      }
-    } else {
-      // Confirmed snapshot does not exist in RTDB: strictly unpaired
-      useLiveDevice.getState().clearDeviceState();
-      pairedDeviceId = '';
-      resolvedStatus = 'unpaired';
-      AsyncStorage.removeItem(storageKey).catch(() => {});
-    }
-  } catch (err) {
-    console.warn('[Session] RTDB device hydration failed or timed out, evaluating cached fallback:', err);
-    let fallbackId: string | null = null;
-    try {
-      fallbackId = await cachedActiveIdPromise;
-    } catch {
-      fallbackId = null;
-    }
-
-    if (fallbackId) {
-      pairedDeviceId = useLiveDevice.getState().seedDeviceRecords([fallbackId], fallbackId);
-      resolvedStatus = 'cached';
-    } else {
-      useLiveDevice.getState().clearDeviceState();
-      pairedDeviceId = '';
-      resolvedStatus = 'unavailable';
-    }
+  } catch {
+    return fallback;
   } finally {
-    if (timerHandle) {
-      clearTimeout(timerHandle);
-      timerHandle = null;
-    }
+    clearTimeout(timer);
   }
+}
 
-  // Guard async completion: verify attempt is still current and UID matches
-  if (attemptId !== currentBootAttempt || auth.currentUser?.uid !== firebaseUser.uid) {
-    return;
-  }
+export function normalizePrefs(raw: Partial<Omit<UserPrefs, 'alerts' | 'quietHours'>> & {
+  quietHours?: Partial<UserQuietHours>;
+  alerts?: Partial<UserAlertPrefs>;
+} | null): UserPrefs {
+  return {
+    units: raw?.units === 'F' ? 'F' : 'C',
+    quietHours: { ...DEFAULT_USER_PREFS.quietHours, ...raw?.quietHours },
+    alerts: { ...DEFAULT_USER_PREFS.alerts, ...raw?.alerts },
+  };
+}
 
+function publishIdentity(user: User, verified: boolean, set: SetSession) {
   set({
-    user: {
-      uid: firebaseUser.uid,
-      email: firebaseUser.email,
-      displayName: firebaseUser.displayName,
-      avatarUri: firebaseUser.photoURL || null,
-      emailVerified: Boolean(firebaseUser.emailVerified),
-    },
-    isEmailVerified: Boolean(firebaseUser.emailVerified),
-    activeDeviceId: pairedDeviceId,
-    pairingStatus: resolvedStatus,
-    prefs: resolvedPrefs,
-    profileSyncError: null,
-    isLoading: false,
+    user: { ...toSessionUser(user), emailVerified: verified },
+    isEmailVerified: verified,
+    isLoading: verified,
     isAuthReady: true,
     hasResolvedAuth: true,
   });
+}
+
+async function resolveUserSession(user: User, attemptId: number, set: SetSession, get: () => SessionState) {
+  const deadline = Date.now() + BOOT_TIMEOUT_MS;
+  const needsVerification = !user.emailVerified || await boundedBootRead(
+    () => hasPendingRegistrationSetup(user.uid), true, deadline
+  );
+  if (!isCurrentBoot(user.uid, attemptId)) return;
+  publishIdentity(user, !needsVerification, set);
+  if (!needsVerification) await hydrateUserSession(user, attemptId, set, get, deadline);
+}
+
+async function hydrateUserSession(
+  user: User,
+  attemptId: number,
+  set: SetSession,
+  get: () => SessionState,
+  deadline = Date.now() + BOOT_TIMEOUT_MS
+) {
+  const { uid } = user;
+  const storageKey = `@plant_live_active_device_${uid}`;
+  const [membership, cachedId, prefs, avatar] = await Promise.all([
+    boundedBootRead(async () => {
+      const snapshot = await fbGet(ref(db, `users/${uid}/devices`));
+      return snapshot.exists() ? snapshot.val() || {} : {};
+    }, null, deadline),
+    boundedBootRead(() => AsyncStorage.getItem(storageKey), null, deadline),
+    boundedBootRead(async () => {
+      const snapshot = await fbGet(ref(db, `users/${uid}/prefs`));
+      return snapshot.exists() ? normalizePrefs(snapshot.val()) : DEFAULT_USER_PREFS;
+    }, null, deadline),
+    boundedBootRead(() => AsyncStorage.getItem(`@plant_live_avatar_${uid}`), null, deadline),
+  ]);
+  if (!isCurrentBoot(uid, attemptId)) return;
+
+  const fallbackId = get().activeDeviceId || cachedId;
+  const deviceIds = membership === null
+    ? (fallbackId ? [fallbackId] : [])
+    : Object.keys(membership).filter((id) => Boolean(membership[id]));
+  let activeDeviceId = '';
+  if (deviceIds.length) {
+    activeDeviceId = useLiveDevice.getState().seedDeviceRecords(deviceIds, fallbackId);
+  } else {
+    useLiveDevice.getState().clearDeviceState();
+    if (membership !== null) AsyncStorage.removeItem(storageKey).catch(() => {});
+  }
+  const pairingStatus = membership === null
+    ? (activeDeviceId ? 'cached' : 'unavailable')
+    : (activeDeviceId ? 'paired' : 'unpaired');
+
+  const currentUser = get().user;
+  set({
+    user: currentUser && { ...currentUser, avatarUri: avatar ?? currentUser.avatarUri },
+    activeDeviceId,
+    pairingStatus,
+    prefs: prefs ?? get().prefs,
+    isLoading: false,
+  });
+}
+
+const preferenceQueues = new Map<string, Promise<void>>();
+
+function savePreference<T>(
+  get: () => SessionState,
+  field: string,
+  read: (prefs: UserPrefs) => T,
+  apply: (value: T) => void,
+  next: (previous: T) => T,
+  write: (uid: string, value: T) => Promise<void>
+): Promise<void> {
+  const uid = get().user?.uid || auth.currentUser?.uid;
+  if (!uid) return Promise.reject(new Error('No authenticated user session'));
+  const firebaseUser = auth.currentUser;
+  const generation = currentBootAttempt;
+  const isCurrent = () => currentBootAttempt === generation && auth.currentUser === firebaseUser &&
+    (get().user?.uid || auth.currentUser?.uid) === uid;
+  const key = JSON.stringify([uid, field]);
+  const pending = (preferenceQueues.get(key) ?? Promise.resolve())
+    .catch(() => {})
+    .then(async () => {
+      if (!isCurrent()) return;
+      const previous = read(get().prefs);
+      const value = next(previous);
+      apply(value);
+      try {
+        await write(uid, value);
+      } catch (error) {
+        if (isCurrent() && read(get().prefs) === value) apply(previous);
+        throw error;
+      }
+    }).finally(() => {
+      if (preferenceQueues.get(key) === pending) preferenceQueues.delete(key);
+    });
+  preferenceQueues.set(key, pending);
+  return pending;
 }
 
 export const useSession = create<SessionState>((set, get) => ({
@@ -253,6 +272,13 @@ export const useSession = create<SessionState>((set, get) => ({
   activeDeviceId: '',
   prefs: DEFAULT_USER_PREFS,
   profileSyncError: null,
+  verificationEmailDelivery: null,
+
+  registerUser: (data) => registerUserWithEmail(data, {
+    onVerificationEmailStatus: (uid, status) => {
+      if (auth.currentUser?.uid === uid) set({ verificationEmailDelivery: { uid, status } });
+    },
+  }),
 
   setUser: (user) =>
     set({
@@ -277,60 +303,35 @@ export const useSession = create<SessionState>((set, get) => ({
     }));
   },
 
-  updateTempUnit: async (unit: 'C' | 'F') => {
-    const user = get().user;
-    const uid = user?.uid || auth.currentUser?.uid;
-    if (!uid) throw new Error('No authenticated user session');
-    set((state) => ({
-      prefs: { ...state.prefs, units: unit },
-    }));
-    await update(ref(db, `users/${uid}/prefs`), { units: unit });
-  },
+  updateTempUnit: (unit) => savePreference(get, 'units',
+    (prefs) => prefs.units,
+    (units) => get().setPrefs({ units }),
+    () => unit,
+    (uid, units) => update(ref(db, `users/${uid}/prefs`), { units }),
+  ),
 
-  toggleQuietHours: async (enabled: boolean) => {
-    const user = get().user;
-    const uid = user?.uid || auth.currentUser?.uid;
-    if (!uid) throw new Error('No authenticated user session');
-    const cur = get().prefs.quietHours;
-    const next: UserQuietHours = {
-      enabled,
-      start: cur.start || '22:00',
-      end: cur.end || '07:00',
-    };
-    set((state) => ({
-      prefs: { ...state.prefs, quietHours: next },
-    }));
-    await update(ref(db, `users/${uid}/prefs/quietHours`), next);
-  },
+  toggleQuietHours: (enabled) => savePreference(get, 'quietHours',
+    (prefs) => prefs.quietHours,
+    (quietHours) => set((state) => ({ prefs: { ...state.prefs, quietHours } })),
+    (previous) => ({ ...previous, enabled }),
+    (uid, value) => update(ref(db, `users/${uid}/prefs/quietHours`), value),
+  ),
 
-  updateQuietHoursTimes: async (start: string, end: string) => {
-    const user = get().user;
-    const uid = user?.uid || auth.currentUser?.uid;
-    if (!uid) throw new Error('No authenticated user session');
-    const cur = get().prefs.quietHours;
-    const next: UserQuietHours = {
-      enabled: cur.enabled,
-      start: start || cur.start || '22:00',
-      end: end || cur.end || '07:00',
-    };
-    set((state) => ({
-      prefs: { ...state.prefs, quietHours: next },
-    }));
-    await update(ref(db, `users/${uid}/prefs/quietHours`), next);
-  },
+  updateQuietHoursTimes: (start, end) => savePreference(get, 'quietHours',
+    (prefs) => prefs.quietHours,
+    (quietHours) => set((state) => ({ prefs: { ...state.prefs, quietHours } })),
+    (previous) => ({ ...previous, start: start || previous.start, end: end || previous.end }),
+    (uid, value) => update(ref(db, `users/${uid}/prefs/quietHours`), value),
+  ),
 
-  updateAlertPref: async (key: keyof UserAlertPrefs, enabled: boolean) => {
-    const user = get().user;
-    const uid = user?.uid || auth.currentUser?.uid;
-    if (!uid) throw new Error('No authenticated user session');
-    set((state) => ({
-      prefs: {
-        ...state.prefs,
-        alerts: { ...state.prefs.alerts, [key]: enabled },
-      },
-    }));
-    await update(ref(db, `users/${uid}/prefs/alerts`), { [key]: enabled });
-  },
+  updateAlertPref: (key, enabled) => savePreference(get, `alerts/${key}`,
+    (prefs) => prefs.alerts[key],
+    (value) => set((state) => ({
+      prefs: { ...state.prefs, alerts: { ...state.prefs.alerts, [key]: value } },
+    })),
+    () => enabled,
+    (uid, value) => update(ref(db, `users/${uid}/prefs/alerts`), { [key]: value }),
+  ),
 
   setAvatarUri: async (uri: string | null) => {
     const user = get().user;
@@ -421,21 +422,50 @@ export const useSession = create<SessionState>((set, get) => ({
     if (!currentUser) {
       throw new Error('No authenticated user session');
     }
-    await fbSendEmailVerification(currentUser);
+    await sendVerificationEmail(currentUser);
+    const delivery = get().verificationEmailDelivery;
+    if (auth.currentUser === currentUser && delivery?.uid === currentUser.uid && delivery.status === 'failed') {
+      set({ verificationEmailDelivery: { uid: currentUser.uid, status: 'sent' } });
+    }
+  },
+
+  retryRegistrationSetup: async () => {
+    const user = auth.currentUser;
+    if (!user || get().user?.uid !== user.uid) throw new Error('No authenticated user session');
+    await ensureUserSetup(user);
   },
 
   refreshEmailVerification: async () => {
     const currentUser = auth.currentUser;
-    if (!currentUser) {
-      throw new Error('No authenticated user session');
-    }
-    await currentUser.reload();
-    const verified = Boolean(currentUser.emailVerified);
-    set((state) => ({
-      isEmailVerified: verified,
-      user: state.user ? { ...state.user, emailVerified: verified } : null,
-    }));
-    return verified;
+    if (!currentUser) throw new Error('No authenticated user session');
+    if (verificationCheck?.user === currentUser) return verificationCheck.promise;
+
+    const attemptId = currentBootAttempt;
+    const isCurrentSession = () =>
+      attemptId === currentBootAttempt && auth.currentUser === currentUser &&
+      get().user?.uid === currentUser.uid;
+    const promise = (async () => {
+      await currentUser.reload();
+      if (!isCurrentSession()) return false;
+      const verified = Boolean(currentUser.emailVerified);
+      if (verified && selectSessionRoutingState(get()) === 'verification_pending') {
+        await ensureUserSetup(currentUser);
+        await currentUser.getIdToken(true);
+        if (!isCurrentSession()) return false;
+        publishIdentity(currentUser, true, set);
+        await hydrateUserSession(currentUser, attemptId, set, get);
+        return isCurrentSession();
+      }
+      set((state) => ({
+        isEmailVerified: verified,
+        user: state.user ? { ...state.user, emailVerified: verified } : null,
+      }));
+      return verified;
+    })().finally(() => {
+      if (verificationCheck?.promise === promise) verificationCheck = null;
+    });
+    verificationCheck = { user: currentUser, promise };
+    return promise;
   },
 
   setActiveDeviceId: (deviceId: string) => {
@@ -460,12 +490,8 @@ export const useSession = create<SessionState>((set, get) => ({
   },
 
   signOut: async () => {
-    try {
-      await fbSignOut(auth);
-    } catch (err) {
-      console.warn('[Session] Sign out error:', err);
-    }
-    lastResolvedUid = null;
+    await fbSignOut(auth);
+    ++currentBootAttempt;
     useLiveDevice.getState().clearDeviceState();
     triggerAlertSessionClear();
     set({
@@ -486,13 +512,24 @@ export const useSession = create<SessionState>((set, get) => ({
       return authListenerUnsubscribe;
     }
 
+    let listening = true;
+    receivedAuthCallback = false;
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: User | null) => {
+      if (!listening) return;
+      receivedAuthCallback = true;
       const attemptId = ++currentBootAttempt;
       try {
         if (firebaseUser) {
-          await hydrateUserSession(firebaseUser, attemptId, set, get);
+          if (get().user?.uid !== firebaseUser.uid) {
+            useLiveDevice.getState().clearDeviceState();
+            triggerAlertSessionClear();
+            set({
+              isAuthReady: false, isEmailVerified: false, user: null, pairingStatus: 'pending',
+              activeDeviceId: '', prefs: DEFAULT_USER_PREFS, profileSyncError: null,
+            });
+          }
+          await resolveUserSession(firebaseUser, attemptId, set, get);
         } else {
-          lastResolvedUid = null;
           useLiveDevice.getState().clearDeviceState();
           triggerAlertSessionClear();
           if (attemptId === currentBootAttempt) {
@@ -523,6 +560,10 @@ export const useSession = create<SessionState>((set, get) => ({
     });
 
     authListenerUnsubscribe = () => {
+      if (!listening) return;
+      listening = false;
+      receivedAuthCallback = false;
+      ++currentBootAttempt;
       unsubscribe();
       authListenerUnsubscribe = null;
     };
@@ -531,17 +572,23 @@ export const useSession = create<SessionState>((set, get) => ({
   },
 
   retryBoot: async () => {
+    if (!receivedAuthCallback) return;
     const attemptId = ++currentBootAttempt;
-    set({ pairingStatus: 'pending' });
+    set({ pairingStatus: 'pending', isLoading: true });
     const currentUser = auth.currentUser;
     if (currentUser) {
       try {
-        await hydrateUserSession(currentUser, attemptId, set, get);
+        if (selectSessionRoutingState(get()) === 'verified' && get().user?.uid === currentUser.uid) {
+          await hydrateUserSession(currentUser, attemptId, set, get);
+        } else {
+          await resolveUserSession(currentUser, attemptId, set, get);
+        }
       } catch (err) {
         console.error('[Session] Retry boot hydration error:', err);
         if (attemptId === currentBootAttempt) {
           set({
             pairingStatus: 'unavailable',
+            isLoading: false,
             isAuthReady: true,
             hasResolvedAuth: true,
           });

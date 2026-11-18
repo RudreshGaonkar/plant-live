@@ -1,3 +1,4 @@
+import { SkeletonLoader } from '@/components/SkeletonLoader';
 /**
  * Home Screen – "The Stage"
  * The plant is the stage; everything else floats around it.
@@ -26,7 +27,6 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import Animated, {
   FadeIn,
@@ -78,7 +78,7 @@ export default function HomeScreen() {
   const toggleMode = useLiveDevice((s) => s.toggleMode);
   const refillBottle = useLiveDevice((s) => s.refillBottle);
   const waterLogs = useLiveDevice((s) => s.waterLogs);
-  const { triggerWaterNow, stage } = useCommand();
+  const { triggerWaterNow, stage, cooldownSecondsLeft } = useCommand();
 
   const [gardenStripOpen, setGardenStripOpen] = useState(false);
   const [headerHeight, setHeaderHeight] = useState(0);
@@ -128,16 +128,11 @@ export default function HomeScreen() {
   // Auto soak cooldown (30 min) derived from live telemetry sample
   const autoSoak = useAutoSoakCooldown(device?.id);
 
-  // Hide splash screen once usable content has committed
-  useEffect(() => {
-    if (device || pairingStatus === 'unpaired' || pairingStatus === 'unavailable') {
-      SplashScreen.hideAsync().catch(() => {});
-    }
-  }, [device, pairingStatus]);
-
   // Empty state – handling pending, unavailable, or confirmed unpaired
-  if (!device) {
-    if (pairingStatus === 'unavailable') {
+  const missingConfig = device?.isConfigHydrated === false &&
+    (device.configStatus === 'empty' || device.configStatus === 'error');
+  if (!device || missingConfig) {
+    if (missingConfig || pairingStatus === 'unavailable') {
       return (
         <LinearGradient
           colors={['#16221A', '#203A2B']}
@@ -157,7 +152,9 @@ export default function HomeScreen() {
               Device Unavailable
             </Text>
             <Text style={[styles.emptySubtitle, { color: '#80B07F' }]}>
-              Unable to connect to controller services. Check your connection or retry.
+              {missingConfig
+                ? 'Controller settings are unavailable. Check your connection or retry.'
+                : 'Unable to connect to controller services. Check your connection or retry.'}
             </Text>
             <TouchableOpacity
               style={[
@@ -229,13 +226,12 @@ export default function HomeScreen() {
       );
     }
 
-    // While pairingStatus is pending or resolving, render smooth loading stage
-    return (
-      <View style={[styles.emptyStage, { backgroundColor: '#16221A', justifyContent: 'center', alignItems: 'center' }]}>
-        <StatusBar style="light" />
-        <ActivityIndicator size="large" color={colors.palette.lime} />
-      </View>
-    );
+    return <SkeletonLoader screen="home" />;
+  }
+
+  if ((device.configStatus === 'loading' && !device.isConfigHydrated) ||
+      (device.telemetryStatus === 'loading' && !device.telemetry)) {
+    return <SkeletonLoader screen="home" />;
   }
 
   const { config, telemetry, status } = device;
@@ -451,9 +447,11 @@ export default function HomeScreen() {
           {/* Manual Watering Button - NEVER disabled when moisture is 100% */}
           <TouchableOpacity
             testID="manual-watering-btn"
-            accessibilityLabel="Manual watering"
+            accessibilityLabel={cooldownSecondsLeft
+              ? `Manual watering available in ${cooldownSecondsLeft} seconds`
+              : 'Manual watering'}
             activeOpacity={0.8}
-            disabled={isWatering || isPumpActive || stage === 'sent'}
+            disabled={isWatering || isPumpActive || stage === 'sent' || cooldownSecondsLeft > 0}
             onPress={handleManualWatering}
             style={[
               styles.iconPill,

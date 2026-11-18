@@ -95,6 +95,7 @@ jest.mock('firebase/database', () => ({
   set: jest.fn(() => Promise.resolve()),
   update: jest.fn(() => Promise.resolve()),
   get: jest.fn(() => Promise.resolve({ exists: () => false, val: () => null })),
+  runTransaction: jest.fn(() => Promise.resolve()),
   serverTimestamp: jest.fn(() => 123456789),
 }));
 

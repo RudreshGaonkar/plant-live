@@ -164,6 +164,38 @@ export const updateDeviceConfigInRTDB = async (
   await update(configRef, partialConfig);
 };
 
+const thresholdBounds = {
+  moistureMin: [10, 50],
+  moistureMax: [50, 90],
+  tempMax: [20, 50],
+  humidityMax: [40, 95],
+} as const;
+
+type EditableThreshold = keyof typeof thresholdBounds;
+
+function validateThreshold(key: EditableThreshold, value: number) {
+  const [min, max] = thresholdBounds[key];
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`Enter a value from ${min} to ${max}.`);
+  }
+}
+
+function validateMoisturePair(min: number, max: number) {
+  return Number.isFinite(min) && Number.isFinite(max) && min >= 0 && max <= 100 && min < max;
+}
+
+function durationUpdates(seconds: number) {
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 15) {
+    throw new Error('Automatic watering duration must be a whole number from 1 to 15 seconds.');
+  }
+  return {
+    'thresholds/pumpDurationSec': seconds,
+    'thresholds/waterDurationSec': seconds,
+    pumpDurationSec: seconds,
+    waterDurationSec: seconds,
+  };
+}
+
 export interface LocationPresetThresholds {
   moistureMin: number;
   moistureMax: number;
@@ -182,18 +214,22 @@ export const updateDeviceLocationAndPreset = async (
   location: PlantLocation,
   presetThresholds: LocationPresetThresholds
 ): Promise<void> => {
-  const configRef = ref(db, `devices/${deviceId}/config`);
-  const pumpSec = presetThresholds.pumpDurationSec ?? 5;
-  const leafUpdates: Record<string, any> = {
+  const { moistureMin, moistureMax, tempMax = 35, humidityMax = 80, pumpDurationSec = 5 } = presetThresholds;
+  validateThreshold('moistureMin', moistureMin);
+  validateThreshold('moistureMax', moistureMax);
+  validateThreshold('tempMax', tempMax);
+  validateThreshold('humidityMax', humidityMax);
+  if (!validateMoisturePair(moistureMin, moistureMax)) {
+    throw new Error('The minimum moisture threshold must be below the upper threshold.');
+  }
+  await update(ref(db, `devices/${deviceId}/config`), {
     location,
-    'thresholds/moistureMin': presetThresholds.moistureMin,
-    'thresholds/moistureMax': presetThresholds.moistureMax,
-    'thresholds/tempMax': presetThresholds.tempMax ?? 35,
-    'thresholds/humidityMax': presetThresholds.humidityMax ?? 80,
-    'thresholds/pumpDurationSec': pumpSec,
-    'thresholds/waterDurationSec': pumpSec,
-  };
-  await update(configRef, leafUpdates);
+    'thresholds/moistureMin': moistureMin,
+    'thresholds/moistureMax': moistureMax,
+    'thresholds/tempMax': tempMax,
+    'thresholds/humidityMax': humidityMax,
+    ...durationUpdates(pumpDurationSec),
+  });
 };
 
 /**
@@ -204,13 +240,8 @@ export const updateDevicePumpDuration = async (
   deviceId: string,
   durationSec: number
 ): Promise<void> => {
-  const configRef = ref(db, `devices/${deviceId}/config`);
-  await update(configRef, {
-    'thresholds/pumpDurationSec': durationSec,
-    'thresholds/waterDurationSec': durationSec,
-    pumpDurationSec: durationSec,
-    waterDurationSec: durationSec,
-  });
+  const changes = durationUpdates(durationSec);
+  await update(ref(db, `devices/${deviceId}/config`), changes);
 };
 
 /**
@@ -218,13 +249,23 @@ export const updateDevicePumpDuration = async (
  */
 export const updateDeviceThreshold = async (
   deviceId: string,
-  key: 'moistureMin' | 'moistureMax' | 'tempMax' | 'humidityMax',
+  key: EditableThreshold,
   value: number
 ): Promise<void> => {
-  const configRef = ref(db, `devices/${deviceId}/config`);
-  await update(configRef, {
-    [`thresholds/${key}`]: value,
-  });
+  validateThreshold(key, value);
+  if (key === 'moistureMin' || key === 'moistureMax') {
+    const target = ref(db, `devices/${deviceId}/config/thresholds`);
+    const result = await runTransaction(target, (current) => {
+      const next = { ...current, [key]: value };
+      if (!validateMoisturePair(next.moistureMin ?? 35, next.moistureMax ?? 65)) return undefined;
+      return next;
+    }, { applyLocally: false });
+    if (!result.committed) {
+      throw new Error('The minimum moisture threshold must be below the upper threshold.');
+    }
+  } else {
+    await update(ref(db, `devices/${deviceId}/config`), { [`thresholds/${key}`]: value });
+  }
 };
 
 /**
@@ -235,6 +276,9 @@ export const updateDeviceFlowRate = async (
   deviceId: string,
   flowMlPerSec: number
 ): Promise<void> => {
+  if (!Number.isFinite(flowMlPerSec) || flowMlPerSec <= 0) {
+    throw new Error('Pump flow must be a positive finite value.');
+  }
   const configRef = ref(db, `devices/${deviceId}/config`);
   await update(configRef, {
     'bottle/flowMlPerSec': flowMlPerSec,
@@ -253,7 +297,10 @@ export const updateBottleCapacityWithTransaction = async (
   newCapacityMl: number
 ): Promise<{ capacityMl: number; remainingMl: number }> => {
   const configRef = ref(db, `devices/${deviceId}/config`);
-  const safeCapacity = Math.max(100, Math.round(newCapacityMl));
+  if (!Number.isInteger(newCapacityMl) || newCapacityMl < 250 || newCapacityMl > 2000) {
+    throw new Error('Bottle capacity must be a whole number from 250 to 2,000 mL.');
+  }
+  const safeCapacity = newCapacityMl;
 
   const result = await runTransaction(configRef, (currentData) => {
     if (!currentData) {
@@ -375,7 +422,8 @@ export interface DeviceHistoryRecord {
 export const listenToDeviceHistory = (
   deviceId: string,
   onData: (history: DeviceHistoryRecord[]) => void,
-  limitCount = 50
+  limitCount = 50,
+  onError?: (error: Error) => void
 ) => {
   const historyRef = ref(db, `history/${deviceId}`);
   const historyQuery = query(historyRef, limitToLast(limitCount));
@@ -398,7 +446,7 @@ export const listenToDeviceHistory = (
     } else {
       onData([]);
     }
-  });
+  }, onError);
 
   return () => {
     if (typeof unsubscribe === 'function') {
