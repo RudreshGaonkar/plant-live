@@ -1,3 +1,7 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import * as ts from 'typescript';
+import * as React from 'react';
 import { runTransaction, update } from 'firebase/database';
 import {
   updateDeviceLocationAndPreset,
@@ -177,5 +181,68 @@ describe('Device settings synchronization', () => {
     write.reject(new Error('Offline'));
     await expect(change).rejects.toThrow('Offline');
     expect(useSession.getState().prefs.alerts).toMatchObject({ dry: true, heat: false });
+  });
+});
+
+
+// Render the management JSX independently of native modules in this node-only suite.
+describe('Controller Management visibility', () => {
+  const source = readFileSync(join(__dirname, '../src/app/(tabs)/settings.tsx'), 'utf8');
+  const ast = ts.createSourceFile('settings.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let managementExpression: ts.Expression | undefined;
+  function findManagement(node: ts.Node) {
+    if (ts.isJsxExpression(node) && node.expression &&
+        node.expression.getText(ast).startsWith('device?.id &&')) {
+      managementExpression = node.expression;
+    }
+    ts.forEachChild(node, findManagement);
+  }
+  findManagement(ast);
+
+  function renderManagement(device: unknown) {
+    expect(managementExpression).toBeDefined();
+    const compiled = ts.transpileModule(
+      'return (' + managementExpression!.getText(ast) + ');',
+      { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2020 } },
+    ).outputText;
+    const render = new Function(
+      'React', 'device', 'styles', 'colors', 'radii', 'View', 'Text',
+      'TouchableOpacity', 'ActivityIndicator', 'Ionicons', 'handleRemoveDevice', 'isRemovingDevice',
+      compiled,
+    );
+    return render(React, device, {}, { palette: {} }, {}, 'View', 'Text',
+      'TouchableOpacity', 'ActivityIndicator', 'Ionicons', jest.fn(), false);
+  }
+
+  function findRemoveButton(node: any): any {
+    if (!node || typeof node !== 'object') return undefined;
+    if (node.props?.testID === 'remove-device-btn') return node;
+    return React.Children.toArray(node.props?.children).map(findRemoveButton).find(Boolean);
+  }
+
+  it.each(['loading', 'empty', 'error'] as const)(
+    'shows removal for a single paired identity with absent config (%s)',
+    (configStatus) => {
+      useLiveDevice.getState().clearDeviceState();
+      useLiveDevice.getState().seedDeviceRecords(['only-controller']);
+      const device = {
+        ...useLiveDevice.getState().devices['only-controller'],
+        config: undefined,
+        configStatus,
+        isConfigHydrated: false,
+      };
+      const card = renderManagement(device);
+      expect(card.props.testID).toBe('controller-management');
+      const button = findRemoveButton(card);
+      expect(button).toBeDefined();
+      expect(button.props.disabled).toBe(false);
+      expect(button.props.onPress).toEqual(expect.any(Function));
+      expect(source).not.toContain('return <SkeletonLoader screen="settings"');
+    },
+  );
+
+  it('hides management without an active paired identity', () => {
+    expect(renderManagement(undefined)).toBeUndefined();
+    expect(renderManagement({ id: '' })).toBe('');
   });
 });

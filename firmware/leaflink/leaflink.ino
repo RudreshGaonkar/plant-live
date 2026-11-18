@@ -175,8 +175,23 @@ FirebaseData fbdo;
 FirebaseAuth auth;
 FirebaseConfig fbConfig;
 WiFiManager wm;
+String setupApName;
+String htmlIdNotice = String("<div style='text-align:center; background:#e8f5e9; border:2px solid #2e7d32; border-radius:10px; padding:15px; margin-bottom:20px; font-family:sans-serif;'>"
+                        "<span style='font-size:13px; color:#2e7d32; font-weight:bold; letter-spacing:1px; display:block;'>YOUR LEAFLINK DEVICE ID</span>"
+                        "<strong style='font-size:26px; color:#1b5e20; display:block; margin-top:5px;'>") + deviceId + "</strong>"
+                        "<small style='font-size:11px; color:#4caf50; margin-top:5px; display:block;'>Enter or auto-detect this ID in your LeafLink app</small>"
+                        "</div>";
+WiFiManagerParameter custom_id_notice(htmlIdNotice.c_str());
+
+// Runtime recovery waits for station auto-reconnect, then offers a bounded portal.
+constexpr unsigned long WIFI_RETRY_MS = 15000UL;
+constexpr unsigned long WIFI_PORTAL_MS = 300000UL;
+unsigned long wifiRetryStartedMs = 0;
+unsigned long wifiPortalStartedMs = 0;
+bool wifiRecoveryWaiting = false;
 
 // Forward Declarations
+void serviceWifiRecovery();
 void loadConfigFromFS();
 bool saveConfigToFS();
 void readSensors();
@@ -234,18 +249,13 @@ void setup() {
   Serial.printf("[Identity] Active deviceId: %s | Command path: devices/%s/command\n", deviceId, deviceId);
 
   // 4. WiFiManager Setup (Captive Portal for initial setup)
+  wm.setConnectTimeout(15);
   wm.setConfigPortalTimeout(300); // 5 minutes timeout to allow sufficient time for Wi-Fi setup
-  String apName = "LeafLink-" + chipId;
+  setupApName = "LeafLink-" + chipId;
   Serial.print(F("[WiFi] Connecting or launching AP: "));
-  Serial.println(apName);
+  Serial.println(setupApName);
 
   // Large Device ID Display Notice on Captive Portal
-  String htmlIdNotice = String("<div style='text-align:center; background:#e8f5e9; border:2px solid #2e7d32; border-radius:10px; padding:15px; margin-bottom:20px; font-family:sans-serif;'>"
-                        "<span style='font-size:13px; color:#2e7d32; font-weight:bold; letter-spacing:1px; display:block;'>YOUR LEAFLINK DEVICE ID</span>"
-                        "<strong style='font-size:26px; color:#1b5e20; display:block; margin-top:5px;'>") + deviceId + "</strong>"
-                        "<small style='font-size:11px; color:#4caf50; margin-top:5px; display:block;'>Enter or auto-detect this ID in your LeafLink app</small>"
-                        "</div>";
-  WiFiManagerParameter custom_id_notice(htmlIdNotice.c_str());
   wm.addParameter(&custom_id_notice);
 
   // Serve Device Info Endpoint for Mobile App Auto-Detection
@@ -257,12 +267,15 @@ void setup() {
     });
   });
 
-  if (!wm.autoConnect(apName.c_str(), "leafsetup")) {
+  if (!wm.autoConnect(setupApName.c_str(), "leafsetup")) {
     Serial.println(F("[WiFi] Failed to connect to AP. Proceeding in offline mode..."));
   } else {
     Serial.print(F("[WiFi] Connected! IP: "));
     Serial.println(WiFi.localIP());
   }
+
+  // Subsequent portals are serviced cooperatively after pump safety checks.
+  wm.setConfigPortalBlocking(false);
 
   // 5. NTP Time Synchronization
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
@@ -344,6 +357,13 @@ void loop() {
     flagTelemetryDirty = true;
   }
 
+  // Never enter portal/network processing while the pump is active.
+  serviceWifiRecovery();
+  if (wm.getConfigPortalActive()) {
+    yield();
+    return;
+  }
+
   if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
     // Prioritize commands before lower-frequency configuration and telemetry traffic.
     if (!isPumpActive && !flagControlResetDirty &&
@@ -351,6 +371,11 @@ void loop() {
       lastCommandPollMs = currentMs;
       pollCommand();
       fbdo.clear();
+      // A waterNow command may have started the relay during this poll.
+      if (isPumpActive) {
+        yield();
+        return;
+      }
     }
 
     flushPendingWrites();
@@ -369,6 +394,42 @@ void loop() {
   }
 
   yield();
+}
+
+// Called only after relay cutoff checks and the active-pump early return.
+void serviceWifiRecovery() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (wm.getConfigPortalActive()) wm.stopConfigPortal();
+    wifiRecoveryWaiting = false;
+    return;
+  }
+
+  unsigned long now = millis();
+  if (wm.getConfigPortalActive()) {
+    // Enforce our own deadline as well as the library timeout.
+    if (now - wifiPortalStartedMs >= WIFI_PORTAL_MS) {
+      wm.stopConfigPortal();
+    } else {
+      wm.process();
+    }
+    if (!wm.getConfigPortalActive()) {
+      wifiRetryStartedMs = millis();
+      wifiRecoveryWaiting = true;
+      WiFi.reconnect();
+    }
+    return;
+  }
+
+  if (!wifiRecoveryWaiting) {
+    wifiRecoveryWaiting = true;
+    wifiRetryStartedMs = now;
+    WiFi.reconnect();
+  }
+  if (now - wifiRetryStartedMs >= WIFI_RETRY_MS) {
+    wifiPortalStartedMs = now;
+    wm.startConfigPortal(setupApName.c_str(), "leafsetup");
+    wifiRecoveryWaiting = false;
+  }
 }
 
 // ==========================================
@@ -527,6 +588,7 @@ void appendHistorySnapshot() {
 // EMBEDDED AUTO-WATERING ENGINE (Spec §8.1)
 // ==========================================
 void checkAutoWatering() {
+  if (WiFi.status() != WL_CONNECTED || wm.getConfigPortalActive()) return;
   static unsigned long lastIdentityCheckMs = 0;
   if (millis() - lastIdentityCheckMs >= 10000) {
     lastIdentityCheckMs = millis();

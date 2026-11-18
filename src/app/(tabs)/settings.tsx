@@ -46,7 +46,6 @@ import { useAppTheme } from '@/theme';
 import { useLiveDevice } from '@/store/useLiveDevice';
 import { useSession } from '@/store/useSession';
 import { useDeviceSettingsEdits } from '@/hooks/useDeviceSettingsEdits';
-import { SkeletonLoader } from '@/components/SkeletonLoader';
 import { PasswordInput } from '@/components/PasswordInput';
 import { RefillConfirmationModal } from '@/components/RefillConfirmation';
 import {
@@ -708,7 +707,7 @@ export default function SettingsScreen() {
 
   const handleRemoveDevice = () => {
     if (!device || !user?.uid) return;
-    const plantName = device.config.plantName || device.config.name || 'Plant';
+    const plantName = device.config?.plantName || device.config?.name || 'Plant';
     const deviceId = device.id;
 
     Alert.alert(
@@ -763,13 +762,8 @@ export default function SettingsScreen() {
   const config = device?.config;
   const status = device?.status;
   const telemetry = device?.telemetry;
-  const missingConfig = device?.isConfigHydrated === false &&
-    (device.configStatus === 'empty' || device.configStatus === 'error');
+  const missingConfig = !!device && (!config || device.isConfigHydrated === false);
   const isNameChanged = displayNameInput.trim() !== (user?.displayName || '');
-
-  if (device?.configStatus === 'loading' && !device.isConfigHydrated) {
-    return <SkeletonLoader screen="settings" />;
-  }
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
@@ -788,6 +782,58 @@ export default function SettingsScreen() {
               : 'Profile, account & application preferences'}
           </Text>
         </View>
+
+        {device?.id && (
+          <View
+            testID="controller-management"
+            style={[styles.card, { backgroundColor: colors.surface, borderRadius: radii.card, borderColor: colors.border }]}
+          >
+            <Text style={[styles.itemLabel, { color: colors.text, fontWeight: '700' }]}>Controller Management</Text>
+            <Text style={[styles.itemLabel, { color: colors.textMuted }]}>Controller ID {device.id}</Text>
+            <Text style={[styles.itemLabel, { color: colors.text, marginTop: 12 }]}>Reconfigure Controller Wi-Fi</Text>
+            <Text style={[styles.itemLabel, { color: colors.textMuted, marginTop: 8 }]}>
+              {'1. Turn on a 2.4 GHz WPA2 mobile hotspot with internet access. Keep it running on a separate phone.\n\n'
+                + '2. Power on the controller out of range of the old Wi-Fi. Wait about 15 seconds for its setup hotspot.\n\n'
+                + '3. On your demo phone, join LeafLink-<chipId> with password leafsetup. Stay connected even if it says no internet.\n\n'
+                + '4. Open http://192.168.4.1 in your browser. Select Configure WiFi, choose the 2.4 GHz WPA2 hotspot, enter its password, and save.\n\n'
+                + '5. Reconnect your demo phone to the internet and return here. Keep this controller paired and wait for fresh telemetry. If the setup portal expires after five minutes, power-cycle the controller to try again.'}
+            </Text>
+            {/* Action: Remove / Unpair Controller */}
+            <TouchableOpacity
+              testID="remove-device-btn"
+              accessibilityRole="button"
+              accessibilityLabel="Remove or unpair this plant controller"
+              onPress={handleRemoveDevice}
+              disabled={isRemovingDevice}
+              style={[
+                styles.actionBtnOutlineFull,
+                {
+                  borderColor: colors.palette.critical,
+                  backgroundColor: 'rgba(235, 87, 87, 0.12)',
+                  borderRadius: radii.sm,
+                  marginTop: 10,
+                  paddingVertical: 12,
+                },
+              ]}
+            >
+              {isRemovingDevice ? (
+                <ActivityIndicator size="small" color={colors.palette.critical} />
+              ) : (
+                <>
+                  <Ionicons name="trash-outline" size={16} color={colors.palette.critical} />
+                  <Text
+                    style={[
+                      styles.actionBtnText,
+                      { color: colors.palette.critical, fontWeight: '700' },
+                    ]}
+                  >
+                    Remove Controller
+                  </Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* ── 1. USER PROFILE & ACCOUNT CARD ──────────────────────────── */}
         <View
@@ -1610,7 +1656,7 @@ export default function SettingsScreen() {
                     Controller & Network
                   </Text>
                   <Text style={[styles.accordionItemSubtitle, { color: colors.textMuted }]}>
-                    Controller ID, connection & unpair
+                    Controller identity & plant name
                   </Text>
                 </View>
               </View>
@@ -1647,55 +1693,6 @@ export default function SettingsScreen() {
                     {config.plantName || 'Monstera'}
                   </Text>
                 </View>
-
-                {/* Action: Re-pair Device */}
-                <TouchableOpacity
-                  onPress={() => router.push('/add-device' as any)}
-                  style={[
-                    styles.actionBtnOutlineFull,
-                    { borderColor: colors.palette.forest, borderRadius: radii.sm, marginTop: 12 },
-                  ]}
-                >
-                  <Ionicons name="sync-outline" size={16} color={colors.palette.forest} />
-                  <Text style={[styles.actionBtnText, { color: colors.palette.forest }]}>
-                    Reconnect Controller / Wi-Fi Setup
-                  </Text>
-                </TouchableOpacity>
-
-                {/* Action: Remove / Unpair Controller */}
-                <TouchableOpacity
-                  testID="remove-device-btn"
-                  accessibilityRole="button"
-                  accessibilityLabel="Remove or unpair this plant controller"
-                  onPress={handleRemoveDevice}
-                  disabled={isRemovingDevice}
-                  style={[
-                    styles.actionBtnOutlineFull,
-                    {
-                      borderColor: colors.palette.critical,
-                      backgroundColor: 'rgba(235, 87, 87, 0.12)',
-                      borderRadius: radii.sm,
-                      marginTop: 10,
-                      paddingVertical: 12,
-                    },
-                  ]}
-                >
-                  {isRemovingDevice ? (
-                    <ActivityIndicator size="small" color={colors.palette.critical} />
-                  ) : (
-                    <>
-                      <Ionicons name="trash-outline" size={16} color={colors.palette.critical} />
-                      <Text
-                        style={[
-                          styles.actionBtnText,
-                          { color: colors.palette.critical, fontWeight: '700' },
-                        ]}
-                      >
-                        Remove Controller
-                      </Text>
-                    </>
-                  )}
-                </TouchableOpacity>
               </View>
             )}
           </View>
