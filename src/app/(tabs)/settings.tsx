@@ -510,7 +510,7 @@ export default function SettingsScreen() {
           setOtpCooldown(60);
           setPasswordSuccess('A 6-digit verification code has been sent to your email.');
         } catch (otpErr: any) {
-          const msg = otpErr?.message || 'Failed to send verification code. Please try again.';
+          const msg = mapChangePasswordError(otpErr, 'Failed to send verification code. Please try again.');
           setPasswordError(msg);
           if (otpErr?.retryAfter) {
             setOtpCooldown(otpErr.retryAfter);
@@ -549,7 +549,7 @@ export default function SettingsScreen() {
       setOtpCooldown(60);
       setPasswordSuccess('A new verification code has been sent to your email.');
     } catch (err: any) {
-      const msg = err?.message || 'Failed to resend code.';
+      const msg = mapChangePasswordError(err, 'Failed to resend code.');
       setPasswordError(msg);
       if (err?.retryAfter) {
         setOtpCooldown(err.retryAfter);
@@ -591,7 +591,7 @@ export default function SettingsScreen() {
       Alert.alert('Password Changed', 'Your account password has been updated securely.');
     } catch (err: any) {
       console.warn('[Settings] OTP verification error:', err);
-      const msg = err?.message || 'Verification failed. Please try again.';
+      const msg = mapChangePasswordError(err, 'Verification failed. Please try again.');
       setPasswordError(msg);
     } finally {
       passwordBusy.current = false;

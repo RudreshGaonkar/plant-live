@@ -1,3 +1,4 @@
+import { mapOtpError, otpErrorMetadata } from '@/utils/otpErrors';
 import { auth } from '@/services/firebase';
 
 export interface SendOtpResult {
@@ -50,10 +51,9 @@ export async function sendEmailOtp(): Promise<SendOtpResult> {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    const errorMsg = data?.error || `Failed to send verification code (${response.status})`;
-    const error: any = new Error(errorMsg);
-    error.status = response.status;
-    error.retryAfter = data?.retryAfter;
+    const metadata = otpErrorMetadata(data || {});
+    const details = { code: data?.code, status: response.status, ...metadata };
+    const error = Object.assign(new Error(mapOtpError(details, 'Failed to send verification code. Please try again.')), details);
     throw error;
   }
 
@@ -94,10 +94,9 @@ export async function verifyEmailOtp(code: string): Promise<VerifyOtpResult> {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    const errorMsg = data?.error || `Failed to verify code (${response.status})`;
-    const error: any = new Error(errorMsg);
-    error.status = response.status;
-    error.attemptsRemaining = data?.attemptsRemaining;
+    const metadata = otpErrorMetadata(data || {});
+    const details = { code: data?.code, status: response.status, ...metadata };
+    const error = Object.assign(new Error(mapOtpError(details, 'Verification failed. Please try again.')), details);
     throw error;
   }
 

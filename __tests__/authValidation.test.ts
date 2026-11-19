@@ -263,7 +263,7 @@ describe('authValidation', () => {
         'Password is too weak. Please use at least 6 characters.'
       );
       expect(mapChangePasswordError(new Error('Random error'), 'Failed to change password.')).toBe(
-        'Random error'
+        'Failed to change password.'
       );
     });
   });
@@ -291,3 +291,9 @@ describe('authValidation', () => {
   });
 });
 
+
+ describe('Safe password errors', () => {
+  test.each(['{"error":{"message":"provider secret"}}', '<html>upstream error</html>', 'Brevo failed: {"code":401}', 'Firebase: raw diagnostic'])('hides %s', message => {
+    expect(mapChangePasswordError(new Error(message), 'Please try again.')).toBe('Please try again.');
+  });
+ });

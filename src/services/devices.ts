@@ -1,3 +1,4 @@
+import { normalizeAlert } from '@/utils/alerts';
 import {
   ref,
   onValue,
@@ -502,7 +503,7 @@ export async function saveDeviceAlertToRTDB(
       id: alert.id,
       type: alert.type || 'warning',
       severity: alert.severity || alert.type || 'warning',
-      title: alert.title || 'System Notice',
+      title: normalizeAlert(alert).title,
       message: msg,
       body: alert.body || msg,
       description: alert.description || msg,
@@ -595,9 +596,8 @@ export const listenToDeviceAlerts = (
   onData: (alerts: DeviceAlertRecord[]) => void
 ) => {
   const alertsRef = ref(db, `devices/${deviceId}/alerts`);
-  const alertsQuery = query(alertsRef, limitToLast(50));
-  // Trigger cleanup routine for expired resolved items older than 7 days
-  cleanupOldDeviceAlertsFromRTDB(deviceId);
+  const alertsQuery = alertsRef; // Sort mixed legacy timestamp formats on the client before limiting.
+  // Viewing the inbox never deletes underlying records.
 
   const unsubscribe = onValue(alertsQuery, (snapshot) => {
     if (snapshot.exists()) {
@@ -605,43 +605,7 @@ export const listenToDeviceAlerts = (
       const list: DeviceAlertRecord[] = Object.keys(data)
         .map((key) => {
           const item = data[key];
-          const tsVal = item.createdAt || item.timestamp || item.ts || Date.now();
-          const alertType =
-            item.type === 'critical' || item.type === 'warning' || item.type === 'info'
-              ? item.type
-              : item.type === 'LOW_WATER' || item.type === 'PUMP_ERROR'
-              ? 'critical'
-              : 'warning';
-          const statusVal =
-            item.status === 'resolved' || item.status === 'RESOLVED' || item.status === 'read'
-              ? 'resolved'
-              : 'active';
-          const titleVal =
-            item.title && String(item.title).trim().length > 0
-              ? String(item.title).trim()
-              : alertType === 'critical'
-              ? 'Low Reservoir Water'
-              : 'System Notice';
-          const messageVal =
-            item.message && String(item.message).trim().length > 0
-              ? String(item.message).trim()
-              : item.description && String(item.description).trim().length > 0
-              ? String(item.description).trim()
-              : item.body && String(item.body).trim().length > 0
-              ? String(item.body).trim()
-              : 'Water level is low. Please refill the reservoir.';
-
-          return {
-            id: key,
-            ...item,
-            title: titleVal,
-            message: messageVal,
-            type: alertType,
-            status: statusVal,
-            createdAt: tsVal,
-            timestamp: tsVal,
-            ts: tsVal,
-          };
+          return normalizeAlert({ ...item, id: key } as DeviceAlertRecord);
         })
         // Enforce 7-day retention filter: guard against undefined timestamps and do NOT auto-delete active unresolved alerts
         .filter((item) => {

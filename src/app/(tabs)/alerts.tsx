@@ -1,3 +1,4 @@
+import { formatAlertTime as formatTime } from '@/utils/alerts';
 /**
  * Alerts Screen – "Inbox Stack"
  * Severity-grouped alert inbox with swipe gestures.
@@ -6,7 +7,7 @@
  * - Info: lime
  * uiLayout.md Section 6
  */
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -88,31 +89,6 @@ export default function AlertsScreen() {
     [handleAction]
   );
 
-  const getAlertTime = (alert: AppAlert) =>
-    alert.timestamp ?? alert.createdAt ?? alert.ts ?? 0;
-
-  // Filter displayed alerts strictly to today only (timestamp >= startOfTodayMs), sorted newest-first
-  const startOfTodayMs = useMemo(() => new Date().setHours(0, 0, 0, 0), []);
-
-  const todayAlerts = useMemo(() => {
-    return alerts
-      .filter((alert) => getAlertTime(alert) >= startOfTodayMs)
-      .sort((a, b) => getAlertTime(b) - getAlertTime(a));
-  }, [alerts, startOfTodayMs]);
-
-  // Cap rendered items to max 25 items
-  const cappedAlerts = useMemo(() => todayAlerts.slice(0, 25), [todayAlerts]);
-
-  const todayUnread = useMemo(
-    () => unreadAlerts.filter((a) => getAlertTime(a) >= startOfTodayMs),
-    [unreadAlerts, startOfTodayMs]
-  );
-
-  const todayCritical = useMemo(
-    () => criticalAlerts.filter((a) => getAlertTime(a) >= startOfTodayMs),
-    [criticalAlerts, startOfTodayMs]
-  );
-
   if (!device || pairingStatus === 'unpaired') {
     return (
       <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
@@ -165,10 +141,13 @@ export default function AlertsScreen() {
           />
           <View style={{ flex: 1 }}>
             <Text style={[styles.cardTitle, { color: colors.textMuted }]}>
-              {formatTemperatureText(item.title?.trim() || 'System Notice', tempUnit)}
+              {formatTemperatureText(item.title, tempUnit)}
+            </Text>
+            <Text style={[styles.cardBody, { color: colors.textMuted }]}>
+              {formatTemperatureText(item.message, tempUnit)}
             </Text>
             <Text style={[styles.cardTime, { color: colors.textMuted }]}>
-              {formatTime(item.ts ?? item.timestamp ?? item.createdAt)}
+              {formatTime(item.createdAt)}
             </Text>
           </View>
         </View>
@@ -221,7 +200,7 @@ export default function AlertsScreen() {
               {isCloudSynced ? 'Cloud Synced' : 'Local Engine'}
             </Text>
           </View>
-          {todayUnread.length > 0 && (
+          {unreadAlerts.length > 0 && (
             <TouchableOpacity onPress={markAllRead}>
               <Text style={{ fontSize: 12, fontWeight: '700', color: colors.palette.forest }}>
                 Mark all read
@@ -231,13 +210,13 @@ export default function AlertsScreen() {
         </View>
       </View>
       <Text style={[styles.subtitle, { color: colors.textMuted }]}>
-        {todayUnread.length > 0
-          ? `${todayUnread.length} item${todayUnread.length > 1 ? 's' : ''} need your attention`
+        {unreadAlerts.length > 0
+          ? `${unreadAlerts.length} item${unreadAlerts.length > 1 ? 's' : ''} need your attention`
           : 'All caught up'}
       </Text>
 
       {/* Pinned critical banner */}
-      {todayCritical.length > 0 && (
+      {criticalAlerts.length > 0 && (
         <View
           style={[
             styles.criticalBanner,
@@ -255,19 +234,19 @@ export default function AlertsScreen() {
           />
           <View style={{ flex: 1 }}>
             <Text style={[styles.bannerTitle, { color: colors.palette.critical }]}>
-              {formatTemperatureText(todayCritical[0].title?.trim() || 'System Notice', tempUnit)}
+              {formatTemperatureText(criticalAlerts[0].title, tempUnit)}
             </Text>
             <Text style={[styles.bannerBody, { color: '#8B3040' }]}>
               {formatTemperatureText(
-                todayCritical[0].message?.trim() ||
-                  todayCritical[0].description?.trim() ||
-                  todayCritical[0].body?.trim() ||
+                criticalAlerts[0].message?.trim() ||
+                  criticalAlerts[0].description?.trim() ||
+                  criticalAlerts[0].body?.trim() ||
                   'Critical system notice.',
                 tempUnit
               )}
             </Text>
           </View>
-          {todayCritical[0].actionLabel && (
+          {criticalAlerts[0].actionLabel && (
             <TouchableOpacity
               style={[
                 styles.bannerAction,
@@ -276,10 +255,10 @@ export default function AlertsScreen() {
                   borderRadius: radii.md,
                 },
               ]}
-              onPress={() => onAlertAction(todayCritical[0])}
+              onPress={() => onAlertAction(criticalAlerts[0])}
             >
               <Text style={styles.bannerActionText}>
-                {todayCritical[0].actionLabel}
+                {criticalAlerts[0].actionLabel}
               </Text>
             </TouchableOpacity>
           )}
@@ -319,7 +298,7 @@ export default function AlertsScreen() {
       style={[styles.safeArea, { backgroundColor: colors.background }]}
     >
       <FlatList
-        data={cappedAlerts}
+        data={alerts}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
         ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
@@ -399,22 +378,9 @@ function SwipeableAlertCard({
     opacity: opacity.value,
   }));
 
-  const rawTitle = (alert.title && alert.title.trim().length > 0)
-    ? alert.title.trim()
-    : 'System Notice';
-
-  const rawBody = (alert.message && alert.message.trim().length > 0)
-    ? alert.message.trim()
-    : (alert.description && alert.description.trim().length > 0)
-    ? alert.description.trim()
-    : (alert.body && alert.body.trim().length > 0)
-    ? alert.body.trim()
-    : '';
-
-  const displayTitle = formatTemperatureText(rawTitle, tempUnit);
-  const displayBody = formatTemperatureText(rawBody, tempUnit);
-
-  const timestamp = alert.createdAt ?? alert.ts ?? alert.timestamp;
+  const displayTitle = formatTemperatureText(alert.title, tempUnit);
+  const displayBody = formatTemperatureText(alert.message, tempUnit);
+  const timestamp = alert.createdAt;
 
   return (
     <Animated.View entering={FadeIn.springify()}>
@@ -481,22 +447,6 @@ function SwipeableAlertCard({
       </GestureDetector>
     </Animated.View>
   );
-}
-
-function formatTime(ts: number | undefined): string {
-  const parsed = typeof ts === 'number' ? ts : Number(ts);
-  if (!ts || !isFinite(parsed) || parsed <= 0) return 'Just now';
-  const diffMs = Date.now() - parsed;
-  if (diffMs < 0) return 'Just now';
-  const diffH = Math.floor(diffMs / 3600000);
-  const diffMin = Math.floor((diffMs % 3600000) / 60000);
-  if (diffH >= 24) {
-    const diffD = Math.floor(diffH / 24);
-    return `${diffD}d ago`;
-  }
-  if (diffH > 0) return `${diffH}h ago`;
-  if (diffMin > 0) return `${diffMin}m ago`;
-  return 'just now';
 }
 
 const styles = StyleSheet.create({

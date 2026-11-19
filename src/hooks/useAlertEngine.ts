@@ -1,3 +1,4 @@
+import { latestAlerts, unreadVisibleAlerts } from '@/utils/alerts';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { create } from 'zustand';
 import { ref, onValue } from 'firebase/database';
@@ -662,32 +663,25 @@ function syncAlertSession(uid: string | null, activeDeviceId: string | null) {
       const unsub = listenToDeviceAlerts(activeDeviceId, (devAlerts: DeviceAlertRecord[]) => {
         const liveDev = useLiveDevice.getState().devices[activeDeviceId];
         const mapped: AppAlert[] = devAlerts.map((da) => {
-          const tsVal = da.createdAt || da.timestamp || da.ts || Date.now();
-          const messageBody =
-            da.message && da.message.trim().length > 0
-              ? da.message.trim()
-              : da.description && da.description.trim().length > 0
-              ? da.description.trim()
-              : da.body && da.body.trim().length > 0
-              ? da.body.trim()
-              : 'Water level is low. Please refill the reservoir.';
+          const tsVal = da.createdAt;
+          const messageBody = da.message;
           const isLowWater = da.type === 'LOW_WATER' || da.type === 'critical';
           const sev: AlertSeverity =
-            isLowWater || da.status === 'ACTIVE' || da.status === 'active' ? 'critical' : 'warning';
+            isLowWater || da.type === 'PUMP_ERROR' ? 'critical' : da.type === 'info' || da.type === 'INFO_ALERT' ? 'info' : 'warning';
           const statusVal: AlertStatus =
             da.status === 'resolved' || da.status === 'RESOLVED' || da.status === 'read'
               ? 'resolved'
-              : 'active';
+              : da.status === 'snoozed' ? 'snoozed' : 'active';
 
           return {
             id: da.id,
             severity: (da.severity as AlertSeverity) || sev,
             alertType: (da.severity as AlertSeverity) || sev,
             type: da.type || sev,
-            title: da.title?.trim() || (isLowWater ? 'Low Reservoir Water' : 'System Notice'),
-            body: messageBody,
+            title: da.title,
             message: messageBody,
-            description: da.description || messageBody,
+            description: da.description,
+            body: da.body || messageBody,
             plantName: liveDev?.config?.plantName || 'Plant',
             deviceId: activeDeviceId,
             createdAt: tsVal,
@@ -727,13 +721,8 @@ function syncAlertSession(uid: string | null, activeDeviceId: string | null) {
       const unsub = listenToUserAlerts(uid, (cloudAlerts: CloudAlertRecord[]) => {
         const currentDevs = useLiveDevice.getState().devices;
         const mapped: AppAlert[] = cloudAlerts.map((ca) => {
-          const tsVal = ca.createdAt || ca.timestamp || ca.ts || Date.now();
-          const messageBody =
-            ca.message && ca.message.trim().length > 0
-              ? ca.message.trim()
-              : ca.description && ca.description.trim().length > 0
-              ? ca.description.trim()
-              : 'System alert notification.';
+          const tsVal = ca.createdAt || 0;
+          const messageBody = ca.message || '';
           const sev: AlertSeverity =
             ca.severity === 'critical' || ca.severity === 'warning' || ca.severity === 'info'
               ? ca.severity
@@ -743,17 +732,17 @@ function syncAlertSession(uid: string | null, activeDeviceId: string | null) {
               ? 'warning'
               : 'info';
           const statusVal: AlertStatus =
-            ca.read || ca.status === 'resolved' || ca.status === 'read' ? 'resolved' : 'active';
+            ca.read || ca.status === 'resolved' || ca.status === 'read' ? 'resolved' : ca.status === 'snoozed' ? 'snoozed' : 'active';
 
           return {
             id: ca.id,
             severity: sev,
             alertType: sev,
             type: ca.type || sev,
-            title: ca.title?.trim() || 'System Notice',
-            body: messageBody,
+            title: ca.title || 'Plant Controller Update',
             message: messageBody,
-            description: ca.description || messageBody,
+            description: ca.description,
+            body: ca.body || messageBody,
             plantName: currentDevs[ca.deviceId]?.config?.plantName || 'Plant',
             deviceId: ca.deviceId,
             createdAt: tsVal,
@@ -841,14 +830,8 @@ export function useAlertEngine() {
       }
     }
 
-    const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
-
     return Array.from(map.values())
       .filter((alert) => {
-        const ts = alert.timestamp ?? alert.createdAt ?? alert.ts ?? 0;
-        // Strictly filter to today only
-        if (ts < startOfTodayMs) return false;
-
         const isResolved = alert.status === 'resolved' || alert.status === 'read';
         if (!isResolved) return true;
         return Boolean(alert.createdAt && currentTime - alert.createdAt <= SEVEN_DAYS_MS);
@@ -858,6 +841,8 @@ export function useAlertEngine() {
           (b.timestamp ?? b.createdAt ?? b.ts ?? 0) - (a.timestamp ?? a.createdAt ?? a.ts ?? 0)
       );
   }, [localAlerts, deviceAlerts, userAlerts, statusOverrides, dismissedIds, user, currentTime]);
+
+  const visibleAlerts = useMemo(() => latestAlerts(retainedAlerts), [retainedAlerts]);
 
   const markRead = useCallback(
     (id: string) => {
@@ -875,7 +860,7 @@ export function useAlertEngine() {
 
   const markAllRead = useCallback(() => {
     const nextOverrides: Record<string, AlertStatus> = {};
-    retainedAlerts.forEach((a) => {
+    visibleAlerts.forEach((a) => {
       nextOverrides[a.id] = 'read';
       if (a.deviceId) {
         updateDeviceAlertInRTDB(a.deviceId, a.id, { status: 'resolved' });
@@ -885,7 +870,7 @@ export function useAlertEngine() {
       }
     });
     setAllStatusOverrides(nextOverrides);
-  }, [retainedAlerts, user, isCloudSynced, setAllStatusOverrides]);
+  }, [visibleAlerts, user, isCloudSynced, setAllStatusOverrides]);
 
   const snooze = useCallback(
     (id: string) => {
@@ -928,8 +913,8 @@ export function useAlertEngine() {
   );
 
   const unreadAlerts = useMemo(
-    () => retainedAlerts.filter((a) => a.status === 'active' || a.status === 'unread'),
-    [retainedAlerts]
+    () => unreadVisibleAlerts(visibleAlerts),
+    [visibleAlerts]
   );
   const criticalAlerts = useMemo(
     () => unreadAlerts.filter((a) => a.severity === 'critical'),
@@ -945,7 +930,7 @@ export function useAlertEngine() {
   );
 
   return {
-    alerts: retainedAlerts,
+    alerts: visibleAlerts,
     unreadAlerts,
     criticalAlerts,
     warningAlerts,

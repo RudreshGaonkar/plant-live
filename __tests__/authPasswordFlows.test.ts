@@ -447,3 +447,9 @@ describe('Auth Password Flows: Unit & Integration', () => {
     });
   });
 });
+
+ describe('Safe password errors', () => {
+  test.each(['{"error":{"message":"provider secret"}}', '<html>upstream error</html>', 'Brevo failed: {"code":401}', 'Firebase: raw diagnostic'])('hides %s', message => {
+    expect(mapChangePasswordError(new Error(message), 'Please try again.')).toBe('Please try again.');
+  });
+ });

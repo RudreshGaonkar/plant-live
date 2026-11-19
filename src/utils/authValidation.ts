@@ -1,3 +1,4 @@
+import { mapOtpError } from './otpErrors';
 import { z } from 'zod';
 
 export interface ValidationResult {
@@ -314,7 +315,7 @@ export function mapChangePasswordError(
   if (code === 'auth/requires-recent-login') {
     return 'For security reasons, please log out and sign back in before modifying your password.';
   }
-  return mapAuthError(error, fallback);
+  return mapOtpError(error, mapAuthError({ code }, fallback));
 }
 
 /**

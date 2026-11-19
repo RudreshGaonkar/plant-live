@@ -1,6 +1,7 @@
+import { normalizeAlert } from '@/utils/alerts';
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
-import { limitToLast, onValue, push, query, ref, remove, set } from 'firebase/database';
+import { onValue, push, ref, remove, set } from 'firebase/database';
 import { Platform } from 'react-native';
 import { db } from './firebase';
 
@@ -37,6 +38,7 @@ export interface CloudAlertRecord {
   title?: string;
   message?: string;
   description?: string;
+  body?: string;
   status?: string;
   read?: boolean;
 }
@@ -160,18 +162,17 @@ export async function cleanupOldUserAlertsFromRTDB(uid: string) {
 
 /**
  * Attaches a realtime listener to `users/{uid}/alerts` (and legacy `alerts/{uid}`)
- * with query limitToLast(50) and 7-day retention enforcement.
+ * with client-side timestamp ordering and retention filtering.
  * Active unresolved alerts are preserved regardless of age.
  */
 export function listenToUserAlerts(
   uid: string,
   onAlerts: (alerts: CloudAlertRecord[]) => void
 ) {
-  // Primary path: /users/{uid}/alerts with limitToLast(50)
+  // Read all candidates: RTDB key order cannot rank mixed timestamp formats.
   const userAlertsRef = ref(db, `users/${uid}/alerts`);
-  const alertsQuery = query(userAlertsRef, limitToLast(50));
-  // Execute database cleanup for expired alerts
-  cleanupOldUserAlertsFromRTDB(uid);
+  const alertsQuery = userAlertsRef;
+  // Viewing the inbox never deletes underlying records.
 
   const unsubscribe = onValue(alertsQuery, (snapshot) => {
     if (snapshot.exists()) {
@@ -179,14 +180,7 @@ export function listenToUserAlerts(
       const list: CloudAlertRecord[] = Object.keys(data)
         .map((key) => {
           const item = data[key];
-          const tsVal = item.createdAt || item.ts || item.timestamp || Date.now();
-          return {
-            id: key,
-            ...item,
-            createdAt: tsVal,
-            ts: tsVal,
-            timestamp: item.timestamp || tsVal,
-          };
+          return normalizeAlert({ ...item, id: key } as CloudAlertRecord);
         })
         // Enforce 7-day retention filter: guard against undefined timestamps and do NOT auto-delete active unresolved alerts
         .filter((item) => {
@@ -199,22 +193,15 @@ export function listenToUserAlerts(
       list.sort((a, b) => (b.createdAt || b.ts || b.timestamp || 0) - (a.createdAt || a.ts || a.timestamp || 0));
       onAlerts(list);
     } else {
-      // Legacy path fallback: /alerts/{uid} with limitToLast(50)
-      const legacyRef = query(ref(db, `alerts/${uid}`), limitToLast(50));
+      // Legacy path fallback: /alerts/{uid}
+      const legacyRef = ref(db, `alerts/${uid}`);
       onValue(legacyRef, (legacySnap) => {
         if (legacySnap.exists()) {
           const data = legacySnap.val();
           const list: CloudAlertRecord[] = Object.keys(data)
             .map((key) => {
               const item = data[key];
-              const tsVal = item.createdAt || item.ts || item.timestamp || Date.now();
-              return {
-                id: key,
-                ...item,
-                createdAt: tsVal,
-                ts: tsVal,
-                timestamp: item.timestamp || tsVal,
-              };
+              return normalizeAlert({ ...item, id: key } as CloudAlertRecord);
             })
             .filter((item) => {
               const isResolved = item.read || item.status === 'resolved' || item.status === 'read';

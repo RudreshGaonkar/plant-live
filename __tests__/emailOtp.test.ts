@@ -5,7 +5,7 @@ import {
   getOtpWorkerUrl,
 } from '../src/services/emailOtp';
 import { auth } from '../src/services/firebase';
-import otpWorker from '../otp-worker/src/index';
+import otpWorker, { sendEmailViaBrevo, deliverStoredOtp } from '../otp-worker/src/index';
 import {
   EmailAuthProvider,
   reauthenticateWithCredential,
@@ -175,6 +175,7 @@ describe('Email OTP Service & Cloudflare Worker Suite', () => {
         ok: false,
         status: 400,
         json: async () => ({
+          code: 'OTP_INVALID',
           error: 'Invalid code. 3 attempts remaining.',
           attemptsRemaining: 3,
         }),
@@ -202,7 +203,7 @@ describe('Email OTP Service & Cloudflare Worker Suite', () => {
         delete: jest.fn(),
       } as any,
       FIREBASE_PROJECT_ID: 'leaflink-7c669',
-      MAIL_API_KEY: 're_test_key_123',
+      BREVO_API_KEY: 'brevo-test-key',
       OTP_HMAC_SECRET: '6ccc8a285917822a5a05fe5bce216ddd804d193182462111a1ed7d2b420eae59',
     };
 
@@ -236,7 +237,7 @@ describe('Email OTP Service & Cloudflare Worker Suite', () => {
 
       expect(response.status).toBe(401);
       const data = await response.json();
-      expect(data.error).toContain('Authorization');
+      expect(data.code).toBe('OTP_AUTH_REQUIRED');
     });
 
     it('returns 404 for unknown endpoints', async () => {
@@ -360,4 +361,34 @@ describe('Email OTP Service & Cloudflare Worker Suite', () => {
       expect(updatePassword).not.toHaveBeenCalled();
     });
   });
+});
+
+describe('Brevo delivery and safe service errors', () => {
+  beforeEach(() => { global.fetch = jest.fn(); });
+  test('sends the Brevo transactional API contract', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({ ok: true, status: 201 });
+    await sendEmailViaBrevo('test-key', 'recipient@example.com', '123456');
+    const [url, request] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe('https://api.brevo.com/v3/smtp/email');
+    expect(request.headers['api-key']).toBe('test-key');
+    expect(JSON.parse(request.body)).toMatchObject({ sender: { name: 'LeafLink Security', email: 'naruto.gaonkar2599@gmail.com' }, to: [{ email: 'recipient@example.com' }], subject: 'LeafLink Security Verification Code', htmlContent: expect.stringContaining('123456') });
+  });
+  test('does not expose provider response bodies', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({ ok: false, status: 401, text: async () => '{"secret":"provider"}' });
+    await expect(sendEmailViaBrevo('test-key', 'recipient@example.com', '123456')).rejects.toThrow('OTP_DELIVERY_FAILED');
+  });
+});
+
+test('failed delivery deletes unsent OTP and cooldown record', async () => {
+  global.fetch = jest.fn().mockRejectedValue(new Error('network failure'));
+  const env = { BREVO_API_KEY: 'test', OTP_KV: { get: jest.fn(), put: jest.fn(), delete: jest.fn() }, FIREBASE_PROJECT_ID: 'project', OTP_HMAC_SECRET: 'test' };
+  expect(await deliverStoredOtp(env, 'otp:user', 'user@example.com', '123456')).toBe(false);
+  expect(env.OTP_KV.delete).toHaveBeenCalledWith('otp:user');
+});
+test.each([ { error: { nested: 'secret' } }, { error: '<html>secret</html>' }, { error: 'Brevo: {"secret":1}' } ])('service sanitizes %s', async data => {
+  process.env.EXPO_PUBLIC_OTP_WORKER_URL = 'https://worker.example';
+  mockUser = { uid: 'user', email: 'user@example.com', displayName: null, emailVerified: true, getIdToken: jest.fn().mockResolvedValue('token') };
+  global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 502, json: async () => data });
+  await expect(sendEmailOtp()).rejects.toThrow('Failed to send verification code. Please try again.');
+  await expect(verifyEmailOtp('123456')).rejects.toThrow('Verification failed. Please try again.');
 });

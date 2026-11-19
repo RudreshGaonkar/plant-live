@@ -1,3 +1,4 @@
+import { latestAlerts, MAX_VISIBLE_ALERTS, normalizeAlert, unreadVisibleAlerts } from '../src/utils/alerts';
 import {
   saveDeviceAlertToRTDB,
   updateDeviceAlertInRTDB,
@@ -6,7 +7,7 @@ import {
 } from '../src/services/devices';
 import { listenToUserAlerts } from '../src/services/notifications';
 import { db } from '../src/services/firebase';
-import { set, update, ref, query, limitToLast } from 'firebase/database';
+import { set, update, ref, limitToLast, onValue } from 'firebase/database';
 
 jest.mock('react-native', () => ({
   Platform: { OS: 'ios' },
@@ -314,30 +315,24 @@ describe('Alerts Engine & Retention Suite', () => {
     });
   });
 
-  describe('5. RTDB Query Capping & Today-Only Filter (limitToLast(50))', () => {
-    test('listenToDeviceAlerts queries /devices/{deviceId}/alerts with limitToLast(50)', () => {
+  describe('5. RTDB retrieval and latest-eight display', () => {
+    test('listenToDeviceAlerts queries /devices/{deviceId}/alerts without truncating candidates by key', () => {
       listenToDeviceAlerts('node-test-01', jest.fn());
 
       expect(ref).toHaveBeenCalledWith(db, 'devices/node-test-01/alerts');
-      expect(limitToLast).toHaveBeenCalledWith(50);
-      expect(query).toHaveBeenCalledWith(
-        expect.objectContaining({ path: 'devices/node-test-01/alerts' }),
-        expect.objectContaining({ limitToLast: 50 })
-      );
+      expect(limitToLast).not.toHaveBeenCalled();
+
     });
 
-    test('listenToUserAlerts queries /users/{uid}/alerts with limitToLast(50)', () => {
+    test('listenToUserAlerts queries /users/{uid}/alerts without truncating candidates by key', () => {
       listenToUserAlerts('user-123', jest.fn());
 
       expect(ref).toHaveBeenCalledWith(db, 'users/user-123/alerts');
-      expect(limitToLast).toHaveBeenCalledWith(50);
-      expect(query).toHaveBeenCalledWith(
-        expect.objectContaining({ path: 'users/user-123/alerts' }),
-        expect.objectContaining({ limitToLast: 50 })
-      );
+      expect(limitToLast).not.toHaveBeenCalled();
+
     });
 
-    test('filters alerts strictly to today only and caps rendered items to max 25', () => {
+    test('keeps latest eight across midnight', () => {
       const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
       const yesterday = startOfTodayMs - 3600000;
       const todayEarlier = startOfTodayMs + 1000 * 60;
@@ -354,18 +349,12 @@ describe('Alerts Engine & Retention Suite', () => {
         })),
       ];
 
-      // Filter displayed alerts strictly to today only (timestamp >= startOfTodayMs), sorted newest-first
-      const todayAlerts = alerts
-        .filter((a) => (a.createdAt || 0) >= startOfTodayMs)
-        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      const capped = latestAlerts(alerts.map(normalizeAlert));
+      expect(capped).toHaveLength(MAX_VISIBLE_ALERTS);
+      expect(capped[0].id).toBe('today-29');
+      expect(capped[7].id).toBe('today-22');
+      expect(latestAlerts([alerts[0]])[0].id).toBe('yesterday-1');
 
-      // Capped to max 25 items
-      const capped = todayAlerts.slice(0, 25);
-
-      expect(todayAlerts).toHaveLength(30);
-      expect(todayAlerts.some((a) => a.id === 'yesterday-1')).toBe(false);
-      expect(capped).toHaveLength(25);
-      expect(capped[0].createdAt).toBeGreaterThan(capped[1].createdAt!);
     });
 
     test('evaluation tick does not spam duplicate identical alerts if an alert exists for today', () => {
@@ -419,5 +408,26 @@ describe('Alerts Engine & Retention Suite', () => {
       const shouldSkip = !unhydrated.telemetry || unhydrated.status.lastSeen === 0;
       expect(shouldSkip).toBe(true);
     });
+  });
+});
+
+describe('Alert ingestion regression tests', () => {
+  test.each([listenToDeviceAlerts, listenToUserAlerts])('preserves body-only and timestamp data through listeners', listen => {
+    const callback = jest.fn();
+    (onValue as jest.Mock).mockImplementationOnce((_ref, receive) => {
+      receive({ exists: () => true, val: () => ({ key: { type: 'dry', body: 'Soil at 12%', status: 'active', createdAt: '2026-11-18T10:00:00Z' } }) });
+      return jest.fn();
+    });
+    listen('owner', callback);
+    expect(callback).toHaveBeenCalledWith([expect.objectContaining({ id: 'key', title: 'Soil Needs Water', message: 'Soil at 12%', body: 'Soil at 12%', createdAt: Date.parse('2026-11-18T10:00:00Z') })]);
+  });
+  test('attention and critical candidates only include visible eight', () => {
+    const alerts = Array.from({ length: 12 }, (_, i) => ({ id: String(i), createdAt: 1795000000000 + i * 1000, status: i === 11 ? 'read' : 'active', severity: i < 4 ? 'critical' : 'info' }));
+    const visible = latestAlerts(alerts);
+    const unread = unreadVisibleAlerts(visible);
+    expect(visible).toHaveLength(8);
+    expect(unread).toHaveLength(7);
+    expect(unread.filter(a => a.severity === 'critical')).toHaveLength(0);
+    expect(visible.map(a => a.id)).not.toContain('3');
   });
 });

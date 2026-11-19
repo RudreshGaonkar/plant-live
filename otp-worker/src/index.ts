@@ -14,7 +14,7 @@ export type KVNamespaceBinding = {
 export interface Env {
   OTP_KV: KVNamespaceBinding;
   FIREBASE_PROJECT_ID: string;
-  MAIL_API_KEY: string;
+  BREVO_API_KEY: string;
   OTP_HMAC_SECRET: string;
 }
 
@@ -231,22 +231,22 @@ function generateSecure6DigitOtp(): string {
   return (value % 1000000).toString().padStart(6, '0');
 }
 
-async function sendEmailViaResend(
+export async function sendEmailViaBrevo(
   apiKey: string,
   toEmail: string,
   otpCode: string
 ): Promise<void> {
-  const response = await fetch('https://api.resend.com/emails', {
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${apiKey}`,
+      'api-key': apiKey,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: 'LeafLink Security <onboarding@resend.dev>',
-      to: [toEmail],
+      sender: { name: 'LeafLink Security', email: 'naruto.gaonkar2599@gmail.com' },
+      to: [{ email: toEmail }],
       subject: 'LeafLink Security Verification Code',
-      html: `
+      htmlContent: `
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 28px; border: 1px solid #E2E8F0; border-radius: 12px; background-color: #FFFFFF;">
           <h2 style="color: #2D5A27; margin-top: 0; font-size: 22px;">LeafLink Verification</h2>
           <p style="color: #4A5568; font-size: 15px; line-height: 1.5;">
@@ -268,8 +268,17 @@ async function sendEmailViaResend(
   });
 
   if (!response.ok) {
-    const errorDetails = await response.text();
-    throw new Error(`Resend email delivery failed (${response.status}): ${errorDetails}`);
+    throw new Error('OTP_DELIVERY_FAILED');
+  }
+}
+
+export async function deliverStoredOtp(env: Env, kvKey: string, email: string, code: string): Promise<boolean> {
+  try {
+    await sendEmailViaBrevo(env.BREVO_API_KEY, email, code);
+    return true;
+  } catch {
+    await env.OTP_KV.delete(kvKey);
+    return false;
   }
 }
 
@@ -331,7 +340,9 @@ export default {
 
         await env.OTP_KV.put(kvKey, JSON.stringify(newRecord), { expirationTtl: 300 });
 
-        await sendEmailViaResend(env.MAIL_API_KEY, email, otpCode);
+        if (!(await deliverStoredOtp(env, kvKey, email, otpCode))) {
+          return jsonResponse({ code: 'OTP_DELIVERY_FAILED', error: 'Unable to send the verification code. Please try again later.' }, 502);
+        }
 
         return jsonResponse({
           success: true,
@@ -360,7 +371,7 @@ export default {
 
         const code = body.code?.trim();
         if (!code || !/^\d{6}$/.test(code)) {
-          return jsonResponse({ error: 'Please enter a valid 6-digit verification code' }, 400);
+          return jsonResponse({ code: 'OTP_INVALID', error: 'Please enter a valid 6-digit verification code' }, 400);
         }
 
         const kvKey = `otp:${uid}`;
@@ -372,7 +383,7 @@ export default {
             await env.OTP_KV.delete(kvKey);
           }
           return jsonResponse(
-            { error: 'Verification code expired or not found. Please request a new one.' },
+            { code: 'OTP_EXPIRED', error: 'Verification code expired or not found. Please request a new one.' },
             400
           );
         }
@@ -391,7 +402,7 @@ export default {
         if (record.attempts >= 5) {
           await env.OTP_KV.delete(kvKey);
           return jsonResponse(
-            { error: 'Too many invalid attempts. This verification code has been invalidated.' },
+            { code: 'OTP_ATTEMPTS_EXCEEDED', error: 'Too many invalid attempts. This verification code has been invalidated.' },
             400
           );
         }
@@ -403,6 +414,7 @@ export default {
         return jsonResponse(
           {
             error: `Invalid code. ${attemptsRemaining} attempt${attemptsRemaining === 1 ? '' : 's'} remaining.`,
+            code: 'OTP_INVALID',
             attemptsRemaining,
           },
           400
@@ -423,7 +435,7 @@ export default {
         message.includes('signature') ||
         message.includes('JWKS');
 
-      return jsonResponse({ error: message }, isAuthError ? 401 : 500);
+      return jsonResponse({ code: isAuthError ? 'OTP_AUTH_REQUIRED' : 'OTP_INTERNAL_ERROR', error: isAuthError ? 'Please sign in again with a verified email address.' : 'Unable to process verification. Please try again later.' }, isAuthError ? 401 : 500);
     }
   },
 };

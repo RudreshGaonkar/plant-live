@@ -1,3 +1,4 @@
+import { normalizeAlert, parseAlertTimestamp, formatAlertTime, latestAlerts } from '../src/utils/alerts';
 import { computePlantHealthState, createDefaultDeviceRecord, DeviceRecord, DeviceTelemetry, useLiveDevice } from '../src/store/useLiveDevice';
 import {
   rawToMoisturePercent,
@@ -360,28 +361,11 @@ describe('Unit Tests: Water Level Detection & Event Trigger Payload', () => {
 });
 
 describe('Unit Tests: Alert Card Text Binding & Fallbacks', () => {
-  const resolveAlertCardTexts = (alert: {
-    title?: string;
-    message?: string;
-    description?: string;
-    body?: string;
-  }) => {
-    const title = (alert.title && alert.title.trim().length > 0)
-      ? alert.title.trim()
-      : 'System Notice';
-    const message = (alert.message && alert.message.trim().length > 0)
-      ? alert.message.trim()
-      : (alert.description && alert.description.trim().length > 0)
-      ? alert.description.trim()
-      : (alert.body && alert.body.trim().length > 0)
-      ? alert.body.trim()
-      : 'No additional details provided.';
-    return { title, message };
-  };
+  const resolveAlertCardTexts = normalizeAlert;
 
-  test('falls back to "System Notice" when title is undefined or empty', () => {
-    expect(resolveAlertCardTexts({ title: undefined, message: 'Sample' }).title).toBe('System Notice');
-    expect(resolveAlertCardTexts({ title: '   ', message: 'Sample' }).title).toBe('System Notice');
+  test('falls back to a controller update when title is undefined or empty', () => {
+    expect(resolveAlertCardTexts({ title: undefined, message: 'Sample' }).title).toBe('Plant Controller Update');
+    expect(resolveAlertCardTexts({ title: '   ', message: 'Sample' }).title).toBe('Plant Controller Update');
     expect(resolveAlertCardTexts({ title: 'Pump Failure', message: 'Sample' }).title).toBe('Pump Failure');
   });
 
@@ -393,7 +377,7 @@ describe('Unit Tests: Alert Card Text Binding & Fallbacks', () => {
     // 3. body fallback
     expect(resolveAlertCardTexts({ body: 'Tertiary body' }).message).toBe('Tertiary body');
     // 4. none provided fallback
-    expect(resolveAlertCardTexts({}).message).toBe('No additional details provided.');
+    expect(resolveAlertCardTexts({}).message).toBe('Plant Controller Update. Check your controller for details.');
   });
 });
 
@@ -445,40 +429,13 @@ describe('Unit Tests: Alert Record Formatting & Field Completeness', () => {
       { id: '3', title: 'Check Sensor', body: 'Sensor offline', status: 'read', ts: Date.now() },
     ];
 
-    const formatted = rawAlerts.map((a) => {
-      const alertType =
-        a.type === 'critical' || a.type === 'warning' || a.type === 'info'
-          ? a.type
-          : a.type === 'LOW_WATER'
-          ? 'critical'
-          : 'warning';
-      const status =
-        a.status === 'resolved' || a.status === 'read' ? 'resolved' : 'active';
-      const title =
-        a.title && a.title.trim().length > 0 ? a.title.trim() : 'System Notice';
-      const message =
-        a.message && a.message.trim().length > 0
-          ? a.message.trim()
-          : (a as any).body && (a as any).body.trim().length > 0
-          ? (a as any).body.trim()
-          : 'No additional details provided.';
-      const createdAt = a.createdAt || (a as any).timestamp || (a as any).ts || Date.now();
-
-      return {
-        id: a.id,
-        title,
-        message,
-        type: alertType,
-        status,
-        createdAt,
-      };
-    });
+    const formatted = rawAlerts.map(normalizeAlert);
 
     formatted.forEach((item) => {
       expect(item.title.length).toBeGreaterThan(0);
       expect(item.message.length).toBeGreaterThan(0);
-      expect(['info', 'warning', 'critical']).toContain(item.type);
-      expect(['active', 'resolved']).toContain(item.status);
+      expect(rawAlerts.some(raw => raw.type === item.type)).toBe(true);
+      expect(['active', 'resolved', 'read', 'ACTIVE']).toContain(item.status);
       expect(typeof item.createdAt).toBe('number');
       expect(item.createdAt).toBeGreaterThan(0);
     });
@@ -639,3 +596,30 @@ describe('Unit Tests: Unhydrated-to-Live Telemetry Contract & Chart Series Bound
 });
 
 
+
+ describe('Shared alert normalization', () => {
+  const ms = 1795000000000;
+  test.each([ms, ms / 1000, String(ms), String(ms / 1000), new Date(ms).toISOString()])('parses %s', value => {
+    expect(parseAlertTimestamp(value)).toBe(ms);
+    expect(formatAlertTime(value, ms + 120000)).toBe('2m ago');
+  });
+  test.each([undefined, null, '', 'bad', 0, -1, {}, Infinity])('rejects invalid time %s', value => {
+    expect(parseAlertTimestamp(value)).toBeUndefined();
+    expect(formatAlertTime(value)).toBe('Time unavailable');
+  });
+  test.each(['active', 'read', 'resolved', 'snoozed'])('preserves card body for %s', status => {
+    const alert = normalizeAlert({ type: 'dry', body: 'Soil is dry', status });
+    expect(alert.title).toBe('Soil Needs Water');
+    expect(alert.message).toBe('Soil is dry');
+    expect(alert.body).toBe('Soil is dry');
+    expect(alert.createdAt).toBe(0);
+  });
+  test('preserves distinct fields and uses valid timestamp aliases', () => {
+    expect(normalizeAlert({ message: 'message', description: 'description', body: 'body', createdAt: 'bad', ts: ms })).toMatchObject({ message: 'message', description: 'description', body: 'body', createdAt: ms });
+  });
+  test('orders ties deterministically without mutating input', () => {
+    const input = [{ id: 'b', ts: ms }, { id: 'a', ts: ms }];
+    expect(latestAlerts(input).map(a => a.id)).toEqual(['a', 'b']);
+    expect(input[0].id).toBe('b');
+  });
+ });
