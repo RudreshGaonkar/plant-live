@@ -60,3 +60,5 @@ secrets.txt
 *.dev.vars
 *.dev.vars.*
 secrets.txt
+
+*.md
